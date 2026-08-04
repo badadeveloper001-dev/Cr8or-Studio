@@ -1,0 +1,53 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Project {
+  id          String          @id @default(cuid())
+  name        String
+  description String
+  framework   String
+  language    String
+  repository  String?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  tasks       Task[]
+  globals     GlobalMemory[]
+  locals      LocalAgentMemory[]
+}
+
+model Task {
+  id          String   @id @default(cuid())
+  projectId   String
+  agentId     String
+  title       String
+  status      String
+  confidence  Float?
+  output      String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+model GlobalMemory {
+  id          String   @id @default(cuid())
+  projectId   String
+  key         String
+  value       String
+  createdAt   DateTime @default(now())
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+model LocalAgentMemory {
+  id          String   @id @default(cuid())
+  projectId   String
+  agentId     String
+  note        String
+  createdAt   DateTime @default(now())
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
