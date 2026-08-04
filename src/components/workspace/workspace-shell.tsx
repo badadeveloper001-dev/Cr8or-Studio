@@ -151,6 +151,21 @@ type ProjectRef = {
   updatedAt?: string;
 };
 
+type GitChange = {
+  path: string;
+  status: string;
+};
+
+type GitSnapshot = {
+  branch: string;
+  changedCount: number;
+  changedFiles: GitChange[];
+  remotes: string;
+  tracking: string;
+  recentCommits: string;
+  updatedAt: number;
+};
+
 type EditorTab = {
   id: string;
   title: string;
@@ -329,6 +344,7 @@ export function WorkspaceShell() {
   const [runHistory, setRunHistory] = useState<RunHistoryItem[]>([]);
   const [currentProject, setCurrentProject] = useState<ProjectRef>({ name: "Cr8or-Studio", path: "." });
   const [recentProjects, setRecentProjects] = useState<ProjectRef[]>([]);
+  const [gitSnapshot, setGitSnapshot] = useState<GitSnapshot | null>(null);
   const [projectNameInput, setProjectNameInput] = useState("");
   const [projectPathInput, setProjectPathInput] = useState("projects/");
   const [repositoryInput, setRepositoryInput] = useState("");
@@ -416,6 +432,7 @@ export function WorkspaceShell() {
         activeSidebar: SidebarView;
         currentProject: ProjectRef;
         recentProjects: ProjectRef[];
+        gitSnapshot: GitSnapshot;
       }>;
 
       if (typeof data.prompt === "string") setPrompt(data.prompt);
@@ -431,6 +448,7 @@ export function WorkspaceShell() {
       if (data.activeSidebar) setActiveSidebar(data.activeSidebar);
       if (data.currentProject) setCurrentProject(data.currentProject);
       if (Array.isArray(data.recentProjects)) setRecentProjects(data.recentProjects.slice(0, 20));
+      if (data.gitSnapshot) setGitSnapshot(data.gitSnapshot);
     } catch {
       // ignore invalid persisted data
     }
@@ -451,6 +469,7 @@ export function WorkspaceShell() {
       activeSidebar,
       currentProject,
       recentProjects,
+      gitSnapshot,
     };
     localStorage.setItem(PERSISTENCE_KEY, JSON.stringify(payload));
   }, [
@@ -467,6 +486,7 @@ export function WorkspaceShell() {
     terminalEntries,
     currentProject,
     recentProjects,
+    gitSnapshot,
   ]);
 
   const pushChatMessage = useCallback((role: ChatRole, content: string) => {
@@ -625,7 +645,26 @@ export function WorkspaceShell() {
         body: JSON.stringify({ action: "status", projectPath: currentProject.path }),
       });
       if (!response.ok) throw new Error("Git status failed.");
-      const data = (await response.json()) as { branch?: string; changes?: string; remotes?: string };
+      const data = (await response.json()) as {
+        branch?: string;
+        changes?: string;
+        remotes?: string;
+        tracking?: string;
+        recentCommits?: string;
+        changedCount?: number;
+        changedFiles?: GitChange[];
+      };
+
+      setGitSnapshot({
+        branch: data.branch ?? "unknown",
+        changedCount: data.changedCount ?? 0,
+        changedFiles: data.changedFiles ?? [],
+        remotes: data.remotes ?? "",
+        tracking: data.tracking ?? "",
+        recentCommits: data.recentCommits ?? "",
+        updatedAt: Date.now(),
+      });
+
       appendTerminal(`git branch: ${data.branch ?? "unknown"}`);
       appendTerminal(data.changes || "no local changes");
       if (data.remotes) appendTerminal(data.remotes);
@@ -685,6 +724,11 @@ export function WorkspaceShell() {
       setIsGitBusy(false);
     }
   }, [appendTerminal, currentProject.path]);
+
+  useEffect(() => {
+    if (activeSidebar !== "source-control") return;
+    void runGitStatus();
+  }, [activeSidebar, currentProject.path, runGitStatus]);
 
   const runOrchestration = useCallback(async (nextPrompt?: string, source: "manual" | "chat" = "manual") => {
     if (isRunning) {
@@ -1352,24 +1396,54 @@ export function WorkspaceShell() {
 
           {activeSidebar === "source-control" ? (
             <div className="space-y-2 p-3 text-xs text-[#cccccc]">
-              <p className="font-medium">Run History</p>
-              {runHistory.length === 0 ? (
-                <p className="text-[#9f9f9f]">No runs captured yet.</p>
+              <div className="flex items-center justify-between">
+                <p className="font-medium">GitHub Activity</p>
+                <Button className="h-6 px-2 text-[10px]" onClick={() => void runGitStatus()} disabled={isGitBusy}>
+                  {isGitBusy ? "Refreshing..." : "Refresh"}
+                </Button>
+              </div>
+
+              <div className="rounded border border-[#353535] bg-[#2a2a2a] p-2">
+                <p className="text-[11px] text-[#d4d4d4]">Branch: {gitSnapshot?.branch || "unknown"}</p>
+                <p className="text-[10px] text-[#8f8f8f]">Changes: {gitSnapshot?.changedCount ?? 0}</p>
+                {gitSnapshot?.updatedAt ? (
+                  <p className="text-[10px] text-[#6f6f6f]">Updated: {new Date(gitSnapshot.updatedAt).toLocaleTimeString()}</p>
+                ) : null}
+              </div>
+
+              {gitSnapshot?.changedFiles && gitSnapshot.changedFiles.length > 0 ? (
+                <div className="space-y-1">
+                  {gitSnapshot.changedFiles.slice(0, 12).map((change) => (
+                    <div key={`${change.status}-${change.path}`} className="rounded border border-[#343434] bg-[#232323] px-2 py-1">
+                      <p className="truncate text-[11px] text-[#cccccc]">{change.path}</p>
+                      <p className="text-[10px] text-[#8f8f8f]">status: {change.status}</p>
+                    </div>
+                  ))}
+                </div>
               ) : (
-                runHistory.slice(0, 8).map((item) => (
-                  <button
-                    key={item.id}
-                    type="button"
-                    className="block w-full rounded border border-[#353535] bg-[#2a2a2a] px-2 py-1.5 text-left hover:bg-[#323232]"
-                    onClick={() => replayRun(item)}
-                  >
-                    <p className="truncate text-[11px] text-[#d4d4d4]">{item.prompt}</p>
-                    <p className="text-[10px] text-[#8f8f8f]">
-                      {item.status} · {Math.round(item.durationMs / 100) / 10}s · {item.completedAgents}/{item.totalAgents} agents
-                    </p>
-                  </button>
-                ))
+                <p className="text-[11px] text-[#8f8f8f]">Working tree is clean.</p>
               )}
+
+              {gitSnapshot?.recentCommits ? (
+                <div className="rounded border border-[#343434] bg-[#242424] p-2">
+                  <p className="mb-1 text-[11px] text-[#d4d4d4]">Recent Commits</p>
+                  <pre className="max-h-24 overflow-auto whitespace-pre-wrap text-[10px] text-[#9f9f9f]">{gitSnapshot.recentCommits}</pre>
+                </div>
+              ) : null}
+
+              <input
+                value={gitCommitMessage}
+                onChange={(event) => setGitCommitMessage(event.target.value)}
+                placeholder="Commit message"
+                className="vscode-terminal-input"
+              />
+
+              <div className="grid grid-cols-2 gap-2">
+                <Button className="h-7 text-xs" onClick={() => void runGitStatus()} disabled={isGitBusy}>Status</Button>
+                <Button className="h-7 text-xs" onClick={() => void runCommitPush()} disabled={isGitBusy}>Commit + Push</Button>
+              </div>
+
+              <Button className="h-7 w-full text-xs" onClick={() => void runDeploy()} disabled={isGitBusy}>Deploy Current Project</Button>
             </div>
           ) : null}
 

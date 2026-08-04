@@ -9,6 +9,23 @@ const bodySchema = z.object({
   message: z.string().optional(),
 });
 
+type GitChange = {
+  path: string;
+  status: string;
+};
+
+function parseChanges(raw: string): GitChange[] {
+  return raw
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter(Boolean)
+    .map((line) => {
+      const status = line.slice(0, 2).trim() || "?";
+      const path = line.slice(3).trim();
+      return { path, status };
+    });
+}
+
 function safeCwd(projectPath: string): string | null {
   const safePath = sanitizeWorkspacePath(projectPath === "." ? "" : projectPath);
   if (projectPath === ".") {
@@ -33,16 +50,24 @@ export async function POST(request: NextRequest) {
     }
 
     if (payload.action === "status") {
-      const [branch, status, remote] = await Promise.all([
+      const [branch, status, remote, tracking, recentCommits] = await Promise.all([
         runShell("git branch --show-current", cwd),
         runShell("git status --short", cwd),
         runShell("git remote -v", cwd),
+        runShell("git status --porcelain=2 --branch | head -n 2", cwd),
+        runShell("git --no-pager log --oneline -n 5", cwd),
       ]);
+
+      const changeList = parseChanges(status.stdout);
 
       return NextResponse.json(
         {
           branch: branch.stdout,
           changes: status.stdout,
+          changedFiles: changeList,
+          changedCount: changeList.length,
+          tracking: tracking.stdout,
+          recentCommits: recentCommits.stdout,
           remotes: remote.stdout,
         },
         { status: 200 },
