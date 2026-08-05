@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/db/prisma";
+import { errorResponse, internalErrorResponse } from "@/lib/http/api-response";
+import { withRouteMetrics } from "@/lib/observability/sli";
+import { authorizeRoute } from "@/lib/security/authorization";
 
 const createSchema = z.object({
   name: z.string().min(2).max(100),
@@ -10,7 +13,13 @@ const createSchema = z.object({
   repository: z.string().optional(),
 });
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  return withRouteMetrics("api/projects:get", async (_request: NextRequest, { requestId }) => {
+  const auth = await authorizeRoute(request, { route: "api/projects:get", minRole: "viewer", requestId });
+  if (!auth.ok) {
+    return auth.response;
+  }
+
   try {
     const projects = await prisma.project.findMany({
       orderBy: { createdAt: "desc" },
@@ -18,11 +27,18 @@ export async function GET() {
     });
     return NextResponse.json(projects);
   } catch {
-    return NextResponse.json({ message: "Failed to list projects." }, { status: 500 });
+    return internalErrorResponse("Failed to list projects.", requestId);
   }
+  })(request);
 }
 
 export async function POST(request: NextRequest) {
+  return withRouteMetrics("api/projects:post", async (request: NextRequest, { requestId }) => {
+  const auth = await authorizeRoute(request, { route: "api/projects:post", minRole: "maintainer", requestId });
+  if (!auth.ok) {
+    return auth.response;
+  }
+
   try {
     const raw = await request.json();
     const data = createSchema.parse(raw);
@@ -30,8 +46,15 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(project, { status: 201 });
   } catch (err) {
     if (err instanceof z.ZodError) {
-      return NextResponse.json({ message: "Invalid project data.", issues: err.issues }, { status: 400 });
+      return errorResponse({
+        status: 400,
+        code: "INVALID_REQUEST",
+        message: "Invalid project data.",
+        details: err.issues,
+        requestId,
+      });
     }
-    return NextResponse.json({ message: "Failed to create project." }, { status: 500 });
+    return internalErrorResponse("Failed to create project.", requestId);
   }
+  })(request);
 }

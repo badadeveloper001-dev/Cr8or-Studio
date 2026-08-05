@@ -1,9 +1,10 @@
 import { createClient } from "@supabase/supabase-js";
-
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+import { getSecret } from "@/lib/security/secrets";
 
 export function getSupabaseClient() {
+  const supabaseUrl = getSecret("NEXT_PUBLIC_SUPABASE_URL");
+  const supabaseAnonKey = getSecret("NEXT_PUBLIC_SUPABASE_ANON_KEY");
+
   if (!supabaseUrl || !supabaseAnonKey) {
     throw new Error("Supabase environment variables are not configured.");
   }

@@ -92,3 +92,8 @@ npm run dev
 3. Add real-time streaming over Server-Sent Events or WebSockets.
 4. Add authentication and per-user multi-project isolation with Supabase Auth.
 5. Add Git integration, deployment recipes, and autonomous long-running task mode.
+
+## Delivery Roadmap
+
+- Milestone program: docs/workspace-milestones.md
+- Execution tracker: docs/milestone-tracker.md

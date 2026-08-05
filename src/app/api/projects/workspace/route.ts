@@ -4,13 +4,20 @@ import { promises as fs } from "node:fs";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
-import { PROJECTS_ROOT, resolveWorkspacePath, runShell, sanitizeWorkspacePath, WORKSPACE_ROOT } from "@/lib/workspace/shell";
+import { errorResponse, internalErrorResponse } from "@/lib/http/api-response";
+import { withRouteMetrics } from "@/lib/observability/sli";
+import { authorizeRoute } from "@/lib/security/authorization";
+import { evaluatePolicyGuard } from "@/lib/security/policy";
+import { runSandboxedCommand, SandboxViolationError } from "@/lib/security/sandbox";
+import { PROJECTS_ROOT, resolveWorkspacePath, sanitizeWorkspacePath, WORKSPACE_ROOT } from "@/lib/workspace/shell";
 
 const bodySchema = z.object({
   action: z.enum(["create", "open", "clone", "recent"]),
   name: z.string().min(2).max(120).optional(),
   path: z.string().optional(),
   repositoryUrl: z.string().url().optional(),
+  dryRun: z.boolean().optional(),
+  approvalId: z.string().uuid().optional(),
 });
 
 function slugify(name: string): string {
@@ -54,10 +61,22 @@ async function listFiles(projectAbsPath: string) {
 }
 
 export async function POST(request: NextRequest) {
+  return withRouteMetrics("api/projects/workspace", async (request: NextRequest, { requestId }) => {
   try {
     await fs.mkdir(PROJECTS_ROOT, { recursive: true });
     const raw = await request.json();
     const payload = bodySchema.parse(raw);
+
+    const minRole = payload.action === "open" || payload.action === "recent" ? "viewer" : "maintainer";
+    const auth = await authorizeRoute(request, {
+      route: "api/projects/workspace",
+      minRole,
+      requestId,
+      requireWorkspaceOwnership: payload.action !== "recent",
+    });
+    if (!auth.ok) {
+      return auth.response;
+    }
 
     if (payload.action === "recent") {
       const projects = await readRecentProjects();
@@ -66,14 +85,48 @@ export async function POST(request: NextRequest) {
 
     if (payload.action === "create") {
       if (!payload.name) {
-        return NextResponse.json({ message: "Project name is required." }, { status: 400 });
+        return errorResponse({ status: 400, code: "INVALID_REQUEST", message: "Project name is required.", requestId });
       }
+
       const slug = slugify(payload.name);
       const relPath = path.join("projects", slug).replace(/\\/g, "/");
+      const preview = {
+        action: "project.create",
+        name: payload.name,
+        path: relPath,
+      };
+
+      if (payload.dryRun) {
+        return NextResponse.json({ dryRun: true, preview }, { status: 200 });
+      }
+
+      const policy = evaluatePolicyGuard({
+        action: "project.create",
+        requestId,
+        actorId: auth.session.userId,
+        actorRole: auth.session.role,
+        approvalId: payload.approvalId,
+      });
+      if (!policy.allowed) {
+        return NextResponse.json(
+          {
+            ok: false,
+            message: policy.reason,
+            requiresApproval: policy.approvalRequired,
+            policy: {
+              profile: policy.profile,
+              risk: policy.risk,
+              action: "project.create",
+            },
+            preview,
+          },
+          { status: 409 },
+        );
+      }
       const projectPath = resolveWorkspacePath(relPath);
 
       if (!projectPath) {
-        return NextResponse.json({ message: "Invalid project path." }, { status: 400 });
+        return errorResponse({ status: 400, code: "INVALID_REQUEST", message: "Invalid project path.", requestId });
       }
 
       await fs.mkdir(projectPath, { recursive: true });
@@ -95,16 +148,16 @@ export async function POST(request: NextRequest) {
     if (payload.action === "open") {
       const safe = sanitizeWorkspacePath(payload.path ?? "");
       if (!safe) {
-        return NextResponse.json({ message: "Invalid project path." }, { status: 400 });
+        return errorResponse({ status: 400, code: "INVALID_REQUEST", message: "Invalid project path.", requestId });
       }
       const projectPath = resolveWorkspacePath(safe);
       if (!projectPath) {
-        return NextResponse.json({ message: "Invalid project path." }, { status: 400 });
+        return errorResponse({ status: 400, code: "INVALID_REQUEST", message: "Invalid project path.", requestId });
       }
 
       const stat = await fs.stat(projectPath);
       if (!stat.isDirectory()) {
-        return NextResponse.json({ message: "Project path is not a directory." }, { status: 400 });
+        return errorResponse({ status: 400, code: "INVALID_REQUEST", message: "Project path is not a directory.", requestId });
       }
 
       return NextResponse.json(
@@ -121,25 +174,69 @@ export async function POST(request: NextRequest) {
 
     if (payload.action === "clone") {
       if (!payload.repositoryUrl) {
-        return NextResponse.json({ message: "Repository URL is required." }, { status: 400 });
+        return errorResponse({ status: 400, code: "INVALID_REQUEST", message: "Repository URL is required.", requestId });
       }
 
       const repoName = payload.repositoryUrl.split("/").pop()?.replace(/\.git$/, "") || "project";
       const safeName = slugify(payload.name || repoName || "project");
       const relPath = path.join("projects", safeName).replace(/\\/g, "/");
+      const preview = {
+        action: "project.clone",
+        repositoryUrl: payload.repositoryUrl,
+        path: relPath,
+      };
+
+      if (payload.dryRun) {
+        return NextResponse.json({ dryRun: true, preview }, { status: 200 });
+      }
+
+      const policy = evaluatePolicyGuard({
+        action: "project.clone",
+        requestId,
+        actorId: auth.session.userId,
+        actorRole: auth.session.role,
+        approvalId: payload.approvalId,
+      });
+      if (!policy.allowed) {
+        return NextResponse.json(
+          {
+            ok: false,
+            message: policy.reason,
+            requiresApproval: policy.approvalRequired,
+            policy: {
+              profile: policy.profile,
+              risk: policy.risk,
+              action: "project.clone",
+            },
+            preview,
+          },
+          { status: 409 },
+        );
+      }
+
       const projectPath = resolveWorkspacePath(relPath);
       if (!projectPath) {
-        return NextResponse.json({ message: "Invalid clone destination." }, { status: 400 });
+        return errorResponse({ status: 400, code: "INVALID_REQUEST", message: "Invalid clone destination.", requestId });
       }
 
       try {
         await fs.stat(projectPath);
-        return NextResponse.json({ message: "Destination already exists." }, { status: 409 });
+        return errorResponse({ status: 409, code: "CONFLICT", message: "Destination already exists.", requestId });
       } catch {
         // expected if folder does not exist
       }
 
-      await runShell(`git clone ${payload.repositoryUrl} ${projectPath}`, WORKSPACE_ROOT);
+      await runSandboxedCommand({
+        command: `git clone ${payload.repositoryUrl} ${projectPath}`,
+        cwd: WORKSPACE_ROOT,
+        workspaceId: relPath,
+        route: "api/projects/workspace:clone",
+        actorId: auth.session.userId,
+        actorRole: auth.session.role,
+        requestId,
+        allowedRoots: [WORKSPACE_ROOT],
+        allowedCommands: [{ kind: "prefix", value: "git clone " }],
+      });
 
       return NextResponse.json(
         {
@@ -153,11 +250,26 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    return NextResponse.json({ message: "Unsupported action." }, { status: 400 });
+    return errorResponse({ status: 400, code: "INVALID_REQUEST", message: "Unsupported action.", requestId });
   } catch (error) {
-    if (error instanceof z.ZodError) {
-      return NextResponse.json({ message: "Invalid request payload.", issues: error.issues }, { status: 400 });
+    if (error instanceof SandboxViolationError) {
+      return errorResponse({
+        status: error.status,
+        code: "FORBIDDEN",
+        message: error.message,
+        requestId,
+      });
     }
-    return NextResponse.json({ message: "Workspace project operation failed." }, { status: 500 });
+    if (error instanceof z.ZodError) {
+      return errorResponse({
+        status: 400,
+        code: "INVALID_REQUEST",
+        message: "Invalid request payload.",
+        details: error.issues,
+        requestId,
+      });
+    }
+    return internalErrorResponse("Workspace project operation failed.", requestId);
   }
+  })(request);
 }

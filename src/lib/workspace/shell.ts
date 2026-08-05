@@ -1,6 +1,7 @@
 import path from "node:path";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
+import { redactText } from "@/lib/security/redaction";
 
 const execAsync = promisify(exec);
 
@@ -29,16 +30,29 @@ export function resolveWorkspacePath(input: string): string | null {
   return absolutePath;
 }
 
-export async function runShell(command: string, cwd: string) {
+type RunShellOptions = {
+  envOverrides?: Record<string, string | undefined>;
+  redactValues?: string[];
+  timeoutMs?: number;
+  signal?: AbortSignal;
+};
+
+export async function runShell(command: string, cwd: string, options?: RunShellOptions) {
+  const env = {
+    ...process.env,
+    ...(options?.envOverrides ?? {}),
+  };
+
   const { stdout, stderr } = await execAsync(command, {
     cwd,
-    env: process.env,
-    timeout: 120000,
+    env,
+    timeout: options?.timeoutMs ?? 120000,
     maxBuffer: 1024 * 1024 * 4,
+    signal: options?.signal,
   });
 
   return {
-    stdout: stdout.trim(),
-    stderr: stderr.trim(),
+    stdout: redactText(stdout.trim(), options?.redactValues ?? []),
+    stderr: redactText(stderr.trim(), options?.redactValues ?? []),
   };
 }

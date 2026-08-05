@@ -1,6 +1,8 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { generateText, LanguageModel } from "ai";
+import { withRetry } from "@/lib/reliability/retry";
+import { getSecret } from "@/lib/security/secrets";
 
 export type LLMProvider = "openai" | "anthropic";
 
@@ -8,10 +10,6 @@ export interface LLMConfig {
   provider: LLMProvider;
   model: string;
   maxTokens: number;
-}
-
-function isUsableKey(value: string | undefined): value is string {
-  return Boolean(value && value.trim().length > 0 && !value.includes("..."));
 }
 
 export function getDefaultLLMConfig(): LLMConfig {
@@ -29,14 +27,22 @@ export function getDefaultLLMConfig(): LLMConfig {
 
 function getModel(config: LLMConfig): LanguageModel {
   if (config.provider === "anthropic") {
+    const apiKey = getSecret("ANTHROPIC_API_KEY");
+    if (!apiKey) {
+      throw new Error("Missing Anthropic API key.");
+    }
     const anthropic = createAnthropic({
-      apiKey: process.env.ANTHROPIC_API_KEY,
+      apiKey,
     });
     return anthropic(config.model);
   }
 
+  const apiKey = getSecret("OPENAI_API_KEY");
+  if (!apiKey) {
+    throw new Error("Missing OpenAI API key.");
+  }
   const openai = createOpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
+    apiKey,
   });
   return openai(config.model);
 }
@@ -50,8 +56,8 @@ export async function runAgentLLM(
 
   const hasKey =
     resolved.provider === "anthropic"
-      ? isUsableKey(process.env.ANTHROPIC_API_KEY)
-      : isUsableKey(process.env.OPENAI_API_KEY);
+      ? Boolean(getSecret("ANTHROPIC_API_KEY"))
+      : Boolean(getSecret("OPENAI_API_KEY"));
 
   if (!hasKey) {
     // Return a structured stub so the app remains functional without a key
@@ -66,12 +72,25 @@ export async function runAgentLLM(
   }
 
   const model = getModel(resolved);
-  const { text } = await generateText({
-    model,
-    system: systemPrompt,
-    prompt: userMessage,
-    maxOutputTokens: resolved.maxTokens,
-  });
+  const { text } = await withRetry(
+    async () =>
+      generateText({
+        model,
+        system: systemPrompt,
+        prompt: userMessage,
+        maxOutputTokens: resolved.maxTokens,
+      }),
+    {
+      retries: 2,
+      minDelayMs: 200,
+      maxDelayMs: 1600,
+      shouldRetry: (error) => {
+        if (!(error instanceof Error)) return false;
+        const msg = error.message.toLowerCase();
+        return msg.includes("timeout") || msg.includes("rate") || msg.includes("tempor") || msg.includes("503");
+      },
+    },
+  );
 
   return text;
 }

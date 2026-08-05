@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
 import { runAgentLLM } from "@/lib/agents/llm";
+import { errorResponse, internalErrorResponse } from "@/lib/http/api-response";
+import { withRouteMetrics } from "@/lib/observability/sli";
+import { authorizeRoute } from "@/lib/security/authorization";
 
 const chatBodySchema = z.object({
   message: z.string().min(1),
@@ -101,6 +104,12 @@ function buildChatPrompt(history: Array<{ role: "user" | "assistant"; content: s
 }
 
 export async function POST(request: NextRequest) {
+  return withRouteMetrics("api/chat/main", async (request: NextRequest, { requestId }) => {
+  const auth = await authorizeRoute(request, { route: "api/chat/main", minRole: "viewer", requestId });
+  if (!auth.ok) {
+    return auth.response;
+  }
+
   try {
     const raw = await request.json();
     const payload = chatBodySchema.parse(raw);
@@ -121,20 +130,16 @@ export async function POST(request: NextRequest) {
     );
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return NextResponse.json(
-        {
-          message: "Invalid chat request payload.",
-          issues: error.issues,
-        },
-        { status: 400 },
-      );
+      return errorResponse({
+        status: 400,
+        code: "INVALID_REQUEST",
+        message: "Invalid chat request payload.",
+        details: error.issues,
+        requestId,
+      });
     }
 
-    return NextResponse.json(
-      {
-        message: "Failed to generate main agent reply.",
-      },
-      { status: 500 },
-    );
+    return internalErrorResponse("Failed to generate main agent reply.", requestId);
   }
+  })(request);
 }

@@ -138,6 +138,14 @@ type PendingDelegation = {
   response: string;
 };
 
+type CommandItem = {
+  id: string;
+  label: string;
+  keywords: string[];
+  hint?: string;
+  run: () => void;
+};
+
 type LeadInsights = {
   confidence: number;
   risks: string[];
@@ -187,6 +195,50 @@ type GithubContentItem = {
   sha: string;
 };
 
+type PolicyProfile = "strict" | "balanced" | "autonomous";
+
+type RiskAction =
+  | "files.write"
+  | "git.commit-push"
+  | "github.write"
+  | "deploy.vercel"
+  | "project.create"
+  | "project.clone";
+
+type ApprovalRecord = {
+  id: string;
+  action: RiskAction;
+  title: string;
+  preview: string;
+  requestedBy: string;
+  requestedRole: string;
+  requestedAt: string;
+  status: "pending" | "approved" | "denied";
+  decidedAt?: string;
+  decidedBy?: string;
+  reason?: string;
+  expiresAt: string;
+  consumedAt?: string;
+};
+
+type SecretReadiness = {
+  provider: string;
+  checks: {
+    ai: boolean;
+    openai: boolean;
+    anthropic: boolean;
+    github: boolean;
+    vercel: boolean;
+    supabase: boolean;
+  };
+  missing: {
+    ai: string[];
+    github: string[];
+    vercel: string[];
+    supabase: string[];
+  };
+};
+
 type EditorTab = {
   id: string;
   title: string;
@@ -201,6 +253,10 @@ type ExplorerNode = {
 };
 
 const PERSISTENCE_KEY = "cr8or-studio.workspace.v3";
+const ONBOARDING_KEY = "cr8or-studio.onboarding.completed.v1";
+const MAX_TIMELINE_RENDER = 30;
+const MAX_OUTPUT_RENDER = 40;
+const MAX_TERMINAL_ENTRIES_RENDER = 240;
 const MARKDOWN_EXTENSIONS = [".md", ".markdown", ".mdx"];
 const RISK_TERMS = ["risk", "blocker", "uncertain", "unknown", "security", "failure", "todo", "gap"];
 const LANGUAGE_BY_EXTENSION: Record<string, string> = {
@@ -352,6 +408,8 @@ export function WorkspaceShell() {
   const [activeTabId, setActiveTabId] = useState("cr8or-ai.chat");
   const [isPaletteOpen, setIsPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
+  const [paletteIndex, setPaletteIndex] = useState(0);
+  const [paletteRecentIds, setPaletteRecentIds] = useState<string[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [isChatting, setIsChatting] = useState(false);
   const [pendingDelegation, setPendingDelegation] = useState<PendingDelegation | null>(null);
@@ -366,6 +424,10 @@ export function WorkspaceShell() {
   const [currentProject, setCurrentProject] = useState<ProjectRef>({ name: "Cr8or-Studio", path: "." });
   const [recentProjects, setRecentProjects] = useState<ProjectRef[]>([]);
   const [gitSnapshot, setGitSnapshot] = useState<GitSnapshot | null>(null);
+  const [selectedDiffPath, setSelectedDiffPath] = useState("");
+  const [diffPreview, setDiffPreview] = useState("");
+  const [stagedDiffPreview, setStagedDiffPreview] = useState("");
+  const [isDiffBusy, setIsDiffBusy] = useState(false);
   const [githubRepos, setGithubRepos] = useState<GithubRepoSummary[]>([]);
   const [githubBranches, setGithubBranches] = useState<GithubBranchSummary[]>([]);
   const [githubContents, setGithubContents] = useState<GithubContentItem[]>([]);
@@ -385,6 +447,15 @@ export function WorkspaceShell() {
   const [githubApiStatus, setGithubApiStatus] = useState("");
   const [githubChecksSummary, setGithubChecksSummary] = useState("");
   const [isGithubApiBusy, setIsGithubApiBusy] = useState(false);
+  const [secretReadiness, setSecretReadiness] = useState<SecretReadiness | null>(null);
+  const [secretReadinessStatus, setSecretReadinessStatus] = useState("");
+  const [isSecretReadinessBusy, setIsSecretReadinessBusy] = useState(false);
+  const [policyProfile, setPolicyProfile] = useState<PolicyProfile>("balanced");
+  const [approvals, setApprovals] = useState<ApprovalRecord[]>([]);
+  const [isApprovalsBusy, setIsApprovalsBusy] = useState(false);
+  const [approvalStatus, setApprovalStatus] = useState("");
+  const [approvedActionIds, setApprovedActionIds] = useState<Partial<Record<RiskAction, string>>>({});
+  const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
   const [projectNameInput, setProjectNameInput] = useState("");
   const [projectPathInput, setProjectPathInput] = useState("projects/");
   const [repositoryInput, setRepositoryInput] = useState("");
@@ -446,6 +517,7 @@ export function WorkspaceShell() {
   useEffect(() => {
     if (isPaletteOpen) {
       setTimeout(() => paletteInputRef.current?.focus(), 0);
+      setPaletteIndex(0);
     }
   }, [isPaletteOpen]);
 
@@ -453,6 +525,17 @@ export function WorkspaceShell() {
     if (!chatScrollRef.current) return;
     chatScrollRef.current.scrollTo({ top: chatScrollRef.current.scrollHeight, behavior: "smooth" });
   }, [chatMessages]);
+
+  useEffect(() => {
+    try {
+      const done = localStorage.getItem(ONBOARDING_KEY);
+      if (!done) {
+        setIsOnboardingOpen(true);
+      }
+    } catch {
+      setIsOnboardingOpen(true);
+    }
+  }, []);
 
   useEffect(() => {
     try {
@@ -585,6 +668,124 @@ export function WorkspaceShell() {
     }
   }, []);
 
+  const loadPolicyProfile = useCallback(async () => {
+    try {
+      const response = await fetch("/api/security/policy", { method: "GET" });
+      if (!response.ok) return;
+      const data = (await response.json()) as { profile?: PolicyProfile };
+      if (data.profile) {
+        setPolicyProfile(data.profile);
+      }
+    } catch {
+      // no-op
+    }
+  }, []);
+
+  const updatePolicyProfile = useCallback(async (profile: PolicyProfile) => {
+    setIsApprovalsBusy(true);
+    try {
+      const response = await fetch("/api/security/policy", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profile }),
+      });
+      const data = (await response.json()) as { message?: string; profile?: PolicyProfile };
+      if (!response.ok || !data.profile) {
+        throw new Error(data.message || "Failed to update policy profile.");
+      }
+      setPolicyProfile(data.profile);
+      setApprovalStatus(`Policy profile set to ${data.profile}.`);
+    } catch (err) {
+      setApprovalStatus(err instanceof Error ? err.message : "Failed to update policy profile.");
+    } finally {
+      setIsApprovalsBusy(false);
+    }
+  }, []);
+
+  const loadApprovals = useCallback(async () => {
+    setIsApprovalsBusy(true);
+    try {
+      const response = await fetch("/api/security/approvals?limit=50", { method: "GET" });
+      const data = (await response.json()) as { approvals?: ApprovalRecord[]; message?: string };
+      if (!response.ok) {
+        throw new Error(data.message || "Failed to load approvals.");
+      }
+      setApprovals(data.approvals ?? []);
+    } catch (err) {
+      setApprovalStatus(err instanceof Error ? err.message : "Failed to load approvals.");
+    } finally {
+      setIsApprovalsBusy(false);
+    }
+  }, []);
+
+  const requestApproval = useCallback(async (action: RiskAction, title: string, preview: unknown) => {
+    const previewText = typeof preview === "string" ? preview : JSON.stringify(preview, null, 2);
+    const response = await fetch("/api/security/approvals", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        intent: "request",
+        payload: {
+          action,
+          title,
+          preview: previewText,
+        },
+      }),
+    });
+
+    const data = (await response.json()) as { message?: string; approval?: ApprovalRecord };
+    if (!response.ok || !data.approval) {
+      throw new Error(data.message || "Approval request failed.");
+    }
+
+    setApprovalStatus(`Approval requested: ${data.approval.id.slice(0, 8)} for ${action}`);
+    setApprovals((prev) => [data.approval as ApprovalRecord, ...prev]);
+    return data.approval;
+  }, []);
+
+  const decideApproval = useCallback(async (record: ApprovalRecord, decision: "approved" | "denied") => {
+    setIsApprovalsBusy(true);
+    try {
+      const response = await fetch("/api/security/approvals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          intent: "decide",
+          payload: {
+            id: record.id,
+            decision,
+          },
+        }),
+      });
+      const data = (await response.json()) as { message?: string; approval?: ApprovalRecord };
+      if (!response.ok || !data.approval) {
+        throw new Error(data.message || "Failed to submit approval decision.");
+      }
+
+      setApprovals((prev) => prev.map((item) => (item.id === data.approval!.id ? data.approval! : item)));
+      if (decision === "approved") {
+        setApprovedActionIds((prev) => ({
+          ...prev,
+          [data.approval!.action]: data.approval!.id,
+        }));
+      }
+      setApprovalStatus(`${decision === "approved" ? "Approved" : "Denied"} ${record.action}.`);
+    } catch (err) {
+      setApprovalStatus(err instanceof Error ? err.message : "Failed to submit approval decision.");
+    } finally {
+      setIsApprovalsBusy(false);
+    }
+  }, []);
+
+  const handleApprovalConflict = useCallback(async (action: RiskAction, title: string, payload: Record<string, unknown>) => {
+    if (!payload.requiresApproval) {
+      throw new Error((payload.message as string) || "Operation blocked.");
+    }
+    const approval = await requestApproval(action, title, payload.preview ?? payload);
+    await loadApprovals();
+    appendTerminal(`approval requested for ${action}: ${approval.id}`);
+  }, [appendTerminal, loadApprovals, requestApproval]);
+
   useEffect(() => {
     void loadRecentProjects();
   }, [loadRecentProjects]);
@@ -597,13 +798,24 @@ export function WorkspaceShell() {
       const response = await fetch("/api/projects/workspace", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "create", name }),
+        body: JSON.stringify({
+          action: "create",
+          name,
+          approvalId: approvedActionIds["project.create"],
+        }),
       });
-      if (!response.ok) throw new Error("Unable to create project.");
-      const data = (await response.json()) as { project?: ProjectRef & { files?: Array<{ name: string; type: string }> } };
+      const data = (await response.json()) as { project?: ProjectRef & { files?: Array<{ name: string; type: string }> }; message?: string; requiresApproval?: boolean; preview?: unknown };
+      if (!response.ok) {
+        if (response.status === 409) {
+          await handleApprovalConflict("project.create", `Create project ${name}`, data as unknown as Record<string, unknown>);
+          return;
+        }
+        throw new Error(data.message || "Unable to create project.");
+      }
       if (data.project) {
         setCurrentProject({ name: data.project.name, path: data.project.path });
         appendTerminal(`Project created: ${data.project.path}`);
+        setApprovedActionIds((prev) => ({ ...prev, "project.create": undefined }));
       }
       setProjectNameInput("");
       await loadRecentProjects();
@@ -612,7 +824,7 @@ export function WorkspaceShell() {
     } finally {
       setIsProjectBusy(false);
     }
-  }, [appendTerminal, loadRecentProjects, projectNameInput]);
+  }, [appendTerminal, approvedActionIds, handleApprovalConflict, loadRecentProjects, projectNameInput]);
 
   const openProjectByPath = useCallback(async (projectPath: string) => {
     const value = projectPath.trim();
@@ -659,13 +871,24 @@ export function WorkspaceShell() {
       const response = await fetch("/api/projects/workspace", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "clone", repositoryUrl }),
+        body: JSON.stringify({
+          action: "clone",
+          repositoryUrl,
+          approvalId: approvedActionIds["project.clone"],
+        }),
       });
-      if (!response.ok) throw new Error("Clone failed.");
-      const data = (await response.json()) as { project?: ProjectRef };
+      const data = (await response.json()) as { project?: ProjectRef; message?: string; requiresApproval?: boolean; preview?: unknown };
+      if (!response.ok) {
+        if (response.status === 409) {
+          await handleApprovalConflict("project.clone", `Clone project ${repositoryUrl}`, data as unknown as Record<string, unknown>);
+          return;
+        }
+        throw new Error(data.message || "Clone failed.");
+      }
       if (data.project) {
         setCurrentProject({ name: data.project.name, path: data.project.path });
         appendTerminal(`GitHub project cloned: ${data.project.path}`);
+        setApprovedActionIds((prev) => ({ ...prev, "project.clone": undefined }));
       }
       setRepositoryInput("");
       await loadRecentProjects();
@@ -674,7 +897,7 @@ export function WorkspaceShell() {
     } finally {
       setIsProjectBusy(false);
     }
-  }, [appendTerminal, loadRecentProjects, repositoryInput]);
+  }, [appendTerminal, approvedActionIds, handleApprovalConflict, loadRecentProjects, repositoryInput]);
 
   const runGitStatus = useCallback(async () => {
     setIsGitBusy(true);
@@ -725,16 +948,114 @@ export function WorkspaceShell() {
           action: "commit-push",
           projectPath: currentProject.path,
           message: gitCommitMessage,
+          approvalId: approvedActionIds["git.commit-push"],
         }),
       });
-      if (!response.ok) throw new Error("Commit/push failed.");
-      const data = (await response.json()) as { commit?: string; push?: string };
+      const data = (await response.json()) as { commit?: string; push?: string; message?: string; requiresApproval?: boolean; preview?: unknown };
+      if (!response.ok) {
+        if (response.status === 409) {
+          await handleApprovalConflict("git.commit-push", "Commit and push current project", data as unknown as Record<string, unknown>);
+          setStatusLine("Approval requested for git push.");
+          return;
+        }
+        throw new Error(data.message || "Commit/push failed.");
+      }
       if (data.commit) appendTerminal(data.commit);
       if (data.push) appendTerminal(data.push);
       setStatusLine("Git commit/push completed.");
+      setApprovedActionIds((prev) => ({ ...prev, "git.commit-push": undefined }));
     } catch (err) {
       appendTerminal(`git error: ${err instanceof Error ? err.message : "commit/push failed"}`);
       setStatusLine("Git operation failed.");
+    } finally {
+      setIsGitBusy(false);
+    }
+  }, [appendTerminal, approvedActionIds, currentProject.path, gitCommitMessage, handleApprovalConflict]);
+
+  const loadDiffPreview = useCallback(async (filePath: string) => {
+    if (!filePath) return;
+    setIsDiffBusy(true);
+    try {
+      const response = await fetch("/api/github/ops", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "diff",
+          projectPath: currentProject.path,
+          filePath,
+        }),
+      });
+      const data = (await response.json()) as { message?: string; diff?: string; stagedDiff?: string };
+      if (!response.ok) {
+        throw new Error(data.message || "Failed to load diff preview.");
+      }
+      setSelectedDiffPath(filePath);
+      setDiffPreview(data.diff || "");
+      setStagedDiffPreview(data.stagedDiff || "");
+    } catch (err) {
+      appendTerminal(`diff error: ${err instanceof Error ? err.message : "preview failed"}`);
+    } finally {
+      setIsDiffBusy(false);
+    }
+  }, [appendTerminal, currentProject.path]);
+
+  const stageFile = useCallback(async (filePath: string, action: "stage" | "unstage") => {
+    setIsDiffBusy(true);
+    try {
+      const response = await fetch("/api/github/ops", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action,
+          projectPath: currentProject.path,
+          filePath,
+          approvalId: approvedActionIds["files.write"],
+        }),
+      });
+      const data = (await response.json()) as { message?: string; requiresApproval?: boolean; preview?: unknown; output?: string };
+      if (!response.ok) {
+        if (response.status === 409) {
+          await handleApprovalConflict(
+            "files.write",
+            `${action === "stage" ? "Stage" : "Unstage"} ${filePath}`,
+            data as unknown as Record<string, unknown>,
+          );
+          return;
+        }
+        throw new Error(data.message || `${action} failed`);
+      }
+
+      if (data.output) appendTerminal(data.output);
+      setApprovedActionIds((prev) => ({ ...prev, "files.write": undefined }));
+      await runGitStatus();
+      await loadDiffPreview(filePath);
+    } catch (err) {
+      appendTerminal(`git ${action} error: ${err instanceof Error ? err.message : "action failed"}`);
+    } finally {
+      setIsDiffBusy(false);
+    }
+  }, [appendTerminal, approvedActionIds, currentProject.path, handleApprovalConflict, loadDiffPreview, runGitStatus]);
+
+  const previewCommitPush = useCallback(async () => {
+    setIsGitBusy(true);
+    try {
+      const response = await fetch("/api/github/ops", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "commit-push",
+          projectPath: currentProject.path,
+          message: gitCommitMessage,
+          dryRun: true,
+        }),
+      });
+      const data = (await response.json()) as { preview?: unknown; message?: string };
+      if (!response.ok) {
+        throw new Error(data.message || "Failed to preview commit/push.");
+      }
+      appendTerminal(`dry-run git.commit-push:\n${JSON.stringify(data.preview ?? {}, null, 2)}`);
+    } catch (err) {
+      appendTerminal(`git preview error: ${err instanceof Error ? err.message : "preview failed"}`);
     } finally {
       setIsGitBusy(false);
     }
@@ -749,17 +1070,48 @@ export function WorkspaceShell() {
         body: JSON.stringify({
           projectPath: currentProject.path,
           strategy: "vercel",
+          approvalId: approvedActionIds["deploy.vercel"],
         }),
       });
-      const data = (await response.json()) as { logs?: string; message?: string };
+      const data = (await response.json()) as { logs?: string; message?: string; requiresApproval?: boolean; preview?: unknown };
       if (!response.ok) {
+        if (response.status === 409) {
+          await handleApprovalConflict("deploy.vercel", "Deploy current project to Vercel", data as unknown as Record<string, unknown>);
+          setStatusLine("Approval requested for deploy.");
+          return;
+        }
         throw new Error(data.message || "Deploy failed.");
       }
       appendTerminal(data.logs || "Deploy finished.");
       setStatusLine("Deploy completed.");
+      setApprovedActionIds((prev) => ({ ...prev, "deploy.vercel": undefined }));
     } catch (err) {
       appendTerminal(`deploy error: ${err instanceof Error ? err.message : "deploy failed"}`);
       setStatusLine("Deploy failed.");
+    } finally {
+      setIsGitBusy(false);
+    }
+  }, [appendTerminal, approvedActionIds, currentProject.path, handleApprovalConflict]);
+
+  const previewDeploy = useCallback(async () => {
+    setIsGitBusy(true);
+    try {
+      const response = await fetch("/api/deploy", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectPath: currentProject.path,
+          strategy: "vercel",
+          dryRun: true,
+        }),
+      });
+      const data = (await response.json()) as { preview?: unknown; message?: string };
+      if (!response.ok) {
+        throw new Error(data.message || "Failed to preview deploy.");
+      }
+      appendTerminal(`dry-run deploy.vercel:\n${JSON.stringify(data.preview ?? {}, null, 2)}`);
+    } catch (err) {
+      appendTerminal(`deploy preview error: ${err instanceof Error ? err.message : "preview failed"}`);
     } finally {
       setIsGitBusy(false);
     }
@@ -774,7 +1126,13 @@ export function WorkspaceShell() {
 
     const data = (await response.json()) as Record<string, unknown>;
     if (!response.ok) {
-      throw new Error((data.message as string) || `GitHub API error ${response.status}`);
+      const error = new Error((data.message as string) || `GitHub API error ${response.status}`) as Error & {
+        status?: number;
+        payload?: Record<string, unknown>;
+      };
+      error.status = response.status;
+      error.payload = data;
+      throw error;
     }
     return data;
   }, []);
@@ -896,18 +1254,32 @@ export function WorkspaceShell() {
         message: githubCommitMsg.trim() || "chore: update file via Cr8or Studio API",
         content: githubFileContent,
         sha: githubFileSha || undefined,
+        approvalId: approvedActionIds["github.write"],
       }) as { contentSha?: string; commitSha?: string };
       setGithubFileSha(data.contentSha ?? githubFileSha);
       setGithubApiStatus(`Saved ${pathValue} on ${branch}.`);
       appendTerminal(`github api: committed ${pathValue} (${(data.commitSha ?? "").slice(0, 7)})`);
+      setApprovedActionIds((prev) => ({ ...prev, "github.write": undefined }));
     } catch (err) {
+      if (
+        err &&
+        typeof err === "object" &&
+        "status" in err &&
+        (err as { status?: number }).status === 409 &&
+        "payload" in err
+      ) {
+        const payload = ((err as { payload?: Record<string, unknown> }).payload ?? {}) as Record<string, unknown>;
+        await handleApprovalConflict("github.write", `Save ${pathValue} on ${branch}`, payload);
+        setGithubApiStatus("Approval requested for GitHub write.");
+        return;
+      }
       const message = err instanceof Error ? err.message : "Failed to save file.";
       setGithubApiStatus(message);
       appendTerminal(`github api error: ${message}`);
     } finally {
       setIsGithubApiBusy(false);
     }
-  }, [appendTerminal, callGithubApi, githubBranch, githubCommitMsg, githubFileContent, githubFileSha, githubOwner, githubPath, githubRepo]);
+  }, [appendTerminal, approvedActionIds, callGithubApi, githubBranch, githubCommitMsg, githubFileContent, githubFileSha, githubOwner, githubPath, githubRepo, handleApprovalConflict]);
 
   const createGithubBranch = useCallback(async () => {
     const owner = githubOwner.trim();
@@ -918,20 +1290,33 @@ export function WorkspaceShell() {
 
     setIsGithubApiBusy(true);
     try {
-      await callGithubApi({ action: "create-branch", owner, repo, fromBranch, newBranch });
+      await callGithubApi({ action: "create-branch", owner, repo, fromBranch, newBranch, approvalId: approvedActionIds["github.write"] });
       setGithubBranch(newBranch);
       setGithubHeadBranch(newBranch);
       setGithubApiStatus(`Created branch ${newBranch} from ${fromBranch}.`);
       appendTerminal(`github api: created branch ${newBranch}`);
       await loadGithubBranches(owner, repo);
+      setApprovedActionIds((prev) => ({ ...prev, "github.write": undefined }));
     } catch (err) {
+      if (
+        err &&
+        typeof err === "object" &&
+        "status" in err &&
+        (err as { status?: number }).status === 409 &&
+        "payload" in err
+      ) {
+        const payload = ((err as { payload?: Record<string, unknown> }).payload ?? {}) as Record<string, unknown>;
+        await handleApprovalConflict("github.write", `Create branch ${newBranch} from ${fromBranch}`, payload);
+        setGithubApiStatus("Approval requested for GitHub branch creation.");
+        return;
+      }
       const message = err instanceof Error ? err.message : "Failed to create branch.";
       setGithubApiStatus(message);
       appendTerminal(`github api error: ${message}`);
     } finally {
       setIsGithubApiBusy(false);
     }
-  }, [appendTerminal, callGithubApi, githubBaseBranch, githubNewBranch, githubOwner, githubRepo, loadGithubBranches]);
+  }, [appendTerminal, approvedActionIds, callGithubApi, githubBaseBranch, githubNewBranch, githubOwner, githubRepo, handleApprovalConflict, loadGithubBranches]);
 
   const createGithubPr = useCallback(async () => {
     const owner = githubOwner.trim();
@@ -951,20 +1336,34 @@ export function WorkspaceShell() {
         body: githubPrBody,
         head,
         base,
+        approvalId: approvedActionIds["github.write"],
       }) as { number?: number; url?: string };
       if (data.number) {
         setGithubPrNumber(String(data.number));
       }
       setGithubApiStatus(`Created PR #${data.number ?? "?"}.`);
       appendTerminal(`github api: created PR ${data.url ?? ""}`);
+      setApprovedActionIds((prev) => ({ ...prev, "github.write": undefined }));
     } catch (err) {
+      if (
+        err &&
+        typeof err === "object" &&
+        "status" in err &&
+        (err as { status?: number }).status === 409 &&
+        "payload" in err
+      ) {
+        const payload = ((err as { payload?: Record<string, unknown> }).payload ?? {}) as Record<string, unknown>;
+        await handleApprovalConflict("github.write", `Create PR ${title}`, payload);
+        setGithubApiStatus("Approval requested for GitHub PR creation.");
+        return;
+      }
       const message = err instanceof Error ? err.message : "Failed to create PR.";
       setGithubApiStatus(message);
       appendTerminal(`github api error: ${message}`);
     } finally {
       setIsGithubApiBusy(false);
     }
-  }, [appendTerminal, callGithubApi, githubBaseBranch, githubHeadBranch, githubOwner, githubPrBody, githubPrTitle, githubRepo]);
+  }, [appendTerminal, approvedActionIds, callGithubApi, githubBaseBranch, githubHeadBranch, githubOwner, githubPrBody, githubPrTitle, githubRepo, handleApprovalConflict]);
 
   const loadPrChecks = useCallback(async () => {
     const owner = githubOwner.trim();
@@ -993,10 +1392,39 @@ export function WorkspaceShell() {
     }
   }, [appendTerminal, callGithubApi, githubOwner, githubPrNumber, githubRepo]);
 
+  const loadSecretReadiness = useCallback(async () => {
+    setIsSecretReadinessBusy(true);
+    try {
+      const response = await fetch("/api/security/readiness", { method: "GET" });
+      const data = (await response.json()) as {
+        message?: string;
+        readiness?: SecretReadiness;
+      };
+      if (!response.ok || !data.readiness) {
+        throw new Error(data.message || "Failed to load secret readiness.");
+      }
+
+      const checks = data.readiness.checks;
+      const passCount = Object.values(checks).filter(Boolean).length;
+      const total = Object.keys(checks).length;
+      setSecretReadiness(data.readiness);
+      setSecretReadinessStatus(`Secrets readiness ${passCount}/${total} ready.`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to load secret readiness.";
+      setSecretReadinessStatus(message);
+      appendTerminal(`security readiness error: ${message}`);
+    } finally {
+      setIsSecretReadinessBusy(false);
+    }
+  }, [appendTerminal]);
+
   useEffect(() => {
     if (activeSidebar !== "source-control") return;
     void runGitStatus();
-  }, [activeSidebar, currentProject.path, runGitStatus]);
+    void loadSecretReadiness();
+    void loadPolicyProfile();
+    void loadApprovals();
+  }, [activeSidebar, currentProject.path, loadApprovals, loadPolicyProfile, loadSecretReadiness, runGitStatus]);
 
   const runOrchestration = useCallback(async (nextPrompt?: string, source: "manual" | "chat" = "manual") => {
     if (isRunning) {
@@ -1249,10 +1677,11 @@ export function WorkspaceShell() {
     }
   }, [appendTerminal, chatInput, chatMessages, delegationPolicy, isChatting, isRunning, pushChatMessage, runOrchestration]);
 
-  const commandItems = [
+  const commandItems: CommandItem[] = [
     {
       id: "run-agents",
       label: "Cr8or AI: Delegate Current Task",
+      keywords: ["run", "delegate", "agents", "execute"],
       run: () => {
         setIsPaletteOpen(false);
         void runOrchestration(prompt, "manual");
@@ -1261,6 +1690,7 @@ export function WorkspaceShell() {
     {
       id: "stop-agents",
       label: "Cr8or AI: Stop Current Run",
+      keywords: ["stop", "cancel", "abort", "run"],
       run: () => {
         abortRef.current?.abort();
         setIsPaletteOpen(false);
@@ -1269,6 +1699,7 @@ export function WorkspaceShell() {
     {
       id: "toggle-explorer",
       label: showExplorer ? "View: Hide Explorer" : "View: Show Explorer",
+      keywords: ["view", "explorer", "sidebar"],
       run: () => {
         setShowExplorer((prev) => !prev);
         setIsPaletteOpen(false);
@@ -1277,6 +1708,7 @@ export function WorkspaceShell() {
     {
       id: "toggle-right",
       label: showRightPane ? "View: Hide Agent Panel" : "View: Show Agent Panel",
+      keywords: ["view", "panel", "agents", "right"],
       run: () => {
         setShowRightPane((prev) => !prev);
         setIsPaletteOpen(false);
@@ -1285,6 +1717,7 @@ export function WorkspaceShell() {
     {
       id: "toggle-bottom",
       label: showBottomPanel ? "View: Hide Bottom Panel" : "View: Show Bottom Panel",
+      keywords: ["view", "terminal", "bottom", "panel"],
       run: () => {
         setShowBottomPanel((prev) => !prev);
         setIsPaletteOpen(false);
@@ -1293,6 +1726,7 @@ export function WorkspaceShell() {
     {
       id: "open-chat",
       label: "Cr8or AI: Focus Chat",
+      keywords: ["chat", "focus", "assistant"],
       run: () => {
         setIsPaletteOpen(false);
         setActiveTabId("cr8or-ai.chat");
@@ -1303,6 +1737,7 @@ export function WorkspaceShell() {
     {
       id: "policy-auto",
       label: "Policy: Auto Delegate",
+      keywords: ["policy", "auto", "delegate"],
       run: () => {
         setDelegationPolicy("auto");
         setIsPaletteOpen(false);
@@ -1311,6 +1746,7 @@ export function WorkspaceShell() {
     {
       id: "policy-ask",
       label: "Policy: Ask Before Delegating",
+      keywords: ["policy", "ask", "approval"],
       run: () => {
         setDelegationPolicy("ask");
         setIsPaletteOpen(false);
@@ -1319,6 +1755,7 @@ export function WorkspaceShell() {
     {
       id: "policy-chat-only",
       label: "Policy: Chat Only",
+      keywords: ["policy", "chat", "only"],
       run: () => {
         setDelegationPolicy("chat-only");
         setIsPaletteOpen(false);
@@ -1327,6 +1764,7 @@ export function WorkspaceShell() {
     {
       id: "replay-last-run",
       label: "Cr8or AI: Replay Last Run",
+      keywords: ["replay", "history", "run", "retry"],
       run: () => {
         if (runHistory[0]) {
           replayRun(runHistory[0]);
@@ -1337,6 +1775,7 @@ export function WorkspaceShell() {
     {
       id: "project-recent",
       label: "Projects: Refresh Recent",
+      keywords: ["projects", "recent", "refresh"],
       run: () => {
         void loadRecentProjects();
         setIsPaletteOpen(false);
@@ -1345,6 +1784,7 @@ export function WorkspaceShell() {
     {
       id: "git-status",
       label: "GitHub: Check Status",
+      keywords: ["git", "status", "github"],
       run: () => {
         void runGitStatus();
         setIsPaletteOpen(false);
@@ -1353,6 +1793,7 @@ export function WorkspaceShell() {
     {
       id: "git-push",
       label: "GitHub: Commit and Push",
+      keywords: ["git", "push", "commit", "github"],
       run: () => {
         void runCommitPush();
         setIsPaletteOpen(false);
@@ -1361,6 +1802,7 @@ export function WorkspaceShell() {
     {
       id: "deploy-project",
       label: "Deploy: Ship Current Project",
+      keywords: ["deploy", "vercel", "ship"],
       run: () => {
         void runDeploy();
         setIsPaletteOpen(false);
@@ -1369,6 +1811,7 @@ export function WorkspaceShell() {
     {
       id: "github-api-repos",
       label: "GitHub API: Load Repositories",
+      keywords: ["github", "api", "repos", "repositories"],
       run: () => {
         void loadGithubRepos();
         setIsPaletteOpen(false);
@@ -1377,16 +1820,82 @@ export function WorkspaceShell() {
     {
       id: "github-api-branches",
       label: "GitHub API: Refresh Branches",
+      keywords: ["github", "api", "branches", "refresh"],
       run: () => {
         void loadGithubBranches();
         setIsPaletteOpen(false);
       },
     },
+    {
+      id: "onboarding",
+      label: "Workspace: Open Onboarding Checklist",
+      keywords: ["onboarding", "checklist", "workspace", "setup"],
+      hint: "Ctrl/Cmd+Shift+P",
+      run: () => {
+        setIsOnboardingOpen(true);
+        setIsPaletteOpen(false);
+      },
+    },
   ];
 
-  const filteredCommands = commandItems.filter((item) =>
-    item.label.toLowerCase().includes(paletteQuery.trim().toLowerCase()),
-  );
+  function executePaletteCommand(command: CommandItem) {
+    setPaletteRecentIds((prev) => [command.id, ...prev.filter((item) => item !== command.id)].slice(0, 8));
+    command.run();
+  }
+
+  const filteredCommands = (() => {
+    const query = paletteQuery.trim().toLowerCase();
+    const recentIndex = new Map(paletteRecentIds.map((id, index) => [id, index]));
+
+    const scored = commandItems
+      .map((item) => {
+        let score = 0;
+        const label = item.label.toLowerCase();
+        const keywordMatch = item.keywords.some((term) => term.includes(query));
+        if (!query) {
+          score = 20;
+        } else if (label.startsWith(query)) {
+          score = 100;
+        } else if (label.includes(query)) {
+          score = 80;
+        } else if (keywordMatch) {
+          score = 60;
+        }
+
+        const recentPos = recentIndex.get(item.id);
+        if (recentPos !== undefined) {
+          score += 20 - recentPos;
+        }
+
+        return { item, score };
+      })
+      .filter((entry) => entry.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .map((entry) => entry.item);
+
+    return scored;
+  })();
+
+  useEffect(() => {
+    if (filteredCommands.length === 0) {
+      setPaletteIndex(0);
+      return;
+    }
+
+    setPaletteIndex((prev) => {
+      if (prev < 0) return 0;
+      if (prev >= filteredCommands.length) return filteredCommands.length - 1;
+      return prev;
+    });
+  }, [filteredCommands]);
+
+  const visibleTimeline = useMemo(() => timeline.slice(-MAX_TIMELINE_RENDER), [timeline]);
+  const visibleOutputTimeline = useMemo(() => timeline.slice(-MAX_OUTPUT_RENDER), [timeline]);
+  const visibleTerminalEntries = useMemo(() => terminalEntries.slice(-MAX_TERMINAL_ENTRIES_RENDER), [terminalEntries]);
+
+  const hiddenTimelineCount = timeline.length - visibleTimeline.length;
+  const hiddenOutputTimelineCount = timeline.length - visibleOutputTimeline.length;
+  const hiddenTerminalEntriesCount = terminalEntries.length - visibleTerminalEntries.length;
 
   function toggleFolder(id: string) {
     setCollapsedFolders((prev) => {
@@ -1447,6 +1956,16 @@ export function WorkspaceShell() {
     void runOrchestration(item.prompt, "manual");
   }
 
+  function completeOnboarding() {
+    setIsOnboardingOpen(false);
+    try {
+      localStorage.setItem(ONBOARDING_KEY, "true");
+    } catch {
+      // no-op
+    }
+    appendTerminal("Onboarding completed.");
+  }
+
   function runTerminalCommand() {
     const raw = terminalCommand.trim();
     if (!raw) {
@@ -1456,7 +1975,7 @@ export function WorkspaceShell() {
     appendTerminal(`$ ${raw}`);
 
     if (raw === "help") {
-      appendTerminal("Commands: run, stop, status, clear, chat <text>, policy <auto|ask|chat-only>, replay last, project create <name>, project open <path>, project clone <url>, git status, git push, deploy, github repos, github branches, github read <path>, github save, github pr, github checks <number>, show explorer, hide explorer, show panel, hide panel");
+      appendTerminal("Commands: run, stop, status, clear, chat <text>, policy <auto|ask|chat-only>, replay last, retry last failed, project create <name>, project open <path>, project clone <url>, git status, git push, deploy, github repos, github branches, github read <path>, github save, github pr, github checks <number>, show explorer, hide explorer, show panel, hide panel");
       return;
     }
     if (raw === "run") {
@@ -1521,6 +2040,15 @@ export function WorkspaceShell() {
         return;
       }
       replayRun(runHistory[0]);
+      return;
+    }
+    if (raw === "retry last failed") {
+      const failed = runHistory.find((item) => item.status === "failed" || item.status === "cancelled");
+      if (!failed) {
+        appendTerminal("No failed/cancelled run available.");
+        return;
+      }
+      replayRun(failed);
       return;
     }
     if (raw.startsWith("project create ")) {
@@ -1614,10 +2142,31 @@ export function WorkspaceShell() {
   }, [activeDocument, activeTabId, isMarkdownDocument]);
 
   return (
-    <div
-      className="vscode-shell min-h-screen w-full text-[#cccccc]"
-      style={{ gridTemplateColumns: showExplorer ? "48px 260px 1fr" : "48px 1fr" }}
-    >
+    <>
+      {isOnboardingOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="w-full max-w-xl rounded-lg border border-[#3a3a3a] bg-[#1f1f1f] p-4">
+            <p className="text-sm font-semibold text-[#d4d4d4]">Welcome to Cr8or Studio</p>
+            <p className="mt-1 text-xs text-[#9f9f9f]">Complete this setup checklist to make the workspace fully operational.</p>
+            <div className="mt-3 space-y-2 text-xs text-[#c8c8c8]">
+              <p>1. Configure keys in .env.local for AI, GitHub, and Vercel.</p>
+              <p>2. Open Source Control and run Secrets Readiness check.</p>
+              <p>3. Select a policy profile: strict, balanced, or autonomous.</p>
+              <p>4. Run dry-run previews before first commit/push and deploy.</p>
+              <p>5. Review pending approvals in Approval Center.</p>
+            </div>
+            <div className="mt-4 flex gap-2">
+              <Button className="h-8 text-xs" onClick={completeOnboarding}>Complete Setup</Button>
+              <Button className="h-8 text-xs" onClick={() => setIsOnboardingOpen(false)}>Remind Me Later</Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      <div
+        className="vscode-shell min-h-screen w-full text-[#cccccc]"
+        style={{ gridTemplateColumns: showExplorer ? "48px 260px 1fr" : "48px 1fr" }}
+      >
       <aside className="vscode-activitybar">
         <button
           type="button"
@@ -1731,14 +2280,37 @@ export function WorkspaceShell() {
                 <div className="space-y-1">
                   {gitSnapshot.changedFiles.slice(0, 12).map((change) => (
                     <div key={`${change.status}-${change.path}`} className="rounded border border-[#343434] bg-[#232323] px-2 py-1">
-                      <p className="truncate text-[11px] text-[#cccccc]">{change.path}</p>
+                      <button
+                        type="button"
+                        onClick={() => void loadDiffPreview(change.path)}
+                        className="w-full truncate text-left text-[11px] text-[#cccccc] underline-offset-2 hover:underline"
+                      >
+                        {change.path}
+                      </button>
                       <p className="text-[10px] text-[#8f8f8f]">status: {change.status}</p>
+                      <div className="mt-1 grid grid-cols-2 gap-1">
+                        <Button className="h-6 text-[10px]" onClick={() => void stageFile(change.path, "stage")} disabled={isDiffBusy}>Stage</Button>
+                        <Button className="h-6 text-[10px]" onClick={() => void stageFile(change.path, "unstage")} disabled={isDiffBusy}>Unstage</Button>
+                      </div>
                     </div>
                   ))}
                 </div>
               ) : (
                 <p className="text-[11px] text-[#8f8f8f]">Working tree is clean.</p>
               )}
+
+              {selectedDiffPath ? (
+                <div className="rounded border border-[#343434] bg-[#202020] p-2">
+                  <p className="mb-1 truncate text-[11px] text-[#d4d4d4]">Diff Preview: {selectedDiffPath}</p>
+                  <pre className="max-h-28 overflow-auto whitespace-pre-wrap text-[10px] text-[#9f9f9f]">
+                    {diffPreview || "No unstaged diff."}
+                  </pre>
+                  <p className="mb-1 mt-2 text-[10px] text-[#9f9f9f]">Staged diff</p>
+                  <pre className="max-h-28 overflow-auto whitespace-pre-wrap text-[10px] text-[#9f9f9f]">
+                    {stagedDiffPreview || "No staged diff."}
+                  </pre>
+                </div>
+              ) : null}
 
               {gitSnapshot?.recentCommits ? (
                 <div className="rounded border border-[#343434] bg-[#242424] p-2">
@@ -1754,12 +2326,91 @@ export function WorkspaceShell() {
                 className="vscode-terminal-input"
               />
 
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-3 gap-2">
                 <Button className="h-7 text-xs" onClick={() => void runGitStatus()} disabled={isGitBusy}>Status</Button>
+                <Button className="h-7 text-xs" onClick={() => void previewCommitPush()} disabled={isGitBusy}>Preview</Button>
                 <Button className="h-7 text-xs" onClick={() => void runCommitPush()} disabled={isGitBusy}>Commit + Push</Button>
               </div>
 
-              <Button className="h-7 w-full text-xs" onClick={() => void runDeploy()} disabled={isGitBusy}>Deploy Current Project</Button>
+              <div className="grid grid-cols-2 gap-2">
+                <Button className="h-7 text-xs" onClick={() => void previewDeploy()} disabled={isGitBusy}>Preview Deploy</Button>
+                <Button className="h-7 text-xs" onClick={() => void runDeploy()} disabled={isGitBusy}>Deploy Current Project</Button>
+              </div>
+
+              <div className="my-2 border-t border-[#363636] pt-2" />
+
+              <div className="flex items-center justify-between">
+                <p className="font-medium">Secrets Readiness</p>
+                <Button className="h-6 px-2 text-[10px]" onClick={() => void loadSecretReadiness()} disabled={isSecretReadinessBusy}>
+                  {isSecretReadinessBusy ? "Checking..." : "Check"}
+                </Button>
+              </div>
+
+              {secretReadiness ? (
+                <div className="rounded border border-[#353535] bg-[#232323] p-2">
+                  <p className="text-[10px] text-[#9f9f9f]">AI provider: {secretReadiness.provider}</p>
+                  <div className="mt-1 grid grid-cols-2 gap-1 text-[10px]">
+                    <p className={secretReadiness.checks.ai ? "text-[#8fd18f]" : "text-[#f48771]"}>AI: {secretReadiness.checks.ai ? "ready" : "missing"}</p>
+                    <p className={secretReadiness.checks.github ? "text-[#8fd18f]" : "text-[#f48771]"}>GitHub: {secretReadiness.checks.github ? "ready" : "missing"}</p>
+                    <p className={secretReadiness.checks.vercel ? "text-[#8fd18f]" : "text-[#f48771]"}>Vercel: {secretReadiness.checks.vercel ? "ready" : "missing"}</p>
+                    <p className={secretReadiness.checks.supabase ? "text-[#8fd18f]" : "text-[#f48771]"}>Supabase: {secretReadiness.checks.supabase ? "ready" : "missing"}</p>
+                  </div>
+                  {secretReadiness.missing.ai.length > 0 || secretReadiness.missing.github.length > 0 || secretReadiness.missing.vercel.length > 0 || secretReadiness.missing.supabase.length > 0 ? (
+                    <p className="mt-1 text-[10px] text-[#f48771]">
+                      Missing: {[...secretReadiness.missing.ai, ...secretReadiness.missing.github, ...secretReadiness.missing.vercel, ...secretReadiness.missing.supabase].join(", ")}
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
+              {secretReadinessStatus ? (
+                <p className="text-[10px] text-[#8f8f8f]">{secretReadinessStatus}</p>
+              ) : null}
+
+              <div className="my-2 border-t border-[#363636] pt-2" />
+
+              <div className="flex items-center justify-between">
+                <p className="font-medium">Policy Profile</p>
+                <Button className="h-6 px-2 text-[10px]" onClick={() => void loadApprovals()} disabled={isApprovalsBusy}>
+                  {isApprovalsBusy ? "Refreshing..." : "Refresh"}
+                </Button>
+              </div>
+
+              <select
+                value={policyProfile}
+                onChange={(event) => void updatePolicyProfile(event.target.value as PolicyProfile)}
+                className="vscode-terminal-input"
+              >
+                <option value="strict">strict</option>
+                <option value="balanced">balanced</option>
+                <option value="autonomous">autonomous</option>
+              </select>
+
+              <div className="rounded border border-[#353535] bg-[#232323] p-2">
+                <p className="mb-1 text-[10px] text-[#9f9f9f]">Approval Center</p>
+                {approvals.length === 0 ? (
+                  <p className="text-[10px] text-[#8f8f8f]">No approval requests yet.</p>
+                ) : (
+                  <div className="max-h-36 space-y-1 overflow-auto">
+                    {approvals.slice(0, 20).map((approval) => (
+                      <div key={approval.id} className="rounded border border-[#3a3a3a] bg-[#1f1f1f] p-1.5">
+                        <p className="truncate text-[10px] text-[#d0d0d0]">{approval.title}</p>
+                        <p className="text-[10px] text-[#8f8f8f]">{approval.action} · {approval.status}</p>
+                        <pre className="max-h-20 overflow-auto whitespace-pre-wrap text-[9px] text-[#9f9f9f]">{approval.preview}</pre>
+                        {approval.status === "pending" ? (
+                          <div className="mt-1 grid grid-cols-2 gap-1">
+                            <Button className="h-6 text-[10px]" onClick={() => void decideApproval(approval, "approved")} disabled={isApprovalsBusy}>Approve</Button>
+                            <Button className="h-6 text-[10px]" onClick={() => void decideApproval(approval, "denied")} disabled={isApprovalsBusy}>Deny</Button>
+                          </div>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {approvalStatus ? (
+                <p className="text-[10px] text-[#8f8f8f]">{approvalStatus}</p>
+              ) : null}
 
               <div className="my-2 border-t border-[#363636] pt-2" />
 
@@ -2258,10 +2909,13 @@ export function WorkspaceShell() {
 
               <div className="vscode-panel-header">OUTPUTS</div>
               <div className="space-y-2 overflow-y-auto p-3">
+                {hiddenTimelineCount > 0 ? (
+                  <p className="text-[10px] text-[#7f7f7f]">Showing latest {visibleTimeline.length} of {timeline.length} outputs.</p>
+                ) : null}
                 {timeline.length === 0 ? (
                   <p className="text-xs text-[#6b6b6b]">Agent outputs appear here after each work package.</p>
                 ) : (
-                  timeline.map((task) => <AgentOutputPanel key={task.id} task={task} />)
+                  visibleTimeline.map((task) => <AgentOutputPanel key={task.id} task={task} />)
                 )}
               </div>
 
@@ -2329,8 +2983,11 @@ export function WorkspaceShell() {
             <div className="vscode-bottomcontent">
               {activeBottomTab === "terminal" ? (
                 <div className="space-y-2">
+                  {hiddenTerminalEntriesCount > 0 ? (
+                    <p className="text-[10px] text-[#7f7f7f]">Showing latest {visibleTerminalEntries.length} of {terminalEntries.length} terminal entries.</p>
+                  ) : null}
                   <pre className="vscode-terminal-log font-mono text-[11px] text-[#cccccc]">
-                    {terminalEntries.map((entry) => entry.text).join("\n")}
+                    {visibleTerminalEntries.map((entry) => entry.text).join("\n")}
                   </pre>
                   <div className="vscode-terminal-input-wrap">
                     <input
@@ -2355,7 +3012,10 @@ export function WorkspaceShell() {
               ) : null}
               {activeBottomTab === "output" ? (
                 <div className="space-y-1 text-[11px] text-[#cccccc]">
-                  {timeline.length === 0 ? <p>No output yet.</p> : timeline.map((task) => <p key={task.id}>[{task.agentId}] {task.status}</p>)}
+                  {hiddenOutputTimelineCount > 0 ? (
+                    <p className="text-[10px] text-[#7f7f7f]">Showing latest {visibleOutputTimeline.length} of {timeline.length} status lines.</p>
+                  ) : null}
+                  {timeline.length === 0 ? <p>No output yet.</p> : visibleOutputTimeline.map((task) => <p key={task.id}>[{task.agentId}] {task.status}</p>)}
                   {runHistory[0] ? (
                     <p className="pt-2 text-[#9f9f9f]">
                       Last run: {runHistory[0].status} · {Math.round(runHistory[0].durationMs / 100) / 10}s · ${runHistory[0].estimatedCostUsd.toFixed(4)}
@@ -2405,6 +3065,30 @@ export function WorkspaceShell() {
                 ref={paletteInputRef}
                 value={paletteQuery}
                 onChange={(event) => setPaletteQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "ArrowDown") {
+                    event.preventDefault();
+                    setPaletteIndex((prev) => Math.min(prev + 1, Math.max(filteredCommands.length - 1, 0)));
+                    return;
+                  }
+                  if (event.key === "ArrowUp") {
+                    event.preventDefault();
+                    setPaletteIndex((prev) => Math.max(prev - 1, 0));
+                    return;
+                  }
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    const selected = filteredCommands[paletteIndex] ?? filteredCommands[0];
+                    if (selected) {
+                      executePaletteCommand(selected);
+                    }
+                    return;
+                  }
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    setIsPaletteOpen(false);
+                  }
+                }}
                 placeholder="Type a command"
                 className="w-full bg-transparent text-sm text-[#cccccc] outline-none placeholder:text-[#6b6b6b]"
               />
@@ -2413,14 +3097,17 @@ export function WorkspaceShell() {
               {filteredCommands.length === 0 ? (
                 <p className="px-2 py-1.5 text-xs text-[#6b6b6b]">No commands found.</p>
               ) : (
-                filteredCommands.map((command) => (
+                filteredCommands.map((command, index) => (
                   <button
                     key={command.id}
                     type="button"
-                    onClick={command.run}
-                    className="block w-full rounded px-2 py-1.5 text-left text-xs text-[#cccccc] hover:bg-[#094771]"
+                    onClick={() => executePaletteCommand(command)}
+                    className={`block w-full rounded px-2 py-1.5 text-left text-xs text-[#cccccc] hover:bg-[#094771] ${index === paletteIndex ? "bg-[#094771]" : ""}`}
                   >
-                    {command.label}
+                    <div className="flex items-center justify-between gap-2">
+                      <span>{command.label}</span>
+                      {command.hint ? <span className="text-[10px] text-[#9f9f9f]">{command.hint}</span> : null}
+                    </div>
                   </button>
                 ))
               )}
@@ -2428,6 +3115,7 @@ export function WorkspaceShell() {
           </div>
         </div>
       ) : null}
-    </div>
+      </div>
+    </>
   );
 }

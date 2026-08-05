@@ -1,11 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
-import { resolveWorkspacePath, runShell, sanitizeWorkspacePath, WORKSPACE_ROOT } from "@/lib/workspace/shell";
+import { errorResponse, internalErrorResponse } from "@/lib/http/api-response";
+import { withRouteMetrics } from "@/lib/observability/sli";
+import { authorizeRoute } from "@/lib/security/authorization";
+import { evaluatePolicyGuard } from "@/lib/security/policy";
+import { runSandboxedCommand, SandboxViolationError } from "@/lib/security/sandbox";
+import { getSecret } from "@/lib/security/secrets";
+import { resolveWorkspacePath, sanitizeWorkspacePath, WORKSPACE_ROOT } from "@/lib/workspace/shell";
 
 const bodySchema = z.object({
   projectPath: z.string().default("."),
   strategy: z.enum(["build-only", "vercel"]).default("build-only"),
+  dryRun: z.boolean().optional(),
+  approvalId: z.string().uuid().optional(),
 });
 
 function resolveCwd(projectPath: string): string | null {
@@ -22,28 +30,107 @@ function resolveCwd(projectPath: string): string | null {
 }
 
 export async function POST(request: NextRequest) {
+  return withRouteMetrics("api/deploy", async (request: NextRequest, { requestId }) => {
+  const auth = await authorizeRoute(request, {
+    route: "api/deploy",
+    minRole: "owner",
+    requestId,
+    requireWorkspaceOwnership: true,
+  });
+  if (!auth.ok) {
+    return auth.response;
+  }
+
   try {
     const raw = await request.json();
     const payload = bodySchema.parse(raw);
 
     const cwd = resolveCwd(payload.projectPath);
     if (!cwd) {
-      return NextResponse.json({ message: "Invalid project path." }, { status: 400 });
+      return errorResponse({ status: 400, code: "INVALID_REQUEST", message: "Invalid project path.", requestId });
+    }
+
+    const deployPreview = {
+      action: "deploy.vercel",
+      cwd,
+      strategy: payload.strategy,
+      commands:
+        payload.strategy === "vercel"
+          ? ["npm run build", "npx vercel --prod --yes"]
+          : ["npm run build"],
+    };
+
+    if (payload.dryRun) {
+      return NextResponse.json({ dryRun: true, preview: deployPreview }, { status: 200 });
+    }
+
+    if (payload.strategy === "vercel") {
+      const policy = evaluatePolicyGuard({
+        action: "deploy.vercel",
+        requestId,
+        actorId: auth.session.userId,
+        actorRole: auth.session.role,
+        approvalId: payload.approvalId,
+      });
+
+      if (!policy.allowed) {
+        return NextResponse.json(
+          {
+            ok: false,
+            message: policy.reason,
+            requiresApproval: policy.approvalRequired,
+            policy: {
+              profile: policy.profile,
+              risk: policy.risk,
+              action: "deploy.vercel",
+            },
+            preview: deployPreview,
+          },
+          { status: 409 },
+        );
+      }
     }
 
     const logs: string[] = [];
-    const build = await runShell("npm run build", cwd);
+    const build = await runSandboxedCommand({
+      command: "npm run build",
+      cwd,
+      workspaceId: payload.projectPath,
+      route: "api/deploy:build",
+      actorId: auth.session.userId,
+      actorRole: auth.session.role,
+      requestId,
+      allowedRoots: [cwd],
+      allowedCommands: [{ kind: "exact", value: "npm run build" }],
+    });
     logs.push("Build complete.");
     if (build.stdout) logs.push(build.stdout);
     if (build.stderr) logs.push(build.stderr);
 
     if (payload.strategy === "vercel") {
-      const token = process.env.VERCEL_TOKEN;
+      const token = getSecret("VERCEL_TOKEN", requestId);
       if (!token) {
-        return NextResponse.json({ message: "Missing VERCEL_TOKEN for deployment." }, { status: 400 });
+        return errorResponse({
+          status: 400,
+          code: "INVALID_REQUEST",
+          message: "Missing VERCEL_TOKEN for deployment.",
+          requestId,
+        });
       }
 
-      const deploy = await runShell(`npx vercel --prod --yes --token ${token}`, cwd);
+      const deploy = await runSandboxedCommand({
+        command: "npx vercel --prod --yes",
+        cwd,
+        workspaceId: payload.projectPath,
+        route: "api/deploy:vercel",
+        actorId: auth.session.userId,
+        actorRole: auth.session.role,
+        requestId,
+        allowedRoots: [cwd],
+        allowedCommands: [{ kind: "exact", value: "npx vercel --prod --yes" }],
+        envOverrides: { VERCEL_TOKEN: token },
+        redactValues: [token],
+      });
       logs.push("Vercel deploy complete.");
       if (deploy.stdout) logs.push(deploy.stdout);
       if (deploy.stderr) logs.push(deploy.stderr);
@@ -51,9 +138,24 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ success: true, logs: logs.join("\n") }, { status: 200 });
   } catch (error) {
-    if (error instanceof z.ZodError) {
-      return NextResponse.json({ message: "Invalid deploy request.", issues: error.issues }, { status: 400 });
+    if (error instanceof SandboxViolationError) {
+      return errorResponse({
+        status: error.status,
+        code: "FORBIDDEN",
+        message: error.message,
+        requestId,
+      });
     }
-    return NextResponse.json({ message: "Deploy operation failed." }, { status: 500 });
+    if (error instanceof z.ZodError) {
+      return errorResponse({
+        status: 400,
+        code: "INVALID_REQUEST",
+        message: "Invalid deploy request.",
+        details: error.issues,
+        requestId,
+      });
+    }
+    return internalErrorResponse("Deploy operation failed.", requestId);
   }
+  })(request);
 }
