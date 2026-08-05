@@ -166,6 +166,27 @@ type GitSnapshot = {
   updatedAt: number;
 };
 
+type GithubRepoSummary = {
+  id: number;
+  name: string;
+  fullName: string;
+  owner: string;
+  private: boolean;
+  defaultBranch: string;
+};
+
+type GithubBranchSummary = {
+  name: string;
+  sha: string;
+};
+
+type GithubContentItem = {
+  type: string;
+  name: string;
+  path: string;
+  sha: string;
+};
+
 type EditorTab = {
   id: string;
   title: string;
@@ -345,6 +366,25 @@ export function WorkspaceShell() {
   const [currentProject, setCurrentProject] = useState<ProjectRef>({ name: "Cr8or-Studio", path: "." });
   const [recentProjects, setRecentProjects] = useState<ProjectRef[]>([]);
   const [gitSnapshot, setGitSnapshot] = useState<GitSnapshot | null>(null);
+  const [githubRepos, setGithubRepos] = useState<GithubRepoSummary[]>([]);
+  const [githubBranches, setGithubBranches] = useState<GithubBranchSummary[]>([]);
+  const [githubContents, setGithubContents] = useState<GithubContentItem[]>([]);
+  const [githubOwner, setGithubOwner] = useState("");
+  const [githubRepo, setGithubRepo] = useState("");
+  const [githubBranch, setGithubBranch] = useState("");
+  const [githubPath, setGithubPath] = useState("");
+  const [githubFileSha, setGithubFileSha] = useState("");
+  const [githubFileContent, setGithubFileContent] = useState("");
+  const [githubCommitMsg, setGithubCommitMsg] = useState("chore: update file via Cr8or Studio API");
+  const [githubNewBranch, setGithubNewBranch] = useState("");
+  const [githubPrTitle, setGithubPrTitle] = useState("");
+  const [githubPrBody, setGithubPrBody] = useState("");
+  const [githubBaseBranch, setGithubBaseBranch] = useState("");
+  const [githubHeadBranch, setGithubHeadBranch] = useState("");
+  const [githubPrNumber, setGithubPrNumber] = useState("");
+  const [githubApiStatus, setGithubApiStatus] = useState("");
+  const [githubChecksSummary, setGithubChecksSummary] = useState("");
+  const [isGithubApiBusy, setIsGithubApiBusy] = useState(false);
   const [projectNameInput, setProjectNameInput] = useState("");
   const [projectPathInput, setProjectPathInput] = useState("projects/");
   const [repositoryInput, setRepositoryInput] = useState("");
@@ -725,6 +765,234 @@ export function WorkspaceShell() {
     }
   }, [appendTerminal, currentProject.path]);
 
+  const callGithubApi = useCallback(async (payload: Record<string, unknown>) => {
+    const response = await fetch("/api/github/api", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    const data = (await response.json()) as Record<string, unknown>;
+    if (!response.ok) {
+      throw new Error((data.message as string) || `GitHub API error ${response.status}`);
+    }
+    return data;
+  }, []);
+
+  const loadGithubRepos = useCallback(async () => {
+    setIsGithubApiBusy(true);
+    try {
+      const data = await callGithubApi({ action: "list-repos" }) as { repos?: GithubRepoSummary[] };
+      const repos = data.repos ?? [];
+      setGithubRepos(repos);
+      setGithubApiStatus(`Loaded ${repos.length} repositories.`);
+      appendTerminal(`github api: loaded ${repos.length} repositories`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to load repositories.";
+      setGithubApiStatus(message);
+      appendTerminal(`github api error: ${message}`);
+    } finally {
+      setIsGithubApiBusy(false);
+    }
+  }, [appendTerminal, callGithubApi]);
+
+  const loadGithubBranches = useCallback(async (ownerArg?: string, repoArg?: string) => {
+    const owner = (ownerArg ?? githubOwner).trim();
+    const repo = (repoArg ?? githubRepo).trim();
+    if (!owner || !repo) return;
+
+    setIsGithubApiBusy(true);
+    try {
+      const data = await callGithubApi({ action: "list-branches", owner, repo }) as {
+        defaultBranch?: string;
+        branches?: GithubBranchSummary[];
+      };
+      const branches = data.branches ?? [];
+      const defaultBranch = data.defaultBranch ?? branches[0]?.name ?? "";
+      setGithubBranches(branches);
+      setGithubBaseBranch(defaultBranch);
+      setGithubBranch((prev) => prev || defaultBranch);
+      setGithubHeadBranch((prev) => prev || defaultBranch);
+      setGithubApiStatus(`Loaded ${branches.length} branches for ${owner}/${repo}.`);
+      appendTerminal(`github api: loaded branches for ${owner}/${repo}`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to load branches.";
+      setGithubApiStatus(message);
+      appendTerminal(`github api error: ${message}`);
+    } finally {
+      setIsGithubApiBusy(false);
+    }
+  }, [appendTerminal, callGithubApi, githubOwner, githubRepo]);
+
+  const loadGithubContents = useCallback(async (pathArg?: string) => {
+    const owner = githubOwner.trim();
+    const repo = githubRepo.trim();
+    if (!owner || !repo) return;
+
+    setIsGithubApiBusy(true);
+    try {
+      const data = await callGithubApi({
+        action: "list-contents",
+        owner,
+        repo,
+        path: (pathArg ?? githubPath).trim(),
+        ref: githubBranch.trim() || undefined,
+      }) as { items?: GithubContentItem[] };
+      setGithubContents(data.items ?? []);
+      setGithubApiStatus(`Loaded ${data.items?.length ?? 0} items.`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to load repository contents.";
+      setGithubApiStatus(message);
+      appendTerminal(`github api error: ${message}`);
+    } finally {
+      setIsGithubApiBusy(false);
+    }
+  }, [appendTerminal, callGithubApi, githubBranch, githubOwner, githubPath, githubRepo]);
+
+  const readGithubFile = useCallback(async (pathArg?: string) => {
+    const owner = githubOwner.trim();
+    const repo = githubRepo.trim();
+    const pathValue = (pathArg ?? githubPath).trim();
+    if (!owner || !repo || !pathValue) return;
+
+    setIsGithubApiBusy(true);
+    try {
+      const data = await callGithubApi({
+        action: "read-file",
+        owner,
+        repo,
+        path: pathValue,
+        ref: githubBranch.trim() || undefined,
+      }) as { content?: string; sha?: string };
+      setGithubPath(pathValue);
+      setGithubFileContent(data.content ?? "");
+      setGithubFileSha(data.sha ?? "");
+      setGithubApiStatus(`Loaded file: ${pathValue}`);
+      appendTerminal(`github api: opened ${pathValue}`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to read file.";
+      setGithubApiStatus(message);
+      appendTerminal(`github api error: ${message}`);
+    } finally {
+      setIsGithubApiBusy(false);
+    }
+  }, [appendTerminal, callGithubApi, githubBranch, githubOwner, githubPath, githubRepo]);
+
+  const saveGithubFile = useCallback(async () => {
+    const owner = githubOwner.trim();
+    const repo = githubRepo.trim();
+    const pathValue = githubPath.trim();
+    const branch = githubBranch.trim();
+    if (!owner || !repo || !pathValue || !branch) return;
+
+    setIsGithubApiBusy(true);
+    try {
+      const data = await callGithubApi({
+        action: "upsert-file",
+        owner,
+        repo,
+        path: pathValue,
+        branch,
+        message: githubCommitMsg.trim() || "chore: update file via Cr8or Studio API",
+        content: githubFileContent,
+        sha: githubFileSha || undefined,
+      }) as { contentSha?: string; commitSha?: string };
+      setGithubFileSha(data.contentSha ?? githubFileSha);
+      setGithubApiStatus(`Saved ${pathValue} on ${branch}.`);
+      appendTerminal(`github api: committed ${pathValue} (${(data.commitSha ?? "").slice(0, 7)})`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to save file.";
+      setGithubApiStatus(message);
+      appendTerminal(`github api error: ${message}`);
+    } finally {
+      setIsGithubApiBusy(false);
+    }
+  }, [appendTerminal, callGithubApi, githubBranch, githubCommitMsg, githubFileContent, githubFileSha, githubOwner, githubPath, githubRepo]);
+
+  const createGithubBranch = useCallback(async () => {
+    const owner = githubOwner.trim();
+    const repo = githubRepo.trim();
+    const fromBranch = githubBaseBranch.trim();
+    const newBranch = githubNewBranch.trim();
+    if (!owner || !repo || !fromBranch || !newBranch) return;
+
+    setIsGithubApiBusy(true);
+    try {
+      await callGithubApi({ action: "create-branch", owner, repo, fromBranch, newBranch });
+      setGithubBranch(newBranch);
+      setGithubHeadBranch(newBranch);
+      setGithubApiStatus(`Created branch ${newBranch} from ${fromBranch}.`);
+      appendTerminal(`github api: created branch ${newBranch}`);
+      await loadGithubBranches(owner, repo);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to create branch.";
+      setGithubApiStatus(message);
+      appendTerminal(`github api error: ${message}`);
+    } finally {
+      setIsGithubApiBusy(false);
+    }
+  }, [appendTerminal, callGithubApi, githubBaseBranch, githubNewBranch, githubOwner, githubRepo, loadGithubBranches]);
+
+  const createGithubPr = useCallback(async () => {
+    const owner = githubOwner.trim();
+    const repo = githubRepo.trim();
+    const title = githubPrTitle.trim();
+    const head = githubHeadBranch.trim();
+    const base = githubBaseBranch.trim();
+    if (!owner || !repo || !title || !head || !base) return;
+
+    setIsGithubApiBusy(true);
+    try {
+      const data = await callGithubApi({
+        action: "create-pr",
+        owner,
+        repo,
+        title,
+        body: githubPrBody,
+        head,
+        base,
+      }) as { number?: number; url?: string };
+      if (data.number) {
+        setGithubPrNumber(String(data.number));
+      }
+      setGithubApiStatus(`Created PR #${data.number ?? "?"}.`);
+      appendTerminal(`github api: created PR ${data.url ?? ""}`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to create PR.";
+      setGithubApiStatus(message);
+      appendTerminal(`github api error: ${message}`);
+    } finally {
+      setIsGithubApiBusy(false);
+    }
+  }, [appendTerminal, callGithubApi, githubBaseBranch, githubHeadBranch, githubOwner, githubPrBody, githubPrTitle, githubRepo]);
+
+  const loadPrChecks = useCallback(async () => {
+    const owner = githubOwner.trim();
+    const repo = githubRepo.trim();
+    const pullNumber = Number(githubPrNumber);
+    if (!owner || !repo || Number.isNaN(pullNumber) || pullNumber <= 0) return;
+
+    setIsGithubApiBusy(true);
+    try {
+      const data = await callGithubApi({ action: "pr-checks", owner, repo, pullNumber }) as {
+        combinedStatus?: string;
+        checkRuns?: Array<{ name: string; status: string; conclusion: string | null }>;
+      };
+      const runs = data.checkRuns ?? [];
+      const runSummary = runs.slice(0, 6).map((run) => `${run.name}:${run.conclusion ?? run.status}`).join(" | ");
+      const summary = `PR #${pullNumber} checks: ${data.combinedStatus ?? "unknown"}${runSummary ? ` | ${runSummary}` : ""}`;
+      setGithubChecksSummary(summary);
+      setGithubApiStatus(summary);
+      appendTerminal(`github api: ${summary}`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to load PR checks.";
+      setGithubApiStatus(message);
+      appendTerminal(`github api error: ${message}`);
+    } finally {
+      setIsGithubApiBusy(false);
+    }
+  }, [appendTerminal, callGithubApi, githubOwner, githubPrNumber, githubRepo]);
+
   useEffect(() => {
     if (activeSidebar !== "source-control") return;
     void runGitStatus();
@@ -1098,6 +1366,22 @@ export function WorkspaceShell() {
         setIsPaletteOpen(false);
       },
     },
+    {
+      id: "github-api-repos",
+      label: "GitHub API: Load Repositories",
+      run: () => {
+        void loadGithubRepos();
+        setIsPaletteOpen(false);
+      },
+    },
+    {
+      id: "github-api-branches",
+      label: "GitHub API: Refresh Branches",
+      run: () => {
+        void loadGithubBranches();
+        setIsPaletteOpen(false);
+      },
+    },
   ];
 
   const filteredCommands = commandItems.filter((item) =>
@@ -1172,7 +1456,7 @@ export function WorkspaceShell() {
     appendTerminal(`$ ${raw}`);
 
     if (raw === "help") {
-      appendTerminal("Commands: run, stop, status, clear, chat <text>, policy <auto|ask|chat-only>, replay last, project create <name>, project open <path>, project clone <url>, git status, git push, deploy, show explorer, hide explorer, show panel, hide panel");
+      appendTerminal("Commands: run, stop, status, clear, chat <text>, policy <auto|ask|chat-only>, replay last, project create <name>, project open <path>, project clone <url>, git status, git push, deploy, github repos, github branches, github read <path>, github save, github pr, github checks <number>, show explorer, hide explorer, show panel, hide panel");
       return;
     }
     if (raw === "run") {
@@ -1266,6 +1550,38 @@ export function WorkspaceShell() {
     }
     if (raw === "deploy") {
       void runDeploy();
+      return;
+    }
+    if (raw === "github repos") {
+      void loadGithubRepos();
+      return;
+    }
+    if (raw === "github branches") {
+      void loadGithubBranches();
+      return;
+    }
+    if (raw.startsWith("github read ")) {
+      const targetPath = raw.replace("github read ", "").trim();
+      if (!targetPath) {
+        appendTerminal("Usage: github read <path>");
+        return;
+      }
+      setGithubPath(targetPath);
+      void readGithubFile(targetPath);
+      return;
+    }
+    if (raw === "github save") {
+      void saveGithubFile();
+      return;
+    }
+    if (raw === "github pr") {
+      void createGithubPr();
+      return;
+    }
+    if (raw.startsWith("github checks ")) {
+      const value = raw.replace("github checks ", "").trim();
+      setGithubPrNumber(value);
+      void loadPrChecks();
       return;
     }
     appendTerminal(`Unknown command: ${raw}`);
@@ -1398,7 +1714,7 @@ export function WorkspaceShell() {
             <div className="space-y-2 p-3 text-xs text-[#cccccc]">
               <div className="flex items-center justify-between">
                 <p className="font-medium">GitHub Activity</p>
-                <Button className="h-6 px-2 text-[10px]" onClick={() => void runGitStatus()} disabled={isGitBusy}>
+                <Button className="h-6 px-2 text-[10px]" onClick={() => void runGitStatus()} disabled={isGitBusy || isGithubApiBusy}>
                   {isGitBusy ? "Refreshing..." : "Refresh"}
                 </Button>
               </div>
@@ -1444,6 +1760,197 @@ export function WorkspaceShell() {
               </div>
 
               <Button className="h-7 w-full text-xs" onClick={() => void runDeploy()} disabled={isGitBusy}>Deploy Current Project</Button>
+
+              <div className="my-2 border-t border-[#363636] pt-2" />
+
+              <div className="flex items-center justify-between">
+                <p className="font-medium">GitHub API Mode</p>
+                <Button className="h-6 px-2 text-[10px]" onClick={() => void loadGithubRepos()} disabled={isGithubApiBusy}>
+                  {isGithubApiBusy ? "Loading..." : "Load Repos"}
+                </Button>
+              </div>
+
+              <select
+                value={githubOwner && githubRepo ? `${githubOwner}/${githubRepo}` : ""}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  if (!value) return;
+                  const [owner, repo] = value.split("/");
+                  setGithubOwner(owner || "");
+                  setGithubRepo(repo || "");
+                  setGithubPath("");
+                  setGithubFileContent("");
+                  setGithubFileSha("");
+                  void loadGithubBranches(owner, repo);
+                }}
+                className="vscode-terminal-input"
+              >
+                <option value="">Select repository</option>
+                {githubRepos.map((repo) => (
+                  <option key={repo.id} value={`${repo.owner}/${repo.name}`}>
+                    {repo.fullName}{repo.private ? " (private)" : ""}
+                  </option>
+                ))}
+              </select>
+
+              <div className="grid grid-cols-2 gap-2">
+                <select
+                  value={githubBranch}
+                  onChange={(event) => {
+                    const nextBranch = event.target.value;
+                    setGithubBranch(nextBranch);
+                    setGithubHeadBranch(nextBranch);
+                  }}
+                  className="vscode-terminal-input"
+                >
+                  <option value="">Branch</option>
+                  {githubBranches.map((branch) => (
+                    <option key={branch.sha} value={branch.name}>{branch.name}</option>
+                  ))}
+                </select>
+                <Button
+                  className="h-7 text-xs"
+                  onClick={() => void loadGithubContents()}
+                  disabled={isGithubApiBusy || !githubOwner || !githubRepo}
+                >
+                  List Files
+                </Button>
+              </div>
+
+              <input
+                value={githubPath}
+                onChange={(event) => setGithubPath(event.target.value)}
+                placeholder="Path in repo (e.g. README.md)"
+                className="vscode-terminal-input"
+              />
+
+              <div className="grid grid-cols-2 gap-2">
+                <Button
+                  className="h-7 text-xs"
+                  onClick={() => void readGithubFile()}
+                  disabled={isGithubApiBusy || !githubPath.trim() || !githubOwner || !githubRepo}
+                >
+                  Read File
+                </Button>
+                <Button
+                  className="h-7 text-xs"
+                  onClick={() => void saveGithubFile()}
+                  disabled={isGithubApiBusy || !githubPath.trim() || !githubBranch.trim() || !githubOwner || !githubRepo}
+                >
+                  Save via API
+                </Button>
+              </div>
+
+              <textarea
+                value={githubFileContent}
+                onChange={(event) => setGithubFileContent(event.target.value)}
+                rows={6}
+                className="vscode-chat-input"
+                placeholder="GitHub file content appears here"
+              />
+
+              <input
+                value={githubCommitMsg}
+                onChange={(event) => setGithubCommitMsg(event.target.value)}
+                placeholder="GitHub API commit message"
+                className="vscode-terminal-input"
+              />
+
+              {githubContents.length > 0 ? (
+                <div className="rounded border border-[#353535] bg-[#232323] p-2">
+                  <p className="mb-1 text-[10px] text-[#9f9f9f]">Repository entries</p>
+                  <div className="max-h-24 overflow-auto space-y-1">
+                    {githubContents.slice(0, 20).map((item) => (
+                      <button
+                        key={`${item.path}-${item.sha}`}
+                        type="button"
+                        className="block w-full truncate rounded px-1 py-0.5 text-left text-[10px] text-[#cfcfcf] hover:bg-[#323232]"
+                        onClick={() => {
+                          setGithubPath(item.path);
+                          if (item.type === "file") {
+                            void readGithubFile(item.path);
+                          }
+                        }}
+                      >
+                        [{item.type}] {item.path}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="my-2 border-t border-[#363636] pt-2" />
+
+              <p className="font-medium">Branch & PR</p>
+              <input
+                value={githubNewBranch}
+                onChange={(event) => setGithubNewBranch(event.target.value)}
+                placeholder="New branch name"
+                className="vscode-terminal-input"
+              />
+              <div className="grid grid-cols-2 gap-2">
+                <input
+                  value={githubBaseBranch}
+                  onChange={(event) => setGithubBaseBranch(event.target.value)}
+                  placeholder="Base branch"
+                  className="vscode-terminal-input"
+                />
+                <Button
+                  className="h-7 text-xs"
+                  onClick={() => void createGithubBranch()}
+                  disabled={isGithubApiBusy || !githubNewBranch.trim() || !githubBaseBranch.trim()}
+                >
+                  Create Branch
+                </Button>
+              </div>
+
+              <input
+                value={githubPrTitle}
+                onChange={(event) => setGithubPrTitle(event.target.value)}
+                placeholder="PR title"
+                className="vscode-terminal-input"
+              />
+              <textarea
+                value={githubPrBody}
+                onChange={(event) => setGithubPrBody(event.target.value)}
+                rows={3}
+                className="vscode-chat-input"
+                placeholder="PR description"
+              />
+              <div className="grid grid-cols-2 gap-2">
+                <input
+                  value={githubHeadBranch}
+                  onChange={(event) => setGithubHeadBranch(event.target.value)}
+                  placeholder="Head branch"
+                  className="vscode-terminal-input"
+                />
+                <Button
+                  className="h-7 text-xs"
+                  onClick={() => void createGithubPr()}
+                  disabled={isGithubApiBusy || !githubPrTitle.trim() || !githubHeadBranch.trim() || !githubBaseBranch.trim()}
+                >
+                  Create PR
+                </Button>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <input
+                  value={githubPrNumber}
+                  onChange={(event) => setGithubPrNumber(event.target.value)}
+                  placeholder="PR number"
+                  className="vscode-terminal-input"
+                />
+                <Button className="h-7 text-xs" onClick={() => void loadPrChecks()} disabled={isGithubApiBusy || !githubPrNumber.trim()}>
+                  Check CI
+                </Button>
+              </div>
+
+              {githubApiStatus ? (
+                <p className="text-[10px] text-[#8f8f8f]">{githubApiStatus}</p>
+              ) : null}
+              {githubChecksSummary ? (
+                <p className="text-[10px] text-[#9ac7f0]">{githubChecksSummary}</p>
+              ) : null}
             </div>
           ) : null}
 
