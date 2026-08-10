@@ -132,6 +132,7 @@ function parseReply(raw: string): { response: string; suggestions: string[] } {
     .map((item) => sanitizeAgentText(item))
     .filter((item) => item.length > 0)
     .filter((item) => !/^<.*>$/.test(item))
+    .filter((item, index, arr) => arr.findIndex((candidate) => candidate.toLowerCase() === item.toLowerCase()) === index)
     .slice(0, 5);
 
   return { response: cleanedResponse, suggestions: cleanedSuggestions };
@@ -139,7 +140,8 @@ function parseReply(raw: string): { response: string; suggestions: string[] } {
 
 function sanitizeAgentText(text: string): string {
   const blockedPatterns = [
-    /^(we need to|let'?s craft|need to follow exact format|output format|rules:|suggestions?:|response:)\b/i,
+    /^(we need|the user|let'?s craft|need to follow exact format|output format|rules:|suggestions?:|response:|but image|need conversational)\b/i,
+    /^(also maybe|better to|we should|i should)\b/i,
     /^<.*>$/,
   ];
 
