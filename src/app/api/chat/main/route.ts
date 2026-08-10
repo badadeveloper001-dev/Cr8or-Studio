@@ -86,6 +86,16 @@ function isDelegationIntent(message: string): boolean {
   const executionTerms = [
     "build",
     "implement",
+    "analyze",
+    "analysis",
+    "scan",
+    "inspect",
+    "review",
+    "audit",
+    "explore",
+    "check",
+    "look at",
+    "summarize",
     "create",
     "fix",
     "run",
@@ -105,6 +115,21 @@ function isDelegationIntent(message: string): boolean {
   const hasExecution = executionTerms.some((term) => lower.includes(term));
   if (asksQuestion && !hasExecution) return false;
   return hasExecution;
+}
+
+function stripDelegationClaims(reply: string): string {
+  const lines = reply
+    .split("\n")
+    .filter((line) => {
+      const normalized = line.toLowerCase();
+      if (normalized.includes("queued") || normalized.includes("in progress") || normalized.includes("result pending")) {
+        return false;
+      }
+      return true;
+    });
+
+  const cleaned = lines.join("\n").trim();
+  return cleaned || "I can help with that. Share what you want me to analyze and I will proceed.";
 }
 
 function parseReply(raw: string): { response: string; suggestions: string[] } {
@@ -179,6 +204,27 @@ function buildChatPrompt(
   ].filter(Boolean).join("\n");
 }
 
+function buildDelegationAcknowledgement(message: string): { reply: string; suggestions: string[] } {
+  return {
+    reply: [
+      "I am queuing this task for specialist agents now.",
+      "",
+      "Execution plan:",
+      "1. Delegate the request to the orchestrator with current workspace defaults.",
+      "2. Run the required analysis/build steps and capture concrete outputs.",
+      "3. Report only verified results from runtime/tool output.",
+      "",
+      `Queued task: ${message}`,
+      "Status: in progress, result pending.",
+    ].join("\n"),
+    suggestions: [
+      "If you want extra depth, specify exactly which module/folder to prioritize.",
+      "I can include a concise summary first, then a detailed technical breakdown.",
+      "If this is urgent, ask for a quick pass first and a deep pass after.",
+    ],
+  };
+}
+
 export async function POST(request: NextRequest) {
   return withRouteMetrics("api/chat/main", async (request: NextRequest, { requestId }) => {
   const auth = await authorizeRoute(request, { route: "api/chat/main", minRole: "viewer", requestId });
@@ -189,17 +235,31 @@ export async function POST(request: NextRequest) {
   try {
     const raw = await request.json();
     const payload = chatBodySchema.parse(raw);
+    const shouldDelegate = isDelegationIntent(payload.message);
+
+    if (shouldDelegate) {
+      const ack = buildDelegationAcknowledgement(payload.message);
+      return NextResponse.json(
+        {
+          reply: ack.reply,
+          suggestions: ack.suggestions,
+          shouldDelegate: true,
+          delegatePrompt: payload.message,
+        },
+        { status: 200 },
+      );
+    }
 
     const prompt = buildChatPrompt(payload.history, payload.message, payload.attachments);
     const rawReply = await runAgentLLM(`${MAIN_AGENT_SYSTEM_PROMPT}\n\n${buildCapabilityContext()}`, prompt, undefined, payload.attachments ?? []);
     const parsed = parseReply(rawReply);
-    const shouldDelegate = isDelegationIntent(payload.message);
+    const reply = stripDelegationClaims(parsed.response);
 
     return NextResponse.json(
       {
-        reply: parsed.response,
+        reply,
         suggestions: parsed.suggestions,
-        shouldDelegate,
+        shouldDelegate: false,
         delegatePrompt: payload.message,
       },
       { status: 200 },
