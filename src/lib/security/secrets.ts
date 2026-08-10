@@ -5,6 +5,7 @@ import { appendAuditEvent } from "@/lib/security/audit";
 export type SecretName =
   | "OPENAI_API_KEY"
   | "ANTHROPIC_API_KEY"
+  | "DEEPSEEK_API_KEY"
   | "GITHUB_TOKEN"
   | "GH_TOKEN"
   | "VERCEL_TOKEN"
@@ -27,6 +28,11 @@ const SECRET_DEFS: Record<SecretName, SecretDef> = {
     requiredFor: ["ai:anthropic"],
     allowPlaceholder: false,
     description: "Anthropic provider API key",
+  },
+  DEEPSEEK_API_KEY: {
+    requiredFor: ["ai:deepseek"],
+    allowPlaceholder: false,
+    description: "DeepSeek provider API key",
   },
   GITHUB_TOKEN: {
     requiredFor: ["github:api"],
@@ -110,30 +116,45 @@ export function getSecretReadiness() {
   const provider = (process.env.AI_PROVIDER ?? "openai").trim().toLowerCase();
   const openAiReady = Boolean(getSecret("OPENAI_API_KEY"));
   const anthropicReady = Boolean(getSecret("ANTHROPIC_API_KEY"));
+  const deepseekReady = Boolean(getSecret("DEEPSEEK_API_KEY"));
   const githubReady = Boolean(getSecretWithFallback(["GITHUB_TOKEN", "GH_TOKEN"]).value);
   const vercelReady = Boolean(getSecret("VERCEL_TOKEN"));
   const supabaseUrlReady = Boolean(getSecret("NEXT_PUBLIC_SUPABASE_URL"));
   const supabaseAnonReady = Boolean(getSecret("NEXT_PUBLIC_SUPABASE_ANON_KEY"));
 
+  const aiReady =
+    provider === "anthropic"
+      ? anthropicReady
+      : provider === "deepseek"
+        ? deepseekReady
+        : openAiReady;
+
+  const aiMissing =
+    provider === "anthropic"
+      ? anthropicReady
+        ? []
+        : ["ANTHROPIC_API_KEY"]
+      : provider === "deepseek"
+        ? deepseekReady
+          ? []
+          : ["DEEPSEEK_API_KEY"]
+        : openAiReady
+          ? []
+          : ["OPENAI_API_KEY"];
+
   return {
     provider,
     checks: {
-      ai: provider === "anthropic" ? anthropicReady : openAiReady,
+      ai: aiReady,
       openai: openAiReady,
       anthropic: anthropicReady,
+      deepseek: deepseekReady,
       github: githubReady,
       vercel: vercelReady,
       supabase: supabaseUrlReady && supabaseAnonReady,
     },
     missing: {
-      ai:
-        provider === "anthropic"
-          ? anthropicReady
-            ? []
-            : ["ANTHROPIC_API_KEY"]
-          : openAiReady
-            ? []
-            : ["OPENAI_API_KEY"],
+      ai: aiMissing,
       github: githubReady ? [] : ["GITHUB_TOKEN|GH_TOKEN"],
       vercel: vercelReady ? [] : ["VERCEL_TOKEN"],
       supabase: supabaseUrlReady && supabaseAnonReady ? [] : ["NEXT_PUBLIC_SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_ANON_KEY"],

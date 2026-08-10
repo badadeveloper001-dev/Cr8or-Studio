@@ -4,7 +4,7 @@ import { generateText, LanguageModel } from "ai";
 import { withRetry } from "@/lib/reliability/retry";
 import { getSecret } from "@/lib/security/secrets";
 
-export type LLMProvider = "openai" | "anthropic";
+export type LLMProvider = "openai" | "anthropic" | "deepseek";
 
 export interface LLMConfig {
   provider: LLMProvider;
@@ -12,15 +12,55 @@ export interface LLMConfig {
   maxTokens: number;
 }
 
+const PROVIDER_DEFAULTS: Record<LLMProvider, string> = {
+  openai: "gpt-4o-mini",
+  anthropic: "claude-3-5-haiku-20241022",
+  deepseek: "deepseek-chat",
+};
+
+function normalizeProvider(raw: string | undefined): LLMProvider {
+  const provider = (raw ?? "openai").trim().toLowerCase();
+  if (provider === "anthropic" || provider === "deepseek") {
+    return provider;
+  }
+  return "openai";
+}
+
+function getProviderModel(provider: LLMProvider): string {
+  if (provider === "anthropic") {
+    return process.env.ANTHROPIC_MODEL ?? PROVIDER_DEFAULTS.anthropic;
+  }
+  if (provider === "deepseek") {
+    return process.env.DEEPSEEK_MODEL ?? PROVIDER_DEFAULTS.deepseek;
+  }
+  return process.env.OPENAI_MODEL ?? PROVIDER_DEFAULTS.openai;
+}
+
+function getMissingKeyMessage(provider: LLMProvider): string {
+  if (provider === "anthropic") {
+    return "Replace the placeholder ANTHROPIC_API_KEY value in .env.local with a real secret to enable live AI responses.";
+  }
+  if (provider === "deepseek") {
+    return "Set DEEPSEEK_API_KEY in .env.local (and optionally DEEPSEEK_BASE_URL / DEEPSEEK_MODEL) to enable live AI responses.";
+  }
+  return "Replace the placeholder OPENAI_API_KEY value in .env.local with a real secret to enable live AI responses.";
+}
+
+function hasProviderKey(provider: LLMProvider): boolean {
+  if (provider === "anthropic") {
+    return Boolean(getSecret("ANTHROPIC_API_KEY"));
+  }
+  if (provider === "deepseek") {
+    return Boolean(getSecret("DEEPSEEK_API_KEY"));
+  }
+  return Boolean(getSecret("OPENAI_API_KEY"));
+}
+
 export function getDefaultLLMConfig(): LLMConfig {
-  const provider = (process.env.AI_PROVIDER ?? "openai") as LLMProvider;
-  const modelMap: Record<LLMProvider, string> = {
-    openai: process.env.OPENAI_MODEL ?? "gpt-4o-mini",
-    anthropic: process.env.ANTHROPIC_MODEL ?? "claude-3-5-haiku-20241022",
-  };
+  const provider = normalizeProvider(process.env.AI_PROVIDER);
   return {
     provider,
-    model: modelMap[provider],
+    model: getProviderModel(provider),
     maxTokens: Number(process.env.AI_MAX_TOKENS ?? 2048),
   };
 }
@@ -35,6 +75,20 @@ function getModel(config: LLMConfig): LanguageModel {
       apiKey,
     });
     return anthropic(config.model);
+  }
+
+  if (config.provider === "deepseek") {
+    const apiKey = getSecret("DEEPSEEK_API_KEY");
+    if (!apiKey) {
+      throw new Error("Missing DeepSeek API key.");
+    }
+
+    const baseURL = process.env.DEEPSEEK_BASE_URL?.trim() || "https://api.deepseek.com/v1";
+    const deepseek = createOpenAI({
+      apiKey,
+      baseURL,
+    });
+    return deepseek(config.model);
   }
 
   const apiKey = getSecret("OPENAI_API_KEY");
@@ -54,10 +108,7 @@ export async function runAgentLLM(
 ): Promise<string> {
   const resolved = { ...getDefaultLLMConfig(), ...config };
 
-  const hasKey =
-    resolved.provider === "anthropic"
-      ? Boolean(getSecret("ANTHROPIC_API_KEY"))
-      : Boolean(getSecret("OPENAI_API_KEY"));
+  const hasKey = hasProviderKey(resolved.provider);
 
   if (!hasKey) {
     // Return a structured stub so the app remains functional without a key
@@ -67,7 +118,7 @@ export async function runAgentLLM(
       `System context: ${systemPrompt.slice(0, 120)}...`,
       `User request: ${userMessage.slice(0, 200)}`,
       "",
-      "Replace the placeholder OPENAI_API_KEY value in .env.local with a real secret to enable live AI responses.",
+      getMissingKeyMessage(resolved.provider),
     ].join("\n");
   }
 

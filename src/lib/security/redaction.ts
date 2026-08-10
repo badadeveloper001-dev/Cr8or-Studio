@@ -17,6 +17,7 @@ export function redactText(input: string, extras: string[] = []): string {
   const envSecretNames: SecretName[] = [
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
+    "DEEPSEEK_API_KEY",
     "GITHUB_TOKEN",
     "GH_TOKEN",
     "VERCEL_TOKEN",

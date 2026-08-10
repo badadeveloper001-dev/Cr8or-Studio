@@ -227,6 +227,7 @@ type SecretReadiness = {
     ai: boolean;
     openai: boolean;
     anthropic: boolean;
+    deepseek: boolean;
     github: boolean;
     vercel: boolean;
     supabase: boolean;
@@ -2351,6 +2352,7 @@ export function WorkspaceShell() {
                   <p className="text-[10px] text-[#9f9f9f]">AI provider: {secretReadiness.provider}</p>
                   <div className="mt-1 grid grid-cols-2 gap-1 text-[10px]">
                     <p className={secretReadiness.checks.ai ? "text-[#8fd18f]" : "text-[#f48771]"}>AI: {secretReadiness.checks.ai ? "ready" : "missing"}</p>
+                    <p className={secretReadiness.checks.deepseek ? "text-[#8fd18f]" : "text-[#f48771]"}>DeepSeek: {secretReadiness.checks.deepseek ? "ready" : "missing"}</p>
                     <p className={secretReadiness.checks.github ? "text-[#8fd18f]" : "text-[#f48771]"}>GitHub: {secretReadiness.checks.github ? "ready" : "missing"}</p>
                     <p className={secretReadiness.checks.vercel ? "text-[#8fd18f]" : "text-[#f48771]"}>Vercel: {secretReadiness.checks.vercel ? "ready" : "missing"}</p>
                     <p className={secretReadiness.checks.supabase ? "text-[#8fd18f]" : "text-[#f48771]"}>Supabase: {secretReadiness.checks.supabase ? "ready" : "missing"}</p>
