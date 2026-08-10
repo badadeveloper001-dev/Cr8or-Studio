@@ -77,20 +77,6 @@ function getModel(config: LLMConfig): LanguageModel {
     return anthropic(config.model);
   }
 
-  if (config.provider === "deepseek") {
-    const apiKey = getSecret("DEEPSEEK_API_KEY");
-    if (!apiKey) {
-      throw new Error("Missing DeepSeek API key.");
-    }
-
-    const baseURL = process.env.DEEPSEEK_BASE_URL?.trim() || "https://api.deepseek.com/v1";
-    const deepseek = createOpenAI({
-      apiKey,
-      baseURL,
-    });
-    return deepseek(config.model);
-  }
-
   const apiKey = getSecret("OPENAI_API_KEY");
   if (!apiKey) {
     throw new Error("Missing OpenAI API key.");
@@ -99,6 +85,80 @@ function getModel(config: LLMConfig): LanguageModel {
     apiKey,
   });
   return openai(config.model);
+}
+
+async function runDeepSeekChatCompletion(
+  systemPrompt: string,
+  userMessage: string,
+  config: LLMConfig,
+): Promise<string> {
+  const apiKey = getSecret("DEEPSEEK_API_KEY");
+  if (!apiKey) {
+    throw new Error("Missing DeepSeek API key.");
+  }
+
+  const baseURL = process.env.DEEPSEEK_BASE_URL?.trim() || "https://api.deepseek.com/v1";
+  const endpoint = `${baseURL.replace(/\/+$/, "")}/chat/completions`;
+
+  const response = await withRetry(
+    async () =>
+      fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: config.model,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userMessage },
+          ],
+          max_tokens: config.maxTokens,
+          temperature: 0.2,
+        }),
+      }),
+    {
+      retries: 2,
+      minDelayMs: 200,
+      maxDelayMs: 1600,
+      shouldRetry: (error) => {
+        if (!(error instanceof Error)) return false;
+        const msg = error.message.toLowerCase();
+        return msg.includes("timeout") || msg.includes("rate") || msg.includes("tempor") || msg.includes("503");
+      },
+    },
+  );
+
+  const textBody = await response.text();
+  let payload: unknown = null;
+  try {
+    payload = textBody ? JSON.parse(textBody) : null;
+  } catch {
+    payload = null;
+  }
+
+  if (!response.ok) {
+    const apiMessage =
+      typeof payload === "object" && payload && "error" in payload
+        ? JSON.stringify((payload as { error: unknown }).error)
+        : textBody.slice(0, 240);
+    throw new Error(`DeepSeek API ${response.status}: ${apiMessage || "request failed"}`);
+  }
+
+  const content =
+    typeof payload === "object" &&
+    payload &&
+    "choices" in payload &&
+    Array.isArray((payload as { choices?: unknown[] }).choices)
+      ? (payload as { choices: Array<{ message?: { content?: string } }> }).choices[0]?.message?.content
+      : "";
+
+  if (!content || !content.trim()) {
+    throw new Error("DeepSeek API returned an empty response.");
+  }
+
+  return content;
 }
 
 export async function runAgentLLM(
@@ -120,6 +180,22 @@ export async function runAgentLLM(
       "",
       getMissingKeyMessage(resolved.provider),
     ].join("\n");
+  }
+
+  if (resolved.provider === "deepseek") {
+    try {
+      return await runDeepSeekChatCompletion(systemPrompt, userMessage, resolved);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "Unknown DeepSeek error";
+      return [
+        "[DeepSeek request failed — using safe fallback response]",
+        "",
+        `Provider: ${resolved.provider}`,
+        `Reason: ${reason}`,
+        "",
+        "Action: verify DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, and model compatibility.",
+      ].join("\n");
+    }
   }
 
   const model = getModel(resolved);

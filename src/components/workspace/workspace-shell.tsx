@@ -2165,8 +2165,7 @@ export function WorkspaceShell() {
       ) : null}
 
       <div
-        className="vscode-shell min-h-screen w-full text-[#cccccc]"
-        style={{ gridTemplateColumns: showExplorer ? "48px 260px 1fr" : "48px 1fr" }}
+        className={`vscode-shell min-h-screen w-full text-[#cccccc] ${showExplorer ? "is-explorer-open" : "is-explorer-closed"}`}
       >
       <aside className="vscode-activitybar">
         <button
