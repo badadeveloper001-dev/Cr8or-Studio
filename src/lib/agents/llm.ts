@@ -168,6 +168,8 @@ async function runDeepSeekChatCompletion(
           ],
           max_tokens: config.maxTokens,
           temperature: 0.2,
+          thinking: { type: "disabled" },
+          stream: false,
         }),
       }),
     {
@@ -208,6 +210,118 @@ async function runDeepSeekChatCompletion(
 
   if (!content || !content.trim()) {
     throw new Error("DeepSeek API returned an empty response.");
+  }
+
+  return content;
+}
+
+function extractDeepSeekResponsesText(payload: unknown): string {
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+
+  const asRecord = payload as Record<string, unknown>;
+  const topLevelText = typeof asRecord.output_text === "string" ? asRecord.output_text.trim() : "";
+  if (topLevelText) {
+    return topLevelText;
+  }
+
+  const output = Array.isArray(asRecord.output) ? asRecord.output : [];
+  const collected: string[] = [];
+
+  for (const item of output) {
+    if (!item || typeof item !== "object") continue;
+    const content = Array.isArray((item as { content?: unknown[] }).content)
+      ? ((item as { content?: unknown[] }).content ?? [])
+      : [];
+
+    for (const part of content) {
+      if (!part || typeof part !== "object") continue;
+      const text = (part as { text?: unknown }).text;
+      if (typeof text === "string" && text.trim().length > 0) {
+        collected.push(text.trim());
+      }
+    }
+  }
+
+  return collected.join("\n").trim();
+}
+
+async function runDeepSeekVisionResponse(
+  systemPrompt: string,
+  userMessage: string,
+  config: LLMConfig,
+  attachments: ChatImageAttachment[],
+): Promise<string> {
+  const apiKey = getSecret("DEEPSEEK_API_KEY");
+  if (!apiKey) {
+    throw new Error("Missing DeepSeek API key.");
+  }
+
+  const baseURL = process.env.DEEPSEEK_BASE_URL?.trim() || "https://api.deepseek.com/v1";
+  const endpoint = `${baseURL.replace(/\/+$/, "")}/responses`;
+  const visionModel = process.env.DEEPSEEK_VISION_MODEL?.trim() || "deepseek-v4-flash";
+
+  const response = await withRetry(
+    async () =>
+      fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: visionModel,
+          input: [
+            {
+              role: "system",
+              content: [{ type: "input_text", text: systemPrompt }],
+            },
+            {
+              role: "user",
+              content: [
+                { type: "input_text", text: userMessage },
+                ...attachments.map((attachment) => ({ type: "input_image", image_url: attachment.dataUrl })),
+              ],
+            },
+          ],
+          max_output_tokens: config.maxTokens,
+          temperature: 0.2,
+          thinking: { type: "disabled" },
+          stream: false,
+        }),
+      }),
+    {
+      retries: 2,
+      minDelayMs: 200,
+      maxDelayMs: 1600,
+      shouldRetry: (error) => {
+        if (!(error instanceof Error)) return false;
+        const msg = error.message.toLowerCase();
+        return msg.includes("timeout") || msg.includes("rate") || msg.includes("tempor") || msg.includes("503");
+      },
+    },
+  );
+
+  const textBody = await response.text();
+  let payload: unknown = null;
+  try {
+    payload = textBody ? JSON.parse(textBody) : null;
+  } catch {
+    payload = null;
+  }
+
+  if (!response.ok) {
+    const apiMessage =
+      typeof payload === "object" && payload && "error" in payload
+        ? JSON.stringify((payload as { error: unknown }).error)
+        : textBody.slice(0, 240);
+    throw new Error(`DeepSeek Responses API ${response.status}: ${apiMessage || "request failed"}`);
+  }
+
+  const content = extractDeepSeekResponsesText(payload);
+  if (!content) {
+    throw new Error("DeepSeek Responses API returned an empty response.");
   }
 
   return content;
@@ -382,7 +496,7 @@ export async function runAgentLLM(
       }
 
       try {
-        return await runDeepSeekChatCompletion(systemPrompt, userMessage, resolved, attachments);
+        return await runDeepSeekVisionResponse(systemPrompt, userMessage, resolved, attachments);
       } catch (deepseekError) {
         const fallbackErrors: string[] = [];
         const visionFallbacks = getVisionFallbackConfigs();

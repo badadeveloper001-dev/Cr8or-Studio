@@ -54,6 +54,7 @@ Rules:
 - If the user asks for links after deploy, include both local and live links when known (local usually http://localhost:3000; live from deployment output).
 - Do not claim actions are completed unless completion is explicitly present in provided runtime context. For queued/delegated work, say "queued", "in progress", or "pending result" instead of reporting success.
 - Never fabricate final commit SHAs, deployment success, or production URLs. If a URL is unknown, say it will be reported after execution output confirms it.
+- Never output internal reasoning or meta commentary about instructions/policies/formatting. Do not output placeholders like <suggestion 1>.
 
 Output format (strict):
 Response:
@@ -125,7 +126,31 @@ function parseReply(raw: string): { response: string; suggestions: string[] } {
       : [];
 
   const response = responseLines.join("\n").trim() || raw.trim();
-  return { response, suggestions };
+
+  const cleanedResponse = sanitizeAgentText(response);
+  const cleanedSuggestions = suggestions
+    .map((item) => sanitizeAgentText(item))
+    .filter((item) => item.length > 0)
+    .filter((item) => !/^<.*>$/.test(item))
+    .slice(0, 5);
+
+  return { response: cleanedResponse, suggestions: cleanedSuggestions };
+}
+
+function sanitizeAgentText(text: string): string {
+  const blockedPatterns = [
+    /^(we need to|let'?s craft|need to follow exact format|output format|rules:|suggestions?:|response:)\b/i,
+    /^<.*>$/,
+  ];
+
+  const cleaned = text
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => !blockedPatterns.some((pattern) => pattern.test(line.trim())))
+    .join("\n")
+    .trim();
+
+  return cleaned || "I can help with that. The previous model output was malformed, so please retry and I will continue from there.";
 }
 
 function buildChatPrompt(
