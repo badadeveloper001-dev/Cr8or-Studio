@@ -133,6 +133,18 @@ type RunHistoryItem = {
   estimatedCostUsd: number;
 };
 
+type ExecutionReceiptStatus = "verified" | "failed" | "pending";
+type ExecutionReceiptKind = "orchestration" | "git" | "deploy" | "github";
+
+type ExecutionReceipt = {
+  id: string;
+  kind: ExecutionReceiptKind;
+  title: string;
+  status: ExecutionReceiptStatus;
+  createdAt: number;
+  evidence: string[];
+};
+
 type PendingDelegation = {
   prompt: string;
   response: string;
@@ -430,6 +442,7 @@ export function WorkspaceShell() {
     latencyMs: 0,
   });
   const [runHistory, setRunHistory] = useState<RunHistoryItem[]>([]);
+  const [executionReceipts, setExecutionReceipts] = useState<ExecutionReceipt[]>([]);
   const [currentProject, setCurrentProject] = useState<ProjectRef>({ name: "Cr8or-Studio", path: "." });
   const [recentProjects, setRecentProjects] = useState<ProjectRef[]>([]);
   const [gitSnapshot, setGitSnapshot] = useState<GitSnapshot | null>(null);
@@ -559,6 +572,7 @@ export function WorkspaceShell() {
         activeTabId: string;
         terminalEntries: TerminalEntry[];
         runHistory: RunHistoryItem[];
+        executionReceipts: ExecutionReceipt[];
         showExplorer: boolean;
         showRightPane: boolean;
         showBottomPanel: boolean;
@@ -575,6 +589,7 @@ export function WorkspaceShell() {
       if (typeof data.activeTabId === "string") setActiveTabId(data.activeTabId);
       if (Array.isArray(data.terminalEntries) && data.terminalEntries.length > 0) setTerminalEntries(data.terminalEntries);
       if (Array.isArray(data.runHistory)) setRunHistory(data.runHistory.slice(0, 30));
+      if (Array.isArray(data.executionReceipts)) setExecutionReceipts(data.executionReceipts.slice(0, 80));
       if (typeof data.showExplorer === "boolean") setShowExplorer(data.showExplorer);
       if (typeof data.showRightPane === "boolean") setShowRightPane(data.showRightPane);
       if (typeof data.showBottomPanel === "boolean") setShowBottomPanel(data.showBottomPanel);
@@ -596,6 +611,7 @@ export function WorkspaceShell() {
       activeTabId,
       terminalEntries,
       runHistory,
+      executionReceipts,
       showExplorer,
       showRightPane,
       showBottomPanel,
@@ -613,6 +629,7 @@ export function WorkspaceShell() {
     openTabs,
     prompt,
     runHistory,
+    executionReceipts,
     showBottomPanel,
     showExplorer,
     showRightPane,
@@ -633,6 +650,17 @@ export function WorkspaceShell() {
         createdAt: Date.now(),
       },
     ]);
+  }, []);
+
+  const addExecutionReceipt = useCallback((receipt: Omit<ExecutionReceipt, "id" | "createdAt">) => {
+    setExecutionReceipts((prev) => [
+      {
+        ...receipt,
+        id: `receipt-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`,
+        createdAt: Date.now(),
+      },
+      ...prev,
+    ].slice(0, 80));
   }, []);
 
   const loadFileContent = useCallback(async (filePath: string) => {
@@ -965,7 +993,19 @@ export function WorkspaceShell() {
           approvalId: approvedActionIds["git.commit-push"],
         }),
       });
-      const data = (await response.json()) as { commit?: string; push?: string; message?: string; requiresApproval?: boolean; preview?: unknown };
+      const data = (await response.json()) as {
+        commit?: string;
+        push?: string;
+        message?: string;
+        requiresApproval?: boolean;
+        preview?: unknown;
+        receipt?: {
+          branch?: string;
+          headSha?: string;
+          remoteUrl?: string;
+          hadCommit?: boolean;
+        };
+      };
       if (!response.ok) {
         if (response.status === 409) {
           await handleApprovalConflict("git.commit-push", "Commit and push current project", data as unknown as Record<string, unknown>);
@@ -977,14 +1017,32 @@ export function WorkspaceShell() {
       if (data.commit) appendTerminal(data.commit);
       if (data.push) appendTerminal(data.push);
       setStatusLine("Git commit/push completed.");
+      addExecutionReceipt({
+        kind: "git",
+        title: "Git commit/push",
+        status: "verified",
+        evidence: [
+          `Branch: ${data.receipt?.branch ?? "unknown"}`,
+          `HEAD: ${data.receipt?.headSha ?? "unknown"}`,
+          `Remote: ${data.receipt?.remoteUrl ?? "unknown"}`,
+          `Commit created: ${data.receipt?.hadCommit === false ? "no (nothing to commit)" : "yes"}`,
+          data.push ? `Push output: ${data.push.split("\n")[0]}` : "Push output unavailable.",
+        ],
+      });
       setApprovedActionIds((prev) => ({ ...prev, "git.commit-push": undefined }));
     } catch (err) {
       appendTerminal(`git error: ${err instanceof Error ? err.message : "commit/push failed"}`);
       setStatusLine("Git operation failed.");
+      addExecutionReceipt({
+        kind: "git",
+        title: "Git commit/push",
+        status: "failed",
+        evidence: [err instanceof Error ? err.message : "commit/push failed"],
+      });
     } finally {
       setIsGitBusy(false);
     }
-  }, [appendTerminal, approvedActionIds, currentProject.path, gitCommitMessage, handleApprovalConflict]);
+  }, [addExecutionReceipt, appendTerminal, approvedActionIds, currentProject.path, gitCommitMessage, handleApprovalConflict]);
 
   const loadDiffPreview = useCallback(async (filePath: string) => {
     if (!filePath) return;
@@ -1087,7 +1145,18 @@ export function WorkspaceShell() {
           approvalId: approvedActionIds["deploy.vercel"],
         }),
       });
-      const data = (await response.json()) as { logs?: string; message?: string; requiresApproval?: boolean; preview?: unknown };
+      const data = (await response.json()) as {
+        logs?: string;
+        message?: string;
+        requiresApproval?: boolean;
+        preview?: unknown;
+        receipt?: {
+          strategy?: string;
+          productionUrl?: string;
+          aliasUrl?: string;
+          inspectUrl?: string;
+        };
+      };
       if (!response.ok) {
         if (response.status === 409) {
           await handleApprovalConflict("deploy.vercel", "Deploy current project to Vercel", data as unknown as Record<string, unknown>);
@@ -1098,14 +1167,31 @@ export function WorkspaceShell() {
       }
       appendTerminal(data.logs || "Deploy finished.");
       setStatusLine("Deploy completed.");
+      addExecutionReceipt({
+        kind: "deploy",
+        title: "Deployment",
+        status: "verified",
+        evidence: [
+          `Strategy: ${data.receipt?.strategy ?? "unknown"}`,
+          data.receipt?.productionUrl ? `Production URL: ${data.receipt.productionUrl}` : "Production URL not reported.",
+          data.receipt?.aliasUrl ? `Alias URL: ${data.receipt.aliasUrl}` : "Alias URL not reported.",
+          data.receipt?.inspectUrl ? `Inspect URL: ${data.receipt.inspectUrl}` : "Inspect URL not reported.",
+        ],
+      });
       setApprovedActionIds((prev) => ({ ...prev, "deploy.vercel": undefined }));
     } catch (err) {
       appendTerminal(`deploy error: ${err instanceof Error ? err.message : "deploy failed"}`);
       setStatusLine("Deploy failed.");
+      addExecutionReceipt({
+        kind: "deploy",
+        title: "Deployment",
+        status: "failed",
+        evidence: [err instanceof Error ? err.message : "deploy failed"],
+      });
     } finally {
       setIsGitBusy(false);
     }
-  }, [appendTerminal, approvedActionIds, currentProject.path, handleApprovalConflict]);
+  }, [addExecutionReceipt, appendTerminal, approvedActionIds, currentProject.path, handleApprovalConflict]);
 
   const previewDeploy = useCallback(async () => {
     setIsGitBusy(true);
@@ -1537,6 +1623,17 @@ export function WorkspaceShell() {
               const completedAgents = event.result.timeline.filter((task) => task.status === "completed").length;
               const insights = summarizeLeadInsights(event.result.timeline, startTime, Date.now());
               setLeadInsights(insights);
+              addExecutionReceipt({
+                kind: "orchestration",
+                title: "Delegated run completed",
+                status: "verified",
+                evidence: [
+                  `Run ID: ${event.result.requestId}`,
+                  `Summary: ${event.result.summary}`,
+                  `Completed agents: ${completedAgents}/${event.result.timeline.length}`,
+                  `Latency: ${Math.round(insights.latencyMs / 100) / 10}s`,
+                ],
+              });
               setRunHistory((prev) =>
                 prev.map((item) =>
                   item.id === runId
@@ -1557,6 +1654,12 @@ export function WorkspaceShell() {
               setError(event.message);
               setActiveBottomTab("problems");
               appendTerminal(`error: ${event.message}`);
+              addExecutionReceipt({
+                kind: "orchestration",
+                title: "Delegated run failed",
+                status: "failed",
+                evidence: [event.message],
+              });
               const latencyMs = Math.max(Date.now() - startTime, 0);
               setRunHistory((prev) =>
                 prev.map((item) =>
@@ -1582,6 +1685,12 @@ export function WorkspaceShell() {
         setError(message);
         setActiveBottomTab("problems");
         appendTerminal(`error: ${message}`);
+        addExecutionReceipt({
+          kind: "orchestration",
+          title: "Delegated run failed",
+          status: "failed",
+          evidence: [message],
+        });
         setRunHistory((prev) =>
           prev.map((item) =>
             item.id === runId
@@ -1594,6 +1703,12 @@ export function WorkspaceShell() {
           ),
         );
       } else {
+        addExecutionReceipt({
+          kind: "orchestration",
+          title: "Delegated run cancelled",
+          status: "pending",
+          evidence: ["Run cancelled by user."],
+        });
         setRunHistory((prev) =>
           prev.map((item) =>
             item.id === runId
@@ -1611,7 +1726,7 @@ export function WorkspaceShell() {
     } finally {
       setIsRunning(false);
     }
-  }, [appendTerminal, currentProject.path, isRunning, prompt, updateAgent]);
+  }, [addExecutionReceipt, appendTerminal, currentProject.path, isRunning, prompt, updateAgent]);
 
   const handleChatAttachmentSelection = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) return;
@@ -1954,10 +2069,12 @@ export function WorkspaceShell() {
   const visibleTimeline = useMemo(() => timeline.slice(-MAX_TIMELINE_RENDER), [timeline]);
   const visibleOutputTimeline = useMemo(() => timeline.slice(-MAX_OUTPUT_RENDER), [timeline]);
   const visibleTerminalEntries = useMemo(() => terminalEntries.slice(-MAX_TERMINAL_ENTRIES_RENDER), [terminalEntries]);
+  const visibleReceipts = useMemo(() => executionReceipts.slice(0, 12), [executionReceipts]);
 
   const hiddenTimelineCount = timeline.length - visibleTimeline.length;
   const hiddenOutputTimelineCount = timeline.length - visibleOutputTimeline.length;
   const hiddenTerminalEntriesCount = terminalEntries.length - visibleTerminalEntries.length;
+  const hiddenReceiptCount = executionReceipts.length - visibleReceipts.length;
 
   function toggleFolder(id: string) {
     setCollapsedFolders((prev) => {
@@ -3111,6 +3228,29 @@ export function WorkspaceShell() {
               ) : null}
               {activeBottomTab === "output" ? (
                 <div className="space-y-1 text-[11px] text-[#cccccc]">
+                  <div className="mb-2 rounded border border-[#3a3a3a] bg-[#232323] p-2">
+                    <p className="text-[11px] text-[#bcbcbc]">Execution Receipts</p>
+                    {hiddenReceiptCount > 0 ? (
+                      <p className="text-[10px] text-[#7f7f7f]">Showing latest {visibleReceipts.length} of {executionReceipts.length} receipts.</p>
+                    ) : null}
+                    {visibleReceipts.length === 0 ? (
+                      <p className="mt-1 text-[11px] text-[#8f8f8f]">No receipts yet. Verified execution evidence will appear here.</p>
+                    ) : (
+                      <div className="mt-1 space-y-1.5">
+                        {visibleReceipts.map((receipt) => (
+                          <div key={receipt.id} className="rounded border border-[#373737] bg-[#1f1f1f] px-2 py-1.5">
+                            <p className="text-[11px] text-[#d4d4d4]">
+                              [{receipt.status.toUpperCase()}] {receipt.title}
+                            </p>
+                            <p className="text-[10px] text-[#8f8f8f]">{new Date(receipt.createdAt).toLocaleString()}</p>
+                            {receipt.evidence.slice(0, 4).map((item) => (
+                              <p key={`${receipt.id}-${item}`} className="text-[10px] text-[#bcbcbc]">- {item}</p>
+                            ))}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                   {hiddenOutputTimelineCount > 0 ? (
                     <p className="text-[10px] text-[#7f7f7f]">Showing latest {visibleOutputTimeline.length} of {timeline.length} status lines.</p>
                   ) : null}
@@ -3135,6 +3275,7 @@ export function WorkspaceShell() {
                     chatMessages: chatMessages.length,
                     terminalEntries: terminalEntries.length,
                     runHistory: runHistory.length,
+                    executionReceipts: executionReceipts.length,
                     leadInsights,
                   }, null, 2)}
                 </pre>

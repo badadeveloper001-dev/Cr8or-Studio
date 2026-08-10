@@ -29,6 +29,26 @@ function resolveCwd(projectPath: string): string | null {
   return resolveWorkspacePath(safe);
 }
 
+function extractVercelUrls(output: string): {
+  productionUrl?: string;
+  aliasUrl?: string;
+  inspectUrl?: string;
+} {
+  const productionMatches = Array.from(output.matchAll(/Production\s+(https:\/\/[^\s]+)/g));
+  const inspectMatch = output.match(/Inspect\s+(https:\/\/[^\s]+)/);
+  const aliasMatch = output.match(/Aliased\s+(https:\/\/[^\s]+)/);
+
+  const productionUrl = productionMatches.length > 0
+    ? productionMatches[productionMatches.length - 1]?.[1]
+    : undefined;
+
+  return {
+    productionUrl,
+    aliasUrl: aliasMatch?.[1],
+    inspectUrl: inspectMatch?.[1],
+  };
+}
+
 export async function POST(request: NextRequest) {
   return withRouteMetrics("api/deploy", async (request: NextRequest, { requestId }) => {
   const auth = await authorizeRoute(request, {
@@ -134,9 +154,30 @@ export async function POST(request: NextRequest) {
       logs.push("Vercel deploy complete.");
       if (deploy.stdout) logs.push(deploy.stdout);
       if (deploy.stderr) logs.push(deploy.stderr);
+
+      const combinedOutput = [deploy.stdout, deploy.stderr].filter(Boolean).join("\n");
+      const urls = extractVercelUrls(combinedOutput);
+
+      return NextResponse.json(
+        {
+          success: true,
+          logs: logs.join("\n"),
+          receipt: {
+            strategy: payload.strategy,
+            ...urls,
+          },
+        },
+        { status: 200 },
+      );
     }
 
-    return NextResponse.json({ success: true, logs: logs.join("\n") }, { status: 200 });
+    return NextResponse.json({
+      success: true,
+      logs: logs.join("\n"),
+      receipt: {
+        strategy: payload.strategy,
+      },
+    }, { status: 200 });
   } catch (error) {
     if (error instanceof SandboxViolationError) {
       return errorResponse({

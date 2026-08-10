@@ -22,6 +22,13 @@ type GitChange = {
   status: string;
 };
 
+type CommitPushReceipt = {
+  branch: string;
+  headSha: string;
+  remoteUrl: string;
+  hadCommit: boolean;
+};
+
 function parseChanges(raw: string): GitChange[] {
   return raw
     .split("\n")
@@ -45,6 +52,57 @@ function safeCwd(projectPath: string): string | null {
   }
 
   return resolveWorkspacePath(safePath);
+}
+
+async function collectCommitPushReceipt(
+  cwd: string,
+  projectPath: string,
+  actorId: string,
+  actorRole: string,
+  requestId: string,
+): Promise<CommitPushReceipt> {
+  const [branch, headSha, remote] = await Promise.all([
+    runSandboxedCommand({
+      command: "git branch --show-current",
+      cwd,
+      workspaceId: projectPath,
+      route: "api/github/ops:commit-push",
+      actorId,
+      actorRole,
+      requestId,
+      allowedRoots: [cwd],
+      allowedCommands: [{ kind: "exact", value: "git branch --show-current" }],
+    }),
+    runSandboxedCommand({
+      command: "git rev-parse --short HEAD",
+      cwd,
+      workspaceId: projectPath,
+      route: "api/github/ops:commit-push",
+      actorId,
+      actorRole,
+      requestId,
+      allowedRoots: [cwd],
+      allowedCommands: [{ kind: "exact", value: "git rev-parse --short HEAD" }],
+    }),
+    runSandboxedCommand({
+      command: "git remote get-url origin",
+      cwd,
+      workspaceId: projectPath,
+      route: "api/github/ops:commit-push",
+      actorId,
+      actorRole,
+      requestId,
+      allowedRoots: [cwd],
+      allowedCommands: [{ kind: "exact", value: "git remote get-url origin" }],
+    }),
+  ]);
+
+  return {
+    branch: branch.stdout,
+    headSha: headSha.stdout,
+    remoteUrl: remote.stdout,
+    hadCommit: true,
+  };
 }
 
 export async function POST(request: NextRequest) {
@@ -351,11 +409,24 @@ export async function POST(request: NextRequest) {
         allowedCommands: [{ kind: "exact", value: "git push" }],
       });
 
+      const receipt = await collectCommitPushReceipt(
+        cwd,
+        payload.projectPath,
+        auth.session.userId,
+        auth.session.role,
+        requestId,
+      );
+
+      if (commitOutput === "Nothing to commit.") {
+        receipt.hadCommit = false;
+      }
+
       return NextResponse.json(
         {
           staged: [add.stdout, add.stderr].filter(Boolean).join("\n"),
           commit: commitOutput,
           push: [push.stdout, push.stderr].filter(Boolean).join("\n"),
+          receipt,
         },
         { status: 200 },
       );
