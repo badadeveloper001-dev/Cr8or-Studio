@@ -138,6 +138,13 @@ type PendingDelegation = {
   response: string;
 };
 
+type ChatAttachment = {
+  name: string;
+  mimeType: string;
+  dataUrl: string;
+  sizeBytes: number;
+};
+
 type CommandItem = {
   id: string;
   label: string;
@@ -412,6 +419,7 @@ export function WorkspaceShell() {
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [paletteRecentIds, setPaletteRecentIds] = useState<string[]>([]);
   const [chatInput, setChatInput] = useState("");
+  const [chatAttachments, setChatAttachments] = useState<ChatAttachment[]>([]);
   const [isChatting, setIsChatting] = useState(false);
   const [pendingDelegation, setPendingDelegation] = useState<PendingDelegation | null>(null);
   const [pendingPromptDraft, setPendingPromptDraft] = useState("");
@@ -484,6 +492,7 @@ export function WorkspaceShell() {
   const abortRef = useRef<AbortController | null>(null);
   const paletteInputRef = useRef<HTMLInputElement | null>(null);
   const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const chatFileInputRef = useRef<HTMLInputElement | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
 
   const updateAgent = useCallback((state: AgentExecutionState) => {
@@ -634,13 +643,17 @@ export function WorkspaceShell() {
     setFileErrorByPath((prev) => ({ ...prev, [filePath]: "" }));
     try {
       const response = await fetch(`/api/files?path=${encodeURIComponent(filePath)}`);
+      const payload = (await response.json()) as { content?: string; message?: string };
       if (!response.ok) {
-        throw new Error(`Unable to open ${filePath}`);
+        throw new Error(payload.message || `Unable to open ${filePath}`);
       }
-      const payload = (await response.json()) as { content?: string };
       setFileContentByPath((prev) => ({ ...prev, [filePath]: payload.content ?? "" }));
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to open file.";
+      if (message.includes("Local workspace files are unavailable in the deployed app")) {
+        setOpenTabs((prev) => prev.filter((tab) => tab.id === "cr8or-ai.chat"));
+        setActiveTabId("cr8or-ai.chat");
+      }
       setFileErrorByPath((prev) => ({ ...prev, [filePath]: message }));
     } finally {
       setLoadingFilePath((current) => (current === filePath ? null : current));
@@ -1600,14 +1613,58 @@ export function WorkspaceShell() {
     }
   }, [appendTerminal, currentProject.path, isRunning, prompt, updateAgent]);
 
-  const sendChat = useCallback(async (forcedMessage?: string) => {
-    const message = (forcedMessage ?? chatInput).trim();
-    if (!message || isChatting || isRunning) {
+  const handleChatAttachmentSelection = useCallback(async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+
+    const selected = Array.from(files).filter((file) => file.type.startsWith("image/"));
+    if (selected.length === 0) {
+      appendTerminal("chat attachment error: only image files are supported.");
       return;
     }
 
-    pushChatMessage("user", message);
-    appendTerminal(`chat> ${message}`);
+    const nextFiles = selected.slice(0, Math.max(0, 3 - chatAttachments.length));
+    const loaded = await Promise.all(nextFiles.map(
+      (file) => new Promise<ChatAttachment>((resolve, reject) => {
+        if (file.size > 5 * 1024 * 1024) {
+          reject(new Error(`${file.name} exceeds 5 MB.`));
+          return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = () => resolve({
+          name: file.name,
+          mimeType: file.type,
+          dataUrl: typeof reader.result === "string" ? reader.result : "",
+          sizeBytes: file.size,
+        });
+        reader.onerror = () => reject(new Error(`Failed to read ${file.name}.`));
+        reader.readAsDataURL(file);
+      }),
+    )).catch((error: Error) => {
+      appendTerminal(`chat attachment error: ${error.message}`);
+      return [] as ChatAttachment[];
+    });
+
+    if (loaded.length > 0) {
+      setChatAttachments((prev) => [...prev, ...loaded].slice(0, 3));
+      appendTerminal(`chat attachment: loaded ${loaded.length} image${loaded.length > 1 ? "s" : ""}.`);
+    }
+  }, [appendTerminal, chatAttachments.length]);
+
+  const sendChat = useCallback(async (forcedMessage?: string) => {
+    const rawMessage = (forcedMessage ?? chatInput).trim();
+    const attachmentsToSend = forcedMessage ? [] : chatAttachments;
+    const message = rawMessage || (attachmentsToSend.length > 0 ? "Please analyze the attached image(s) and explain what you see." : "");
+    if ((!message && attachmentsToSend.length === 0) || isChatting || isRunning) {
+      return;
+    }
+
+    const userContent = attachmentsToSend.length > 0
+      ? `${rawMessage || "[Image analysis request]"}\n\n[Attached images: ${attachmentsToSend.map((attachment) => attachment.name).join(", ")}]`
+      : message;
+
+    pushChatMessage("user", userContent);
+    appendTerminal(`chat> ${rawMessage || "[image analysis request]"}`);
     if (!forcedMessage) {
       setChatInput("");
     }
@@ -1620,6 +1677,7 @@ export function WorkspaceShell() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message,
+          attachments: attachmentsToSend.map(({ name, mimeType, dataUrl }) => ({ name, mimeType, dataUrl })),
           history: chatMessages.slice(-12).map((entry) => ({ role: entry.role, content: entry.content })),
         }),
       });
@@ -1635,6 +1693,9 @@ export function WorkspaceShell() {
         delegatePrompt?: string;
       };
       const reply = data.reply?.trim() || "No reply was generated.";
+      if (!forcedMessage) {
+        setChatAttachments([]);
+      }
       setChatMessages((prev) => [
         ...prev,
         {
@@ -1676,7 +1737,7 @@ export function WorkspaceShell() {
       setIsChatting(false);
       setTimeout(() => chatInputRef.current?.focus(), 0);
     }
-  }, [appendTerminal, chatInput, chatMessages, delegationPolicy, isChatting, isRunning, pushChatMessage, runOrchestration]);
+  }, [appendTerminal, chatAttachments, chatInput, chatMessages, delegationPolicy, isChatting, isRunning, pushChatMessage, runOrchestration]);
 
   const commandItems: CommandItem[] = [
     {
@@ -2745,10 +2806,7 @@ export function WorkspaceShell() {
           ))}
         </div>
 
-        <div
-          className="vscode-editor-region"
-          style={{ gridTemplateColumns: showRightPane ? "1fr 360px" : "1fr" }}
-        >
+        <div className={`vscode-editor-region ${showRightPane ? "is-rightpane-open" : "is-rightpane-hidden"}`}>
           <section className="vscode-editor-pane">
             <div className="vscode-editor-toolbar">
               <div className="flex items-center gap-2">
@@ -2821,6 +2879,33 @@ export function WorkspaceShell() {
                 </div>
 
                 <div className="vscode-chat-input-wrap">
+                  <input
+                    ref={chatFileInputRef}
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    className="hidden"
+                    onChange={(event) => {
+                      void handleChatAttachmentSelection(event.target.files);
+                      event.currentTarget.value = "";
+                    }}
+                  />
+                  {chatAttachments.length > 0 ? (
+                    <div className="vscode-chat-attachments">
+                      {chatAttachments.map((attachment) => (
+                        <span key={`${attachment.name}-${attachment.sizeBytes}`} className="vscode-chat-attachment-chip">
+                          <span className="truncate">{attachment.name}</span>
+                          <button
+                            type="button"
+                            className="rounded p-0.5 text-[#9f9f9f] hover:bg-[#3a3d41] hover:text-[#ffffff]"
+                            onClick={() => setChatAttachments((prev) => prev.filter((item) => item !== attachment))}
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
                   <textarea
                     ref={chatInputRef}
                     value={chatInput}
@@ -2836,18 +2921,31 @@ export function WorkspaceShell() {
                     placeholder="Tell Cr8or AI what to build, or ask for strategy and suggestions..."
                   />
                   <div className="vscode-chat-actions">
-                    <button
-                      type="button"
-                      className="vscode-ghost-btn"
-                      onClick={() => setChatMessages((prev) => prev.slice(0, 1))}
-                      disabled={isChatting || chatMessages.length <= 1}
-                    >
-                      Clear
-                    </button>
+                    <div className="flex items-center gap-2 max-[700px]:w-full max-[700px]:justify-between">
+                      <button
+                        type="button"
+                        className="vscode-ghost-btn"
+                        onClick={() => chatFileInputRef.current?.click()}
+                        disabled={isChatting || isRunning || chatAttachments.length >= 3}
+                      >
+                        Add Images
+                      </button>
+                      <button
+                        type="button"
+                        className="vscode-ghost-btn"
+                        onClick={() => {
+                          setChatMessages((prev) => prev.slice(0, 1));
+                          setChatAttachments([]);
+                        }}
+                        disabled={isChatting || (chatMessages.length <= 1 && chatAttachments.length === 0)}
+                      >
+                        Clear
+                      </button>
+                    </div>
                     <Button
-                      className="h-7 gap-1.5 rounded-sm border border-[#3c3c3c] bg-[#0e639c] px-3 text-xs text-white hover:bg-[#1177bb]"
+                      className="h-7 gap-1.5 rounded-sm border border-[#3c3c3c] bg-[#0e639c] px-3 text-xs text-white hover:bg-[#1177bb] max-[700px]:w-full"
                       onClick={() => void sendChat()}
-                      disabled={isChatting || isRunning || chatInput.trim().length === 0}
+                      disabled={isChatting || isRunning || (chatInput.trim().length === 0 && chatAttachments.length === 0)}
                     >
                       {(isChatting || isRunning) ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
                       Send

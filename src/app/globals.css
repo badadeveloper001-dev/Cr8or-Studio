@@ -240,6 +240,10 @@
     min-height: 0;
   }
 
+  .vscode-editor-region.is-rightpane-hidden {
+    grid-template-columns: 1fr;
+  }
+
   .vscode-editor-pane {
     border-right: 1px solid #2d2d2d;
     display: flex;
@@ -409,6 +413,27 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .vscode-chat-attachments {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+
+  .vscode-chat-attachment-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    max-width: 100%;
+    border: 1px solid #3b5770;
+    border-radius: 999px;
+    background: #1a2f42;
+    color: #d7ecff;
+    padding: 0.25rem 0.45rem;
+    font-size: 10px;
   }
 
   .vscode-suggestion-chip {
@@ -666,7 +691,7 @@
     grid-template-columns: 48px 220px 1fr;
   }
 
-  .vscode-editor-region {
+  .vscode-editor-region.is-rightpane-open {
     grid-template-columns: 1fr 300px;
   }
 }
@@ -680,7 +705,9 @@
     display: none;
   }
 
-  .vscode-editor-region {
+  .vscode-editor-region,
+  .vscode-editor-region.is-rightpane-open,
+  .vscode-editor-region.is-rightpane-hidden {
     grid-template-columns: 1fr;
   }
 
@@ -696,7 +723,18 @@
     padding: 0.35rem 0.55rem;
   }
 
+  .vscode-titlebar > div:last-child {
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: space-between;
+  }
+
   .vscode-terminal-input-wrap {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .vscode-chat-actions {
     flex-direction: column;
     align-items: stretch;
   }

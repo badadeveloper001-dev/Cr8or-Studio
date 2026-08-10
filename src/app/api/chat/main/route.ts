@@ -1,13 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
-import { runAgentLLM } from "@/lib/agents/llm";
+import { ChatImageAttachment, runAgentLLM } from "@/lib/agents/llm";
 import { errorResponse, internalErrorResponse } from "@/lib/http/api-response";
 import { withRouteMetrics } from "@/lib/observability/sli";
 import { authorizeRoute } from "@/lib/security/authorization";
+import { getSecretReadiness } from "@/lib/security/secrets";
 
 const chatBodySchema = z.object({
-  message: z.string().min(1),
+  message: z.string(),
+  attachments: z
+    .array(
+      z.object({
+        name: z.string().min(1).max(120).optional(),
+        mimeType: z.string().regex(/^image\//),
+        dataUrl: z.string().regex(/^data:image\/[a-zA-Z0-9.+-]+;base64,/),
+      }),
+    )
+    .max(3)
+    .optional(),
   history: z
     .array(
       z.object({
@@ -17,6 +28,14 @@ const chatBodySchema = z.object({
     )
     .max(20)
     .optional(),
+}).superRefine((value, ctx) => {
+  if (value.message.trim().length === 0 && (!value.attachments || value.attachments.length === 0)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "message or attachments are required.",
+      path: ["message"],
+    });
+  }
 });
 
 const MAIN_AGENT_SYSTEM_PROMPT = `
@@ -29,6 +48,7 @@ Rules:
 - If a request is exploratory, answer naturally and offer good next options.
 - Ground your advice in architecture, product impact, quality, and risk.
 - If you are uncertain, state assumptions briefly.
+- When GitHub integration is available in the app, do not claim you categorically lack GitHub access. Explain that Cr8or Studio can access GitHub through its configured integration routes, while direct local workspace file access depends on runtime.
 
 Output format (strict):
 Response:
@@ -39,6 +59,21 @@ Suggestions:
 - <suggestion 2>
 - <suggestion 3>
 `.trim();
+
+function buildCapabilityContext() {
+  const readiness = getSecretReadiness();
+  const localFilesAvailable = !process.env.VERCEL_ENV;
+
+  return [
+    "Runtime capabilities:",
+    `- GitHub integration ready: ${readiness.checks.github ? "yes" : "no"}`,
+    `- Vercel integration ready: ${readiness.checks.vercel ? "yes" : "no"}`,
+    `- Local workspace file access available: ${localFilesAvailable ? "yes" : "no"}`,
+    localFilesAvailable
+      ? "- You may refer to local workspace editing as available in this runtime."
+      : "- In deployed/runtime-hosted mode, local repository files are not directly readable; use GitHub integration for repository access.",
+  ].join("\n");
+}
 
 function isDelegationIntent(message: string): boolean {
   const lower = message.toLowerCase();
@@ -88,19 +123,28 @@ function parseReply(raw: string): { response: string; suggestions: string[] } {
   return { response, suggestions };
 }
 
-function buildChatPrompt(history: Array<{ role: "user" | "assistant"; content: string }> | undefined, message: string): string {
+function buildChatPrompt(
+  history: Array<{ role: "user" | "assistant"; content: string }> | undefined,
+  message: string,
+  attachments: ChatImageAttachment[] = [],
+): string {
   const transcript = (history ?? [])
     .slice(-12)
     .map((entry) => `${entry.role === "user" ? "User" : "Cr8or AI"}: ${entry.content}`)
     .join("\n");
+
+  const attachmentSummary = attachments.length > 0
+    ? `Attached images: ${attachments.map((attachment) => attachment.name || attachment.mimeType).join(", ")}`
+    : "";
 
   return [
     "Conversation so far:",
     transcript || "(none)",
     "",
     `User: ${message}`,
+    attachmentSummary,
     "Cr8or AI:",
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 export async function POST(request: NextRequest) {
@@ -114,8 +158,8 @@ export async function POST(request: NextRequest) {
     const raw = await request.json();
     const payload = chatBodySchema.parse(raw);
 
-    const prompt = buildChatPrompt(payload.history, payload.message);
-    const rawReply = await runAgentLLM(MAIN_AGENT_SYSTEM_PROMPT, prompt);
+    const prompt = buildChatPrompt(payload.history, payload.message, payload.attachments);
+    const rawReply = await runAgentLLM(`${MAIN_AGENT_SYSTEM_PROMPT}\n\n${buildCapabilityContext()}`, prompt, undefined, payload.attachments ?? []);
     const parsed = parseReply(rawReply);
     const shouldDelegate = isDelegationIntent(payload.message);
 

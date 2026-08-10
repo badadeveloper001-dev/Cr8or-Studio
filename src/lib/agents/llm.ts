@@ -6,6 +6,12 @@ import { getSecret } from "@/lib/security/secrets";
 
 export type LLMProvider = "openai" | "anthropic" | "deepseek";
 
+export type ChatImageAttachment = {
+  name?: string;
+  mimeType: string;
+  dataUrl: string;
+};
+
 export interface LLMConfig {
   provider: LLMProvider;
   model: string;
@@ -46,6 +52,17 @@ function getMissingKeyMessage(provider: LLMProvider): string {
   return "Replace the placeholder OPENAI_API_KEY value in .env.local with a real secret to enable live AI responses.";
 }
 
+function buildFallbackReply(provider: LLMProvider, reason: string) {
+  return [
+    `[${provider} request failed — using safe fallback response]`,
+    "",
+    `Provider: ${provider}`,
+    `Reason: ${reason}`,
+    "",
+    "Action: verify provider credentials, endpoint configuration, model compatibility, and billing status.",
+  ].join("\n");
+}
+
 function hasProviderKey(provider: LLMProvider): boolean {
   if (provider === "anthropic") {
     return Boolean(getSecret("ANTHROPIC_API_KEY"));
@@ -54,6 +71,28 @@ function hasProviderKey(provider: LLMProvider): boolean {
     return Boolean(getSecret("DEEPSEEK_API_KEY"));
   }
   return Boolean(getSecret("OPENAI_API_KEY"));
+}
+
+function getVisionFallbackConfigs(): LLMConfig[] {
+  const fallbacks: LLMConfig[] = [];
+
+  if (Boolean(getSecret("OPENAI_API_KEY"))) {
+    fallbacks.push({
+      provider: "openai",
+      model: process.env.OPENAI_MODEL ?? PROVIDER_DEFAULTS.openai,
+      maxTokens: Number(process.env.AI_MAX_TOKENS ?? 2048),
+    });
+  }
+
+  if (Boolean(getSecret("ANTHROPIC_API_KEY"))) {
+    fallbacks.push({
+      provider: "anthropic",
+      model: process.env.ANTHROPIC_MODEL ?? PROVIDER_DEFAULTS.anthropic,
+      maxTokens: Number(process.env.AI_MAX_TOKENS ?? 2048),
+    });
+  }
+
+  return fallbacks;
 }
 
 export function getDefaultLLMConfig(): LLMConfig {
@@ -91,6 +130,7 @@ async function runDeepSeekChatCompletion(
   systemPrompt: string,
   userMessage: string,
   config: LLMConfig,
+  attachments: ChatImageAttachment[] = [],
 ): Promise<string> {
   const apiKey = getSecret("DEEPSEEK_API_KEY");
   if (!apiKey) {
@@ -112,7 +152,19 @@ async function runDeepSeekChatCompletion(
           model: config.model,
           messages: [
             { role: "system", content: systemPrompt },
-            { role: "user", content: userMessage },
+            {
+              role: "user",
+              content:
+                attachments.length > 0
+                  ? [
+                      { type: "text", text: userMessage },
+                      ...attachments.map((attachment) => ({
+                        type: "image_url",
+                        image_url: { url: attachment.dataUrl },
+                      })),
+                    ]
+                  : userMessage,
+            },
           ],
           max_tokens: config.maxTokens,
           temperature: 0.2,
@@ -161,10 +213,151 @@ async function runDeepSeekChatCompletion(
   return content;
 }
 
+async function runOpenAIChatCompletion(
+  systemPrompt: string,
+  userMessage: string,
+  config: LLMConfig,
+  attachments: ChatImageAttachment[] = [],
+): Promise<string> {
+  const apiKey = getSecret("OPENAI_API_KEY");
+  if (!apiKey) {
+    throw new Error("Missing OpenAI API key.");
+  }
+
+  const response = await withRetry(
+    async () =>
+      fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: config.model,
+          messages: [
+            { role: "system", content: systemPrompt },
+            {
+              role: "user",
+              content:
+                attachments.length > 0
+                  ? [
+                      { type: "text", text: userMessage },
+                      ...attachments.map((attachment) => ({
+                        type: "image_url",
+                        image_url: { url: attachment.dataUrl },
+                      })),
+                    ]
+                  : userMessage,
+            },
+          ],
+          max_tokens: config.maxTokens,
+          temperature: 0.2,
+        }),
+      }),
+    {
+      retries: 2,
+      minDelayMs: 200,
+      maxDelayMs: 1600,
+      shouldRetry: (error) => {
+        if (!(error instanceof Error)) return false;
+        const msg = error.message.toLowerCase();
+        return msg.includes("timeout") || msg.includes("rate") || msg.includes("tempor") || msg.includes("503");
+      },
+    },
+  );
+
+  const textBody = await response.text();
+  const payload = textBody ? JSON.parse(textBody) as { choices?: Array<{ message?: { content?: string } }>; error?: unknown } : {};
+
+  if (!response.ok) {
+    throw new Error(`OpenAI API ${response.status}: ${JSON.stringify(payload.error ?? textBody.slice(0, 240))}`);
+  }
+
+  const content = payload.choices?.[0]?.message?.content?.trim();
+  if (!content) {
+    throw new Error("OpenAI API returned an empty response.");
+  }
+
+  return content;
+}
+
+async function runAnthropicMessage(
+  systemPrompt: string,
+  userMessage: string,
+  config: LLMConfig,
+  attachments: ChatImageAttachment[] = [],
+): Promise<string> {
+  const apiKey = getSecret("ANTHROPIC_API_KEY");
+  if (!apiKey) {
+    throw new Error("Missing Anthropic API key.");
+  }
+
+  const response = await withRetry(
+    async () =>
+      fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: config.model,
+          system: systemPrompt,
+          max_tokens: config.maxTokens,
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: userMessage },
+                ...attachments.map((attachment) => {
+                  const [, meta, base64 = ""] = attachment.dataUrl.match(/^data:(.*?);base64,(.*)$/) ?? [];
+                  return {
+                    type: "image",
+                    source: {
+                      type: "base64",
+                      media_type: meta || attachment.mimeType,
+                      data: base64,
+                    },
+                  };
+                }),
+              ],
+            },
+          ],
+        }),
+      }),
+    {
+      retries: 2,
+      minDelayMs: 200,
+      maxDelayMs: 1600,
+      shouldRetry: (error) => {
+        if (!(error instanceof Error)) return false;
+        const msg = error.message.toLowerCase();
+        return msg.includes("timeout") || msg.includes("rate") || msg.includes("tempor") || msg.includes("503");
+      },
+    },
+  );
+
+  const textBody = await response.text();
+  const payload = textBody ? JSON.parse(textBody) as { content?: Array<{ type?: string; text?: string }>; error?: unknown } : {};
+
+  if (!response.ok) {
+    throw new Error(`Anthropic API ${response.status}: ${JSON.stringify(payload.error ?? textBody.slice(0, 240))}`);
+  }
+
+  const content = payload.content?.filter((item) => item.type === "text").map((item) => item.text ?? "").join("\n").trim();
+  if (!content) {
+    throw new Error("Anthropic API returned an empty response.");
+  }
+
+  return content;
+}
+
 export async function runAgentLLM(
   systemPrompt: string,
   userMessage: string,
   config?: Partial<LLMConfig>,
+  attachments: ChatImageAttachment[] = [],
 ): Promise<string> {
   const resolved = { ...getDefaultLLMConfig(), ...config };
 
@@ -184,17 +377,57 @@ export async function runAgentLLM(
 
   if (resolved.provider === "deepseek") {
     try {
-      return await runDeepSeekChatCompletion(systemPrompt, userMessage, resolved);
+      if (attachments.length === 0) {
+        return await runDeepSeekChatCompletion(systemPrompt, userMessage, resolved, attachments);
+      }
+
+      try {
+        return await runDeepSeekChatCompletion(systemPrompt, userMessage, resolved, attachments);
+      } catch (deepseekError) {
+        const fallbackErrors: string[] = [];
+        const visionFallbacks = getVisionFallbackConfigs();
+
+        for (const fallback of visionFallbacks) {
+          try {
+            if (fallback.provider === "openai") {
+              return await runOpenAIChatCompletion(systemPrompt, userMessage, fallback, attachments);
+            }
+            if (fallback.provider === "anthropic") {
+              return await runAnthropicMessage(systemPrompt, userMessage, fallback, attachments);
+            }
+          } catch (fallbackError) {
+            const reason = fallbackError instanceof Error ? fallbackError.message : "Unknown fallback error";
+            fallbackErrors.push(`${fallback.provider}: ${reason}`);
+          }
+        }
+
+        const deepseekReason = deepseekError instanceof Error ? deepseekError.message : "Unknown DeepSeek error";
+        const reason = fallbackErrors.length > 0
+          ? `${deepseekReason}; fallback failures -> ${fallbackErrors.join(" | ")}`
+          : deepseekReason;
+        return buildFallbackReply(resolved.provider, reason);
+      }
     } catch (error) {
       const reason = error instanceof Error ? error.message : "Unknown DeepSeek error";
-      return [
-        "[DeepSeek request failed — using safe fallback response]",
-        "",
-        `Provider: ${resolved.provider}`,
-        `Reason: ${reason}`,
-        "",
-        "Action: verify DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, and model compatibility.",
-      ].join("\n");
+      return buildFallbackReply(resolved.provider, reason);
+    }
+  }
+
+  if (attachments.length > 0 && resolved.provider === "openai") {
+    try {
+      return await runOpenAIChatCompletion(systemPrompt, userMessage, resolved, attachments);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "Unknown OpenAI error";
+      return buildFallbackReply(resolved.provider, reason);
+    }
+  }
+
+  if (attachments.length > 0 && resolved.provider === "anthropic") {
+    try {
+      return await runAnthropicMessage(systemPrompt, userMessage, resolved, attachments);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "Unknown Anthropic error";
+      return buildFallbackReply(resolved.provider, reason);
     }
   }
 

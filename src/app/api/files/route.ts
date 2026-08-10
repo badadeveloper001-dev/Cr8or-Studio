@@ -15,6 +15,15 @@ export async function GET(request: NextRequest) {
     return auth.response;
   }
 
+  if (process.env.VERCEL_ENV) {
+    return errorResponse({
+      status: 409,
+      code: "CONFLICT",
+      message: "Local workspace files are unavailable in the deployed app. Use the GitHub panel for repository browsing, or run Cr8or Studio locally for direct file access.",
+      requestId,
+    });
+  }
+
   const relPath = request.nextUrl.searchParams.get("path") ?? "";
   const safePath = sanitizeWorkspacePath(relPath);
 
