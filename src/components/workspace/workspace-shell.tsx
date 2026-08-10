@@ -1721,7 +1721,7 @@ export function WorkspaceShell() {
           appendTerminal("Delegation queued for approval.");
         } else {
           setStatusLine("Cr8or AI is delegating execution...");
-          await runOrchestration(nextPrompt, "chat");
+          void runOrchestration(nextPrompt, "chat");
         }
       } else {
         setStatusLine("Cr8or AI responded in conversational mode.");
