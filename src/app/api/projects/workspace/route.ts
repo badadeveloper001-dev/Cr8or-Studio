@@ -1,4 +1,3 @@
-import path from "node:path";
 import { promises as fs } from "node:fs";
 
 import { NextRequest, NextResponse } from "next/server";
@@ -6,251 +5,315 @@ import { z } from "zod";
 
 import { errorResponse, internalErrorResponse } from "@/lib/http/api-response";
 import { withRouteMetrics } from "@/lib/observability/sli";
+import {
+  ensureProjectsRoot,
+  listProjectFiles,
+  projectDirNameFromUrl,
+  resolveProjectDir,
+  scanRecentProjects,
+  slugifyProjectName,
+  toProjectRef,
+} from "@/lib/projects/workspace";
 import { authorizeRoute } from "@/lib/security/authorization";
 import { evaluatePolicyGuard } from "@/lib/security/policy";
 import { runSandboxedCommand, SandboxViolationError } from "@/lib/security/sandbox";
-import { PROJECTS_ROOT, resolveWorkspacePath, sanitizeWorkspacePath, WORKSPACE_ROOT } from "@/lib/workspace/shell";
+import { PROJECTS_ROOT } from "@/lib/workspace/shell";
 
-const bodySchema = z.object({
-  action: z.enum(["create", "open", "clone", "recent"]),
-  name: z.string().min(2).max(120).optional(),
-  path: z.string().optional(),
-  repositoryUrl: z.string().url().optional(),
-  dryRun: z.boolean().optional(),
-  approvalId: z.string().uuid().optional(),
-});
+const bodySchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("recent") }),
+  z.object({
+    action: z.literal("create"),
+    name: z.string().trim().min(1).max(120),
+    approvalId: z.string().uuid().optional(),
+  }),
+  z.object({
+    action: z.literal("open"),
+    path: z.string().trim().min(1).max(500),
+  }),
+  z.object({
+    action: z.literal("clone"),
+    repositoryUrl: z.string().trim().min(8).max(2048),
+    approvalId: z.string().uuid().optional(),
+  }),
+]);
 
-function slugify(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 64);
+function isValidCloneUrl(url: string): boolean {
+  const httpsForm = url.startsWith("https://");
+  const sshForm = url.startsWith("git@") || url.startsWith("ssh://");
+  if (!httpsForm && !sshForm) {
+    return false;
+  }
+  if (/[\s"';`$&|<>\\]|\.\.|--/.test(url)) {
+    return false;
+  }
+  if (httpsForm && url.includes("@")) {
+    return false;
+  }
+  return true;
 }
 
-async function readRecentProjects() {
+async function pathExists(target: string): Promise<boolean> {
   try {
-    const dirs = await fs.readdir(PROJECTS_ROOT, { withFileTypes: true });
-    const projects = await Promise.all(
-      dirs
-        .filter((entry) => entry.isDirectory())
-        .map(async (entry) => {
-          const relPath = path.join("projects", entry.name);
-          const absPath = path.join(PROJECTS_ROOT, entry.name);
-          const stat = await fs.stat(absPath);
-          return {
-            name: entry.name,
-            path: relPath.replace(/\\/g, "/"),
-            updatedAt: stat.mtime.toISOString(),
-          };
-        }),
-    );
-
-    return projects.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+    await fs.access(target);
+    return true;
   } catch {
-    return [];
+    return false;
   }
 }
 
-async function listFiles(projectAbsPath: string) {
-  const items = await fs.readdir(projectAbsPath, { withFileTypes: true });
-  return items.slice(0, 50).map((entry) => ({
-    name: entry.name,
-    type: entry.isDirectory() ? "folder" : "file",
-  }));
+async function handleOpen(rawPath: string, requestId: string): Promise<NextResponse> {
+  const projectDir = resolveProjectDir(rawPath);
+  if (!projectDir) {
+    return errorResponse({
+      status: 400,
+      code: "FORBIDDEN",
+      message: "Path is outside the projects workspace.",
+      requestId,
+    });
+  }
+
+  let stat;
+  try {
+    stat = await fs.stat(projectDir);
+  } catch {
+    return errorResponse({ status: 404, code: "NOT_FOUND", message: "Project not found.", requestId });
+  }
+  if (!stat.isDirectory()) {
+    return errorResponse({ status: 400, code: "INVALID_REQUEST", message: "Path is not a project directory.", requestId });
+  }
+
+  const files = await listProjectFiles(projectDir);
+  return NextResponse.json(
+    {
+      ok: true,
+      project: {
+        ...toProjectRef(projectDir),
+        updatedAt: stat.mtime.toISOString(),
+        files,
+      },
+    },
+    { status: 200 },
+  );
+}
+
+function policyDeniedResponse(
+  reason: string,
+  approvalRequired: boolean,
+  profile: string,
+  risk: string,
+  action: string,
+  preview: unknown,
+): NextResponse {
+  return NextResponse.json(
+    {
+      ok: false,
+      message: reason,
+      requiresApproval: approvalRequired,
+      policy: { profile, risk, action },
+      preview,
+    },
+    { status: 409 },
+  );
 }
 
 export async function POST(request: NextRequest) {
   return withRouteMetrics("api/projects/workspace", async (request: NextRequest, { requestId }) => {
   try {
-    await fs.mkdir(PROJECTS_ROOT, { recursive: true });
     const raw = await request.json();
-    const payload = bodySchema.parse(raw);
+    const body = bodySchema.parse(raw);
 
-    const minRole = payload.action === "open" || payload.action === "recent" ? "viewer" : "maintainer";
-    const auth = await authorizeRoute(request, {
-      route: "api/projects/workspace",
-      minRole,
-      requestId,
-      requireWorkspaceOwnership: payload.action !== "recent",
-    });
-    if (!auth.ok) {
-      return auth.response;
+    if (process.env.VERCEL_ENV) {
+      return errorResponse({
+        status: 409,
+        code: "CONFLICT",
+        message: "Workspace project management is unavailable in the deployed app. Run Cr8or Studio locally for file-based project operations.",
+        requestId,
+      });
     }
 
-    if (payload.action === "recent") {
-      const projects = await readRecentProjects();
-      return NextResponse.json({ projects }, { status: 200 });
+    if (body.action === "recent") {
+      const auth = await authorizeRoute(request, {
+        route: "api/projects/workspace:recent",
+        minRole: "viewer",
+        requestId,
+      });
+      if (!auth.ok) return auth.response;
+
+      await ensureProjectsRoot();
+      const projects = await scanRecentProjects();
+      return NextResponse.json({ ok: true, projects }, { status: 200 });
     }
 
-    if (payload.action === "create") {
-      if (!payload.name) {
-        return errorResponse({ status: 400, code: "INVALID_REQUEST", message: "Project name is required.", requestId });
+    if (body.action === "open") {
+      const auth = await authorizeRoute(request, {
+        route: "api/projects/workspace:open",
+        minRole: "viewer",
+        requestId,
+      });
+      if (!auth.ok) return auth.response;
+
+      return handleOpen(body.path, requestId);
+    }
+
+    if (body.action === "create") {
+      const auth = await authorizeRoute(request, {
+        route: "api/projects/workspace:create",
+        minRole: "maintainer",
+        requestId,
+      });
+      if (!auth.ok) return auth.response;
+
+      const slug = slugifyProjectName(body.name);
+      if (!slug) {
+        return errorResponse({
+          status: 400,
+          code: "INVALID_REQUEST",
+          message: "Project name could not be converted into a safe directory name.",
+          requestId,
+        });
       }
 
-      const slug = slugify(payload.name);
-      const relPath = path.join("projects", slug).replace(/\\/g, "/");
-      const preview = {
-        action: "project.create",
-        name: payload.name,
-        path: relPath,
-      };
-
-      if (payload.dryRun) {
-        return NextResponse.json({ dryRun: true, preview }, { status: 200 });
+      const projectDir = resolveProjectDir(slug);
+      if (!projectDir) {
+        return errorResponse({ status: 400, code: "INVALID_REQUEST", message: "Invalid project name.", requestId });
       }
 
+      const preview = { action: "project.create", name: body.name, path: `projects/${slug}` };
       const policy = evaluatePolicyGuard({
         action: "project.create",
         requestId,
         actorId: auth.session.userId,
         actorRole: auth.session.role,
-        approvalId: payload.approvalId,
+        approvalId: body.approvalId,
       });
       if (!policy.allowed) {
-        return NextResponse.json(
-          {
-            ok: false,
-            message: policy.reason,
-            requiresApproval: policy.approvalRequired,
-            policy: {
-              profile: policy.profile,
-              risk: policy.risk,
-              action: "project.create",
-            },
-            preview,
-          },
-          { status: 409 },
-        );
-      }
-      const projectPath = resolveWorkspacePath(relPath);
-
-      if (!projectPath) {
-        return errorResponse({ status: 400, code: "INVALID_REQUEST", message: "Invalid project path.", requestId });
+        return policyDeniedResponse(policy.reason, policy.approvalRequired, policy.profile, policy.risk, "project.create", preview);
       }
 
-      await fs.mkdir(projectPath, { recursive: true });
-      const readmePath = path.join(projectPath, "README.md");
-      await fs.writeFile(readmePath, `# ${payload.name}\n\nCreated in Cr8or Studio.\n`, "utf8");
+      await ensureProjectsRoot();
+      try {
+        await fs.mkdir(projectDir);
+      } catch {
+        return errorResponse({
+          status: 409,
+          code: "CONFLICT",
+          message: `Project "${slug}" already exists.`,
+          requestId,
+        });
+      }
 
+      const files = await listProjectFiles(projectDir);
       return NextResponse.json(
         {
+          ok: true,
           project: {
-            name: payload.name,
-            path: relPath,
-            files: await listFiles(projectPath),
+            ...toProjectRef(projectDir),
+            updatedAt: new Date().toISOString(),
+            files,
           },
         },
         { status: 201 },
       );
     }
 
-    if (payload.action === "open") {
-      const safe = sanitizeWorkspacePath(payload.path ?? "");
-      if (!safe) {
-        return errorResponse({ status: 400, code: "INVALID_REQUEST", message: "Invalid project path.", requestId });
-      }
-      const projectPath = resolveWorkspacePath(safe);
-      if (!projectPath) {
-        return errorResponse({ status: 400, code: "INVALID_REQUEST", message: "Invalid project path.", requestId });
-      }
+    const auth = await authorizeRoute(request, {
+      route: "api/projects/workspace:clone",
+      minRole: "maintainer",
+      requestId,
+    });
+    if (!auth.ok) return auth.response;
 
-      const stat = await fs.stat(projectPath);
-      if (!stat.isDirectory()) {
-        return errorResponse({ status: 400, code: "INVALID_REQUEST", message: "Project path is not a directory.", requestId });
-      }
-
-      return NextResponse.json(
-        {
-          project: {
-            name: path.basename(projectPath),
-            path: safe,
-            files: await listFiles(projectPath),
-          },
-        },
-        { status: 200 },
-      );
+    if (!isValidCloneUrl(body.repositoryUrl)) {
+      return errorResponse({
+        status: 400,
+        code: "INVALID_REQUEST",
+        message: "Invalid repository URL. Use an https:// or SSH GitHub URL without embedded credentials or shell metacharacters.",
+        requestId,
+      });
     }
 
-    if (payload.action === "clone") {
-      if (!payload.repositoryUrl) {
-        return errorResponse({ status: 400, code: "INVALID_REQUEST", message: "Repository URL is required.", requestId });
-      }
-
-      const repoName = payload.repositoryUrl.split("/").pop()?.replace(/\.git$/, "") || "project";
-      const safeName = slugify(payload.name || repoName || "project");
-      const relPath = path.join("projects", safeName).replace(/\\/g, "/");
-      const preview = {
-        action: "project.clone",
-        repositoryUrl: payload.repositoryUrl,
-        path: relPath,
-      };
-
-      if (payload.dryRun) {
-        return NextResponse.json({ dryRun: true, preview }, { status: 200 });
-      }
-
-      const policy = evaluatePolicyGuard({
-        action: "project.clone",
+    const slug = slugifyProjectName(projectDirNameFromUrl(body.repositoryUrl));
+    if (!slug) {
+      return errorResponse({
+        status: 400,
+        code: "INVALID_REQUEST",
+        message: "Could not derive a safe project directory name from the repository URL.",
         requestId,
-        actorId: auth.session.userId,
-        actorRole: auth.session.role,
-        approvalId: payload.approvalId,
       });
-      if (!policy.allowed) {
-        return NextResponse.json(
-          {
-            ok: false,
-            message: policy.reason,
-            requiresApproval: policy.approvalRequired,
-            policy: {
-              profile: policy.profile,
-              risk: policy.risk,
-              action: "project.clone",
-            },
-            preview,
-          },
-          { status: 409 },
-        );
-      }
+    }
 
-      const projectPath = resolveWorkspacePath(relPath);
-      if (!projectPath) {
-        return errorResponse({ status: 400, code: "INVALID_REQUEST", message: "Invalid clone destination.", requestId });
-      }
+    const projectDir = resolveProjectDir(slug);
+    if (!projectDir) {
+      return errorResponse({ status: 400, code: "INVALID_REQUEST", message: "Invalid repository URL.", requestId });
+    }
 
-      try {
-        await fs.stat(projectPath);
-        return errorResponse({ status: 409, code: "CONFLICT", message: "Destination already exists.", requestId });
-      } catch {
-        // expected if folder does not exist
-      }
+    if (await pathExists(projectDir)) {
+      return errorResponse({
+        status: 409,
+        code: "CONFLICT",
+        message: `Project directory "projects/${slug}" already exists. Refusing to overwrite it.`,
+        requestId,
+      });
+    }
 
+    const preview = { action: "project.clone", repositoryUrl: body.repositoryUrl, path: `projects/${slug}` };
+    const policy = evaluatePolicyGuard({
+      action: "project.clone",
+      requestId,
+      actorId: auth.session.userId,
+      actorRole: auth.session.role,
+      approvalId: body.approvalId,
+    });
+    if (!policy.allowed) {
+      return policyDeniedResponse(policy.reason, policy.approvalRequired, policy.profile, policy.risk, "project.clone", preview);
+    }
+
+    await ensureProjectsRoot();
+    try {
       await runSandboxedCommand({
-        command: `git clone ${payload.repositoryUrl} ${projectPath}`,
-        cwd: WORKSPACE_ROOT,
-        workspaceId: relPath,
+        command: `git clone ${JSON.stringify(body.repositoryUrl)} ${JSON.stringify(slug)}`,
+        cwd: PROJECTS_ROOT,
+        workspaceId: `projects/${slug}`,
         route: "api/projects/workspace:clone",
         actorId: auth.session.userId,
         actorRole: auth.session.role,
         requestId,
-        allowedRoots: [WORKSPACE_ROOT],
+        allowedRoots: [PROJECTS_ROOT],
         allowedCommands: [{ kind: "prefix", value: "git clone " }],
+        timeoutMs: 300000,
       });
-
-      return NextResponse.json(
-        {
-          project: {
-            name: safeName,
-            path: relPath,
-            files: await listFiles(projectPath),
-          },
-        },
-        { status: 201 },
-      );
+    } catch (error) {
+      if (error instanceof SandboxViolationError) {
+        return errorResponse({
+          status: error.status,
+          code: "FORBIDDEN",
+          message: error.message,
+          requestId,
+        });
+      }
+      return errorResponse({
+        status: 400,
+        code: "INVALID_REQUEST",
+        message: error instanceof Error ? `Clone failed: ${error.message}` : "Clone failed.",
+        requestId,
+      });
     }
 
-    return errorResponse({ status: 400, code: "INVALID_REQUEST", message: "Unsupported action.", requestId });
+    if (!(await pathExists(projectDir))) {
+      return internalErrorResponse("Clone completed but the project directory was not found.", requestId);
+    }
+
+    const files = await listProjectFiles(projectDir);
+    return NextResponse.json(
+      {
+        ok: true,
+        project: {
+          ...toProjectRef(projectDir),
+          files,
+        },
+      },
+      { status: 201 },
+    );
   } catch (error) {
     if (error instanceof SandboxViolationError) {
       return errorResponse({
@@ -264,12 +327,12 @@ export async function POST(request: NextRequest) {
       return errorResponse({
         status: 400,
         code: "INVALID_REQUEST",
-        message: "Invalid request payload.",
+        message: "Invalid project workspace request.",
         details: error.issues,
         requestId,
       });
     }
-    return internalErrorResponse("Workspace project operation failed.", requestId);
+    return internalErrorResponse("Project workspace operation failed.", requestId);
   }
   })(request);
 }

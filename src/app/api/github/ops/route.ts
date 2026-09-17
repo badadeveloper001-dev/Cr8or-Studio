@@ -163,7 +163,7 @@ export async function POST(request: NextRequest) {
           allowedCommands: [{ kind: "exact", value: "git remote -v" }],
         }),
         runSandboxedCommand({
-          command: "git status --porcelain=2 --branch | head -n 2",
+          command: "git status --porcelain=2 --branch",
           cwd,
           workspaceId: payload.projectPath,
           route: "api/github/ops:status",
@@ -171,7 +171,7 @@ export async function POST(request: NextRequest) {
           actorRole: auth.session.role,
           requestId,
           allowedRoots: [cwd],
-          allowedCommands: [{ kind: "exact", value: "git status --porcelain=2 --branch | head -n 2" }],
+          allowedCommands: [{ kind: "exact", value: "git status --porcelain=2 --branch" }],
         }),
         runSandboxedCommand({
           command: "git --no-pager log --oneline -n 5",
@@ -194,7 +194,7 @@ export async function POST(request: NextRequest) {
           changes: status.stdout,
           changedFiles: changeList,
           changedCount: changeList.length,
-          tracking: tracking.stdout,
+          tracking: tracking.stdout.split("\n").slice(0, 2).join("\n"),
           recentCommits: recentCommits.stdout,
           remotes: remote.stdout,
         },
