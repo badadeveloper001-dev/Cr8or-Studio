@@ -16,7 +16,8 @@ export type AuditAction =
   | "sandbox.timeout"
   | "deploy.run"
   | "git.commit-push"
-  | "github.api";
+  | "github.api"
+  | "tool.invoke";
 
 export type AuditOutcome = "allow" | "deny" | "error";
 

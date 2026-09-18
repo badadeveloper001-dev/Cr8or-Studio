@@ -8,6 +8,7 @@ export const agentCatalog: AgentDefinition[] = [
     responsibility: "Translate user intent into requirements, stories, and acceptance criteria.",
     expertise: ["PRD", "Roadmaps", "Backlog", "Sprint planning"],
     dependencies: [],
+    toolPermissionTier: "read-only",
   },
   {
     id: "research",
@@ -16,6 +17,7 @@ export const agentCatalog: AgentDefinition[] = [
     responsibility: "Evaluate technologies, best practices, and implementation options.",
     expertise: ["Framework comparison", "Libraries", "Best practices"],
     dependencies: [],
+    toolPermissionTier: "read-only",
   },
   {
     id: "architect",
@@ -24,6 +26,7 @@ export const agentCatalog: AgentDefinition[] = [
     responsibility: "Design system boundaries, APIs, and project structure.",
     expertise: ["System design", "Scalability", "Auth strategy", "API design"],
     dependencies: ["product", "research"],
+    toolPermissionTier: "read-only",
   },
   {
     id: "uiux",
@@ -32,6 +35,7 @@ export const agentCatalog: AgentDefinition[] = [
     responsibility: "Design user flows, wireframes, and component systems.",
     expertise: ["Wireframes", "Accessibility", "Design systems"],
     dependencies: ["product"],
+    toolPermissionTier: "read-only",
   },
   {
     id: "database",
@@ -40,6 +44,7 @@ export const agentCatalog: AgentDefinition[] = [
     responsibility: "Design schemas, relationships, and query paths.",
     expertise: ["Prisma", "PostgreSQL", "Normalization", "Indexes"],
     dependencies: ["architect"],
+    toolPermissionTier: "writer",
   },
   {
     id: "backend",
@@ -48,6 +53,7 @@ export const agentCatalog: AgentDefinition[] = [
     responsibility: "Implement APIs, business logic, and security foundations.",
     expertise: ["Node.js", "APIs", "Auth", "Service architecture"],
     dependencies: ["architect", "database"],
+    toolPermissionTier: "writer",
   },
   {
     id: "frontend",
@@ -56,6 +62,7 @@ export const agentCatalog: AgentDefinition[] = [
     responsibility: "Build pages, components, client state, and interactions.",
     expertise: ["Next.js", "React", "Tailwind", "Accessibility"],
     dependencies: ["architect", "uiux"],
+    toolPermissionTier: "writer",
   },
   {
     id: "mobile",
@@ -64,6 +71,7 @@ export const agentCatalog: AgentDefinition[] = [
     responsibility: "Build mobile clients when requested by product scope.",
     expertise: ["React Native", "Flutter", "Swift", "Kotlin"],
     dependencies: ["architect", "uiux"],
+    toolPermissionTier: "writer",
   },
   {
     id: "security",
@@ -72,6 +80,7 @@ export const agentCatalog: AgentDefinition[] = [
     responsibility: "Audit vulnerabilities and enforce secure defaults.",
     expertise: ["OWASP", "Auth review", "Dependency audits"],
     dependencies: ["backend", "database", "frontend"],
+    toolPermissionTier: "reviewer",
   },
   {
     id: "performance",
@@ -80,6 +89,7 @@ export const agentCatalog: AgentDefinition[] = [
     responsibility: "Profile and optimize runtime, queries, and bundle behavior.",
     expertise: ["Profiling", "Caching", "Bundle analysis", "Query tuning"],
     dependencies: ["backend", "frontend", "database"],
+    toolPermissionTier: "reviewer",
   },
   {
     id: "qa",
@@ -88,6 +98,7 @@ export const agentCatalog: AgentDefinition[] = [
     responsibility: "Generate and run test plans across layers.",
     expertise: ["Unit tests", "Integration tests", "E2E", "Regression"],
     dependencies: ["backend", "frontend"],
+    toolPermissionTier: "reviewer",
   },
   {
     id: "documentation",
@@ -96,6 +107,7 @@ export const agentCatalog: AgentDefinition[] = [
     responsibility: "Generate and maintain technical and user-facing documentation.",
     expertise: ["README", "API docs", "Guides", "Changelog"],
     dependencies: ["product", "architect", "backend", "frontend", "qa"],
+    toolPermissionTier: "writer",
   },
   {
     id: "devops",
@@ -104,5 +116,6 @@ export const agentCatalog: AgentDefinition[] = [
     responsibility: "Prepare deployment, CI/CD, and infrastructure automation.",
     expertise: ["Docker", "CI/CD", "Vercel", "Cloud deployment"],
     dependencies: ["backend", "frontend", "qa", "security", "performance"],
+    toolPermissionTier: "reviewer",
   },
 ];

@@ -104,7 +104,7 @@ export function getDefaultLLMConfig(): LLMConfig {
   };
 }
 
-function getModel(config: LLMConfig): LanguageModel {
+export function getModel(config: LLMConfig): LanguageModel {
   if (config.provider === "anthropic") {
     const apiKey = getSecret("ANTHROPIC_API_KEY");
     if (!apiKey) {

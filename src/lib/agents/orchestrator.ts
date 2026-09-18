@@ -1,31 +1,120 @@
 import { nanoid } from "nanoid";
 
 import { agentCatalog } from "@/lib/agents/catalog";
-import { executeTask, buildInitialDashboard, TaskProgressCallback } from "@/lib/agents/executor";
+import { executeTask, buildInitialDashboard, TaskProgressCallback, ToolProgressCallback } from "@/lib/agents/executor";
 import { appendGlobalMemory } from "@/lib/agents/memory";
 import { scheduleParallelBatches } from "@/lib/agents/scheduler";
 import {
+  AgentId,
   AgentTask,
   AgentExecutionState,
   OrchestrationRequest,
   OrchestrationResult,
+  ToolProgressEvent,
 } from "@/lib/agents/types";
 
-export type { TaskProgressCallback };
+export type { TaskProgressCallback, ToolProgressCallback };
 export type OrchestrationProgressEvent =
   | { type: "agent_update"; data: AgentExecutionState }
   | { type: "batch_complete"; batchIndex: number; total: number }
   | { type: "done"; result: OrchestrationResult }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  | { type: "tool_progress"; data: ToolProgressEvent };
 
-function createTasks(prompt: string): AgentTask[] {
-  return agentCatalog.map((agent) => ({
-    id: `${agent.id}-${nanoid(6)}`,
-    agentId: agent.id,
-    title: `${agent.name} Work Package`,
+interface DomainAgentMap {
+  ui_frontend: AgentId[];
+  backend_api: AgentId[];
+  database: AgentId[];
+  mobile: AgentId[];
+  security_review: AgentId[];
+  performance_review: AgentId[];
+  quality_assurance: AgentId[];
+  documentation: AgentId[];
+  devops_review: AgentId[];
+  architecture: AgentId[];
+  product_planning: AgentId[];
+}
+
+const DOMAIN_AGENT_MAP: DomainAgentMap = {
+  ui_frontend: ["frontend", "uiux"],
+  backend_api: ["backend", "database"],
+  database: ["database", "backend"],
+  mobile: ["mobile"],
+  security_review: ["security"],
+  performance_review: ["performance"],
+  quality_assurance: ["qa"],
+  documentation: ["documentation"],
+  devops_review: ["devops"],
+  architecture: ["architect", "database", "uiux"],
+  product_planning: ["product", "research"],
+};
+
+function detectDomains(prompt: string): (keyof DomainAgentMap)[] {
+  const lower = prompt.toLowerCase();
+  const domains: (keyof DomainAgentMap)[] = [];
+
+  if (/(ui|frontend|component|page|screen|interface|client|react|next\.js|tailwind|shadcn)/.test(lower)) {
+    domains.push("ui_frontend");
+  }
+  if (/(api|backend|server|endpoint|route|business logic|auth|service)/.test(lower)) {
+    domains.push("backend_api");
+  }
+  if (/(database|schema|prisma|migration|query|sql|postgres)/.test(lower)) {
+    domains.push("database");
+  }
+  if (/(mobile|ios|android|react native|flutter|swift|kotlin)/.test(lower)) {
+    domains.push("mobile");
+  }
+  if (/(security|vulnerability|audit|owasp|auth|authorization|vulnerabilit)/.test(lower)) {
+    domains.push("security_review");
+  }
+  if (/(performance|optimiz|slow|latency|cach|bundle|profil)/.test(lower)) {
+    domains.push("performance_review");
+  }
+  if (/(test|qa|quality|unit test|integration test|e2e|playwright|cypress)/.test(lower)) {
+    domains.push("quality_assurance");
+  }
+  if (/(document|readme|docs|changelog|guide|api doc)/.test(lower)) {
+    domains.push("documentation");
+  }
+  if (/(deploy|ci\/cd|docker|vercel|infrastructure|pipeline)/.test(lower)) {
+    domains.push("devops_review");
+  }
+  if (/(architect|design|system|scalab|structure|boundar)/.test(lower)) {
+    domains.push("architecture");
+  }
+  if (/(plan|roadmap|strateg|requirement|story|backlog|sprint)/.test(lower)) {
+    domains.push("product_planning");
+  }
+
+  // Default: if no specific domain detected, include architecture and product
+  if (domains.length === 0) {
+    domains.push("architecture", "product_planning");
+  }
+
+  return domains;
+}
+
+function createTasksForDomains(prompt: string, domains: (keyof DomainAgentMap)[]): AgentTask[] {
+  const agentIds = new Set<AgentId>();
+  
+  for (const domain of domains) {
+    for (const agentId of DOMAIN_AGENT_MAP[domain]) {
+      agentIds.add(agentId);
+    }
+  }
+
+  // Always include architecture and product for context
+  agentIds.add("architect");
+  agentIds.add("product");
+
+  return Array.from(agentIds).map((agentId) => ({
+    id: `${agentId}-${nanoid(6)}`,
+    agentId,
+    title: `${agentCatalog.find(a => a.id === agentId)?.name} Work Package`,
     input: prompt,
     dependsOn: [],
-    status: "pending",
+    status: "pending" as const,
   }));
 }
 
@@ -74,10 +163,11 @@ export async function orchestrate(
 ): Promise<OrchestrationResult> {
   appendGlobalMemory(request.projectId, {
     goals: [request.prompt],
-    architecture: ["Parallel-by-default orchestration with dependency-aware DAG scheduling."],
+    architecture: ["Domain-based specialist routing with dependency-aware DAG scheduling."],
   });
 
-  const initialTasks = createTasks(request.prompt);
+  const domains = detectDomains(request.prompt);
+  const initialTasks = createTasksForDomains(request.prompt, domains);
   const linkedTasks = linkDependencies(initialTasks);
   const dashboard = buildInitialDashboard();
   const batches = scheduleParallelBatches(linkedTasks);
@@ -88,13 +178,21 @@ export async function orchestrate(
     onEvent?.({ type: "agent_update", data: state });
   };
 
+  const onToolProgress: ToolProgressCallback = (event) => {
+    onEvent?.({ type: "tool_progress", data: event });
+  };
+
   for (let i = 0; i < batches.length; i++) {
     const batch = batches[i];
     await Promise.all(
       batch.map(async (task) => {
         const current = taskById.get(task.id);
         if (!current) return;
-        const completed = await executeTask(request.projectId, current, dashboard, onProgress);
+        const completed = await executeTask(request.projectId, current, dashboard, (state) => {
+          onProgress?.(state);
+        }, (event) => {
+          onToolProgress?.(event);
+        });
         taskById.set(task.id, completed);
       }),
     );
@@ -109,7 +207,7 @@ export async function orchestrate(
     projectId: request.projectId,
     prompt: request.prompt,
     summary:
-      "Master Orchestrator distributed work across specialized agents in parallel batches and synthesized one unified output.",
+      "Master Orchestrator routed work to relevant specialists based on task domain and synthesized output.",
     timeline,
     dashboard,
     synthesis,

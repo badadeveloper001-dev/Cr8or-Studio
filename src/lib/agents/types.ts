@@ -15,6 +15,8 @@ export type AgentId =
   | "uiux"
   | "research";
 
+export type ToolPermissionTier = "read-only" | "writer" | "reviewer" | "none";
+
 export interface AgentDefinition {
   id: AgentId;
   name: string;
@@ -22,6 +24,7 @@ export interface AgentDefinition {
   responsibility: string;
   expertise: string[];
   dependencies: AgentId[];
+  toolPermissionTier: ToolPermissionTier;
 }
 
 export interface OrchestrationRequest {
@@ -53,6 +56,19 @@ export interface AgentLocalMemory {
   notes: MemoryNote[];
 }
 
+export interface ToolCallRecord {
+  id: string;
+  agentId: string;
+  tool: string;
+  paramsSummary: string;
+  startedAt: string;
+  finishedAt: string;
+  ok: boolean;
+  workspaceChanged: boolean;
+  requiresApproval: boolean;
+  error?: string;
+}
+
 export interface AgentTask {
   id: string;
   agentId: AgentId;
@@ -64,6 +80,26 @@ export interface AgentTask {
   confidence?: number;
   startedAt?: string;
   finishedAt?: string;
+  toolRecords?: ToolCallRecord[];
+  workspaceChanged?: boolean;
+}
+
+export interface ToolProgressEvent {
+  agentId: string;
+  tool: string;
+  label: string;
+  status: "running" | "completed" | "failed" | "blocked";
+  detail?: string;
+  startedAt: string;
+  finishedAt?: string;
+  requiresApproval: boolean;
+  workspaceChanged: boolean;
+  approvalDetail?: {
+    tool: string;
+    paramsSummary: string;
+    preview: string;
+    reason: string;
+  };
 }
 
 export interface AgentExecutionState {

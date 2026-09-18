@@ -78,6 +78,14 @@ export type RunResultData = {
   tone: RunResultTone;
   meta?: Array<{ label: string; value: string }>;
   details?: string[];
+  toolReceipts?: Array<{
+    agent: string;
+    tool: string;
+    status: "completed" | "failed" | "blocked";
+    workspaceChanged: boolean;
+    requiresApproval: boolean;
+    durationMs?: number;
+  }>;
 };
 
 type RunHistoryLike = {
@@ -89,6 +97,22 @@ type RunHistoryLike = {
   totalAgents: number;
   confidence: number;
   estimatedCostUsd: number;
+};
+
+type AgentTaskLike = {
+  id: string;
+  agentId: string;
+  status: string;
+  toolRecords?: Array<{
+    id: string;
+    tool: string;
+    ok: boolean;
+    workspaceChanged: boolean;
+    requiresApproval: boolean;
+    startedAt: string;
+    finishedAt: string;
+  }>;
+  workspaceChanged?: boolean;
 };
 
 type ReceiptLike = {
@@ -112,6 +136,7 @@ export function buildRunResults(input: {
   runHistory: RunHistoryLike[];
   receipts: ReceiptLike[];
   synthesis: SynthesisLike | null;
+  timeline?: AgentTaskLike[];
 }): RunResultData[] {
   const results: RunResultData[] = [];
   const latest = input.runHistory[0];
@@ -125,6 +150,27 @@ export function buildRunResults(input: {
     if (latest.confidence > 0) meta.push({ label: "Confidence", value: `${latest.confidence}%` });
     if (latest.estimatedCostUsd > 0) meta.push({ label: "Cost", value: `$${latest.estimatedCostUsd.toFixed(4)}` });
 
+    // Collect tool receipts from timeline
+    const toolReceipts: RunResultData["toolReceipts"] = [];
+    if (input.timeline) {
+      for (const task of input.timeline) {
+        if (task.toolRecords) {
+          for (const record of task.toolRecords) {
+            const started = new Date(record.startedAt).getTime();
+            const finished = new Date(record.finishedAt).getTime();
+            toolReceipts.push({
+              agent: task.agentId,
+              tool: record.tool,
+              status: record.ok ? "completed" : record.requiresApproval ? "blocked" : "failed",
+              workspaceChanged: record.workspaceChanged,
+              requiresApproval: record.requiresApproval,
+              durationMs: finished - started,
+            });
+          }
+        }
+      }
+    }
+
     results.push({
       id: `run-${latest.id}`,
       title: latest.status === "completed" ? "Run completed" : latest.status === "failed" ? "Run failed" : "Run cancelled",
@@ -132,6 +178,7 @@ export function buildRunResults(input: {
       tone,
       meta,
       details: latest.prompt ? [latest.prompt] : [],
+      toolReceipts: toolReceipts.length > 0 ? toolReceipts : undefined,
     });
   }
 

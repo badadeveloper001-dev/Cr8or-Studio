@@ -6,6 +6,7 @@ import { errorResponse, internalErrorResponse } from "@/lib/http/api-response";
 import { withRouteMetrics } from "@/lib/observability/sli";
 import { authorizeRoute } from "@/lib/security/authorization";
 import { getSecretReadiness } from "@/lib/security/secrets";
+import { classifyIntent } from "@/lib/intent";
 
 const chatBodySchema = z.object({
   message: z.string(),
@@ -81,57 +82,6 @@ function buildCapabilityContext() {
   ].join("\n");
 }
 
-function isDelegationIntent(message: string): boolean {
-  const lower = message.toLowerCase();
-  const executionTerms = [
-    "build",
-    "implement",
-    "analyze",
-    "analysis",
-    "scan",
-    "inspect",
-    "review",
-    "audit",
-    "explore",
-    "check",
-    "look at",
-    "summarize",
-    "create",
-    "fix",
-    "run",
-    "deploy",
-    "refactor",
-    "generate",
-    "add",
-    "update",
-    "ship",
-    "set up",
-    "setup",
-    "wire",
-    "make",
-  ];
-  const exploratoryStarts = ["what", "why", "how", "can you explain", "should we", "which"];
-  const asksQuestion = lower.includes("?") || exploratoryStarts.some((start) => lower.startsWith(start));
-  const hasExecution = executionTerms.some((term) => lower.includes(term));
-  if (asksQuestion && !hasExecution) return false;
-  return hasExecution;
-}
-
-function stripDelegationClaims(reply: string): string {
-  const lines = reply
-    .split("\n")
-    .filter((line) => {
-      const normalized = line.toLowerCase();
-      if (normalized.includes("queued") || normalized.includes("in progress") || normalized.includes("result pending")) {
-        return false;
-      }
-      return true;
-    });
-
-  const cleaned = lines.join("\n").trim();
-  return cleaned || "I can help with that. Share what you want me to analyze and I will proceed.";
-}
-
 function parseReply(raw: string): { response: string; suggestions: string[] } {
   const lines = raw.split("\n");
   const suggestionsIndex = lines.findIndex((line) => /^\s*suggestions\s*:/i.test(line));
@@ -178,6 +128,21 @@ function sanitizeAgentText(text: string): string {
     .trim();
 
   return cleaned || "I can help with that. The previous model output was malformed, so please retry and I will continue from there.";
+}
+
+function stripDelegationClaims(reply: string): string {
+  const lines = reply
+    .split("\n")
+    .filter((line) => {
+      const normalized = line.toLowerCase();
+      if (normalized.includes("queued") || normalized.includes("in progress") || normalized.includes("result pending")) {
+        return false;
+      }
+      return true;
+    });
+
+  const cleaned = lines.join("\n").trim();
+  return cleaned || "I can help with that. Share what you want me to analyze and I will proceed.";
 }
 
 function buildChatPrompt(
@@ -235,7 +200,9 @@ export async function POST(request: NextRequest) {
   try {
     const raw = await request.json();
     const payload = chatBodySchema.parse(raw);
-    const shouldDelegate = isDelegationIntent(payload.message);
+    const intentDecision = await classifyIntent(payload.message);
+
+    const shouldDelegate = intentDecision.shouldDelegate && intentDecision.allowedToolMode !== "none";
 
     if (shouldDelegate) {
       const ack = buildDelegationAcknowledgement(payload.message);
@@ -245,6 +212,9 @@ export async function POST(request: NextRequest) {
           suggestions: ack.suggestions,
           shouldDelegate: true,
           delegatePrompt: payload.message,
+          intent: intentDecision.intent,
+          allowedToolMode: intentDecision.allowedToolMode,
+          requiresExplicitApproval: intentDecision.requiresExplicitApproval,
         },
         { status: 200 },
       );
@@ -261,6 +231,9 @@ export async function POST(request: NextRequest) {
         suggestions: parsed.suggestions,
         shouldDelegate: false,
         delegatePrompt: payload.message,
+        intent: intentDecision.intent,
+        allowedToolMode: intentDecision.allowedToolMode,
+        requiresExplicitApproval: intentDecision.requiresExplicitApproval,
       },
       { status: 200 },
     );

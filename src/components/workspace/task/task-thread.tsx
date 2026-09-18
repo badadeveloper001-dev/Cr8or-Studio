@@ -12,6 +12,7 @@ import { InlineApproval } from "@/components/workspace/task/inline-approval";
 import { RunResult } from "@/components/workspace/task/run-result";
 import { TaskMessage } from "@/components/workspace/task/task-message";
 import { TaskStatus } from "@/components/workspace/task/task-status";
+import { ToolActivity } from "@/components/workspace/task/tool-activity";
 import { buildRunResults, mapTaskStatus } from "@/components/workspace/task/task-utils";
 
 import type { DelegationPolicy } from "@/hooks/use-workspace-controller";
@@ -193,6 +194,7 @@ export function TaskThread({ onReviewChanges }: { onReviewChanges?: () => void }
     error,
     gitSnapshot,
     timeline,
+    currentIntent,
   } = useWorkspaceControllerContext();
 
   const pendingApprovals = approvals.filter((approval) => approval.status === "pending");
@@ -207,8 +209,8 @@ export function TaskThread({ onReviewChanges }: { onReviewChanges?: () => void }
   });
 
   const runResults = useMemo(
-    () => buildRunResults({ runHistory, receipts: executionReceipts, synthesis }),
-    [runHistory, executionReceipts, synthesis],
+    () => buildRunResults({ runHistory, receipts: executionReceipts, synthesis, timeline }),
+    [runHistory, executionReceipts, synthesis, timeline],
   );
 
   const hasUserMessage = chatMessages.some((message) => message.role === "user");
@@ -220,7 +222,7 @@ export function TaskThread({ onReviewChanges }: { onReviewChanges?: () => void }
       <div ref={chatScrollRef} className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-5 sm:px-6 sm:py-7">
           <div className="flex items-center justify-between gap-3">
-            <TaskStatus status={taskStatus} />
+            <TaskStatus status={taskStatus} intent={currentIntent?.intent} />
             <p className="min-w-0 truncate text-right text-[11px] text-text-muted">{statusLine}</p>
           </div>
 
@@ -250,6 +252,8 @@ export function TaskThread({ onReviewChanges }: { onReviewChanges?: () => void }
           <AgentActivity />
 
           <CommandActivity />
+
+          <ToolActivity />
 
           {pendingDelegation ? (
             <InlineApproval

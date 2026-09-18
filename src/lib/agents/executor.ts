@@ -1,10 +1,13 @@
 import { agentCatalog } from "@/lib/agents/catalog";
 import { runAgentLLM } from "@/lib/agents/llm";
+import { runAgentWithTools, getAgentToolPreset } from "@/lib/agents/tool-loop";
 import { getGlobalMemory, getLocalMemory, writeLocalNote } from "@/lib/agents/memory";
 import { agentSystemPrompts } from "@/lib/agents/prompts";
-import { AgentExecutionState, AgentTask } from "@/lib/agents/types";
+import { AgentExecutionState, AgentTask, ToolCallRecord, ToolProgressEvent } from "@/lib/agents/types";
+import { ToolContext, ToolName } from "@/lib/agents/tools";
 
 export type TaskProgressCallback = (state: AgentExecutionState) => void;
+export type ToolProgressCallback = (event: ToolProgressEvent) => void;
 
 export function buildInitialDashboard(): AgentExecutionState[] {
   return agentCatalog.map((agent) => ({
@@ -19,11 +22,26 @@ export function buildInitialDashboard(): AgentExecutionState[] {
   }));
 }
 
+function buildToolContext(projectId: string, task: AgentTask, requestId: string): ToolContext {
+  return {
+    projectId,
+    workspaceRoot: process.cwd(),
+    requestId,
+    actorId: task.agentId,
+    actorRole: "agent",
+  };
+}
+
+function getToolPresetForAgent(agentId: string): ToolName[] {
+  return getAgentToolPreset(agentId);
+}
+
 export async function executeTask(
   projectId: string,
   task: AgentTask,
   dashboard: AgentExecutionState[],
   onProgress?: TaskProgressCallback,
+  onToolProgress?: ToolProgressCallback,
 ): Promise<AgentTask> {
   const agent = agentCatalog.find((item) => item.id === task.agentId);
   if (!agent) {
@@ -36,6 +54,10 @@ export async function executeTask(
     if (!dashboardEntry) return;
     Object.assign(dashboardEntry, patch);
     onProgress?.({ ...dashboardEntry });
+  }
+
+  function emitToolProgress(event: ToolProgressEvent) {
+    onToolProgress?.(event);
   }
 
   const globalMemory = getGlobalMemory(projectId);
@@ -67,9 +89,34 @@ export async function executeTask(
 
   const startedAt = new Date().toISOString();
   let output: string;
+  let toolRecords: ToolCallRecord[] = [];
+  let workspaceChanged = false;
+  let requiresApproval = false;
 
   try {
-    output = await runAgentLLM(systemPrompt, userMessage);
+    const requestId = `${task.agentId}-${startedAt}`;
+    const toolContext = buildToolContext(projectId, task, requestId);
+    const toolNames = getToolPresetForAgent(task.agentId);
+    const hasWriteTools = toolNames.includes("write_file");
+
+    if (hasWriteTools) {
+      const toolNames = getAgentToolPreset(task.agentId);
+      const result = await runAgentWithTools({
+        systemPrompt,
+        userMessage,
+        agentId: task.agentId,
+        toolNames,
+        context: toolContext,
+        task,
+        onToolProgress: emitToolProgress,
+      });
+      output = result.output;
+      toolRecords = result.toolRecords;
+      workspaceChanged = result.workspaceChanged;
+      requiresApproval = result.requiresApproval;
+    } else {
+      output = await runAgentLLM(systemPrompt, userMessage);
+    }
   } catch (err) {
     updateState({
       status: "failed",
@@ -80,23 +127,31 @@ export async function executeTask(
   }
 
   writeLocalNote(projectId, task.agentId, {
-    note: `Completed '${task.title}'. Output length: ${output.length} chars.`,
+    note: `Completed '${task.title}'. Output length: ${output.length} chars. Tool calls: ${toolRecords.length}.`,
   });
 
   const finishedAt = new Date().toISOString();
 
+  const finalStatus = requiresApproval ? "blocked" : "completed";
+  const finalProgress = requiresApproval ? 80 : 100;
+  const finalThinking = requiresApproval
+    ? "Work paused - approval required for tool action."
+    : "Work package completed and shared with Orchestrator.";
+
   updateState({
-    status: "completed",
-    progress: 100,
-    thinking: "Work package completed and shared with Orchestrator.",
+    status: finalStatus,
+    progress: finalProgress,
+    thinking: finalThinking,
   });
 
   return {
     ...task,
-    status: "completed",
+    status: finalStatus,
     output,
     confidence: 0.9,
     startedAt,
     finishedAt,
+    toolRecords,
+    workspaceChanged,
   };
 }

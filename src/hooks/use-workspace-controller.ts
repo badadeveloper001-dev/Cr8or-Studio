@@ -5,6 +5,7 @@ import hljs from "highlight.js";
 
 import { OrchestrationProgressEvent } from "@/lib/agents/orchestrator";
 import { AgentExecutionState, AgentId, AgentTask, OrchestrationResult } from "@/lib/agents/types";
+import type { IntentClass, ToolMode } from "@/lib/intent/types";
 
 const SEED_PROMPT = "Build a full-stack SaaS authentication system with social login (GitHub, Google), RBAC, session management, and audit logs.";
 
@@ -22,6 +23,9 @@ type ChatMessage = {
   content: string;
   suggestions?: string[];
   createdAt: number;
+  intent?: IntentClass;
+  allowedToolMode?: ToolMode;
+  requiresExplicitApproval?: boolean;
 };
 
 type TerminalEntry = {
@@ -314,6 +318,7 @@ export function useWorkspaceController() {
   const [fileContentByPath, setFileContentByPath] = useState<Record<string, string>>({});
   const [fileErrorByPath, setFileErrorByPath] = useState<Record<string, string>>({});
   const [loadingFilePath, setLoadingFilePath] = useState<string | null>(null);
+  const [currentIntent, setCurrentIntent] = useState<{ intent: IntentClass; allowedToolMode: ToolMode; requiresExplicitApproval: boolean } | null>(null);
   const [terminalEntries, setTerminalEntries] = useState<TerminalEntry[]>([
     { id: "boot-1", text: "$ cr8or --boot" },
     { id: "boot-2", text: "Cr8or AI console ready. Type 'help' in terminal input for commands." },
@@ -372,8 +377,13 @@ export function useWorkspaceController() {
 
   useEffect(() => {
     if (!chatScrollRef.current) return;
-    chatScrollRef.current.scrollTo({ top: chatScrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [chatMessages]);
+    // Only auto-scroll if user is near bottom (within 200px)
+    const { scrollTop, scrollHeight, clientHeight } = chatScrollRef.current;
+    const isNearBottom = scrollHeight - scrollTop - clientHeight < 200;
+    if (isNearBottom) {
+      chatScrollRef.current.scrollTo({ top: chatScrollRef.current.scrollHeight, behavior: "smooth" });
+    }
+  }, [chatMessages, timeline, approvals, pendingDelegation]);
 
   useEffect(() => {
     try {
@@ -1436,6 +1446,18 @@ export function useWorkspaceController() {
             if (event.type === "agent_update") {
               updateAgent(event.data);
               appendTerminal(`agent:${event.data.agentId} status=${event.data.status} progress=${event.data.progress}%`);
+            } else if (event.type === "tool_progress") {
+              appendTerminal(`tool:${event.data.agentId} ${event.data.tool} ${event.data.status}`);
+              // If tool requires approval, surface it to the user
+              if (event.data.requiresApproval && event.data.approvalDetail) {
+                const approval = await requestApproval(
+                  "files.write",
+                  event.data.approvalDetail.reason || "Tool action requires approval",
+                  event.data.approvalDetail.preview
+                );
+                await loadApprovals();
+                appendTerminal(`approval requested for ${event.data.tool}: ${approval.id}`);
+              }
             } else if (event.type === "batch_complete") {
               const lineText = `Batch ${event.batchIndex + 1}/${event.total} complete.`;
               setStatusLine(lineText);
@@ -1476,6 +1498,13 @@ export function useWorkspaceController() {
                     : item,
                 ),
               );
+
+              // Check if any task had workspaceChanged and trigger git refresh
+              const hasWorkspaceChanges = event.result.timeline.some((task) => task.workspaceChanged);
+              if (hasWorkspaceChanges) {
+                appendTerminal("Workspace changes detected, refreshing git status...");
+                void runGitStatus();
+              }
             } else if (event.type === "error") {
               setError(event.message);
               setActiveBottomTab("problems");
@@ -1632,10 +1661,20 @@ export function useWorkspaceController() {
         suggestions?: string[];
         shouldDelegate?: boolean;
         delegatePrompt?: string;
+        intent?: string;
+        allowedToolMode?: string;
+        requiresExplicitApproval?: boolean;
       };
       const reply = data.reply?.trim() || "No reply was generated.";
       if (!forcedMessage) {
         setChatAttachments([]);
+      }
+      if (data.intent) {
+        setCurrentIntent({
+          intent: data.intent as IntentClass,
+          allowedToolMode: data.allowedToolMode as ToolMode,
+          requiresExplicitApproval: data.requiresExplicitApproval ?? false,
+        });
       }
       setChatMessages((prev) => [
         ...prev,
@@ -1645,11 +1684,21 @@ export function useWorkspaceController() {
           content: reply,
           suggestions: data.suggestions ?? [],
           createdAt: Date.now(),
+          intent: data.intent as IntentClass,
+          allowedToolMode: data.allowedToolMode as ToolMode,
+          requiresExplicitApproval: data.requiresExplicitApproval,
         },
       ]);
 
       if (data.shouldDelegate) {
         const nextPrompt = data.delegatePrompt || message;
+        if (data.intent) {
+          setCurrentIntent({
+            intent: data.intent as IntentClass,
+            allowedToolMode: data.allowedToolMode as ToolMode,
+            requiresExplicitApproval: data.requiresExplicitApproval ?? false,
+          });
+        }
         appendTerminal("Cr8or AI prepared delegation plan.");
 
         if (delegationPolicy === "chat-only") {
@@ -2303,5 +2352,6 @@ export function useWorkspaceController() {
     activeDocumentLineCount,
     activeLanguage,
     highlightedDocumentHtml,
+    currentIntent,
   };
 }

@@ -1,0 +1,464 @@
+import {
+  IntentClass,
+  IntentDecision,
+  ToolMode,
+  INTENT_TOOL_MODE,
+  INTENT_SHOULD_DELEGATE,
+  INTENT_REQUIRES_APPROVAL,
+} from "@/lib/intent/types";
+
+export type { IntentClass, IntentDecision, ToolMode };
+export { INTENT_TOOL_MODE, INTENT_SHOULD_DELEGATE, INTENT_REQUIRES_APPROVAL };
+
+const HIGH_RISK_PATTERNS = [
+  "commit",
+  "push",
+  "deploy",
+  "delete",
+  "remove",
+  "destroy",
+  "drop database",
+  "drop table",
+  "npm install",
+  "yarn add",
+  "pnpm add",
+  "install package",
+  "add dependency",
+  "credentials",
+  "secrets",
+  "config",
+  ".env",
+];
+
+const DELEGATION_PATTERNS = [
+  "build",
+  "implement",
+  "refactor",
+  "generate",
+  "create",
+  "fix",
+  "run",
+  "analyze",
+  "audit",
+  "scan",
+  "review",
+  "optimize",
+  "redesign",
+  "set up",
+  "setup",
+  "wire",
+  "make",
+  "add",
+  "update",
+  "change",
+  "modify",
+  "ship",
+];
+
+const EXPLORATORY_STARTS = [
+  "what",
+  "why",
+  "how",
+  "can you explain",
+  "should we",
+  "which",
+  "tell me",
+  "describe",
+  "explain",
+];
+
+const PLANNING_PATTERNS = [
+  "plan",
+  "roadmap",
+  "strategy",
+  "approach",
+  "design",
+  "architecture",
+  "spec",
+  "specification",
+  "proposal",
+];
+
+const CONVERSATION_PATTERNS = [
+  "hello",
+  "hi",
+  "hey",
+  "thanks",
+  "thank you",
+  "ok",
+  "okay",
+  "cool",
+  "great",
+  "nice",
+  "bye",
+  "goodbye",
+  "see you",
+  "how are you",
+  "how's it going",
+  "what's up",
+];
+
+const EXPLANATION_PATTERNS = [
+  "explain",
+  "what does",
+  "what is",
+  "how does",
+  "why does",
+  "what are",
+  "define",
+  "meaning of",
+  "understand",
+];
+
+const BRAINSTORMING_PATTERNS = [
+  "what do you think",
+  "what do you think about",
+  "should we",
+  "ideas for",
+  "opinion on",
+  "thoughts on",
+  "consider",
+];
+
+const POLITE_ACTION_PATTERNS = [
+  "can you fix",
+  "can you add",
+  "can you update",
+  "can you refactor",
+  "can you change",
+  "can you modify",
+  "can you implement",
+  "can you create",
+  "can you build",
+  "can you make",
+  "can you write",
+  "can you edit",
+  "can you remove",
+  "can you delete",
+  "can you run",
+  "can you execute",
+  "can you deploy",
+  "can you install",
+  "can you configure",
+  "can you set up",
+  "could you fix",
+  "could you add",
+  "could you update",
+  "could you refactor",
+  "could you change",
+  "could you modify",
+  "could you implement",
+  "could you create",
+  "could you build",
+  "could you make",
+  "could you write",
+  "could you edit",
+  "could you remove",
+  "could you delete",
+  "could you run",
+  "could you execute",
+  "could you deploy",
+  "could you install",
+  "could you configure",
+  "could you set up",
+  "would you fix",
+  "would you add",
+  "would you update",
+  "would you refactor",
+  "would you change",
+  "would you modify",
+  "would you implement",
+  "would you create",
+  "would you build",
+  "would you make",
+  "would you write",
+  "would you edit",
+  "would you remove",
+  "would you delete",
+  "would you run",
+  "would you execute",
+  "would you deploy",
+  "would you install",
+  "would you configure",
+  "would you set up",
+  "please fix",
+  "please add",
+  "please update",
+  "please refactor",
+  "please change",
+  "please modify",
+  "please implement",
+  "please create",
+  "please build",
+  "please make",
+  "please write",
+  "please edit",
+  "please remove",
+  "please delete",
+  "please run",
+  "please execute",
+  "please deploy",
+  "please install",
+  "please configure",
+  "please set up",
+];
+
+const TELL_ME_PATTERNS = [
+  "can you tell me",
+  "could you tell me",
+  "would you tell me",
+  "please tell me",
+];
+
+const READ_ONLY_INSPECTION_PATTERNS = [
+  "check why",
+  "what's wrong",
+  "what is wrong",
+  "why is",
+  "why isn't",
+  "why doesn't",
+  "debug",
+  "investigate",
+  "diagnose",
+];
+
+const SPECIALIST_DELEGATION_PATTERNS = [
+  "redesign",
+  "architect",
+  "design system",
+  "build system",
+  "implement feature",
+  "create feature",
+  "build feature",
+];
+
+function startsWithExploratory(message: string): boolean {
+  const lower = message.toLowerCase().trim();
+  return EXPLORATORY_STARTS.some((start) => lower.startsWith(start));
+}
+
+function containsAny(message: string, patterns: string[]): boolean {
+  const lower = message.toLowerCase();
+  return patterns.some((pattern) => lower.includes(pattern));
+}
+
+function matchesHighRisk(message: string): boolean {
+  return containsAny(message, HIGH_RISK_PATTERNS);
+}
+
+function matchesDelegation(message: string): boolean {
+  return containsAny(message, DELEGATION_PATTERNS);
+}
+
+function matchesPlanning(message: string): boolean {
+  return containsAny(message, PLANNING_PATTERNS);
+}
+
+function matchesConversation(message: string): boolean {
+  const lower = message.toLowerCase().trim();
+  return CONVERSATION_PATTERNS.some((pattern) => {
+    const patternWithSpace = pattern + " ";
+    const patternWithComma = pattern + ",";
+    return lower === pattern || lower.startsWith(patternWithSpace) || lower.startsWith(patternWithComma);
+  });
+}
+
+function matchesExplanation(message: string): boolean {
+  return containsAny(message, EXPLANATION_PATTERNS);
+}
+
+function matchesBrainstorming(message: string): boolean {
+  return containsAny(message, BRAINSTORMING_PATTERNS);
+}
+
+function matchesPoliteAction(message: string): boolean {
+  return containsAny(message, POLITE_ACTION_PATTERNS);
+}
+
+function matchesTellMe(message: string): boolean {
+  return containsAny(message, TELL_ME_PATTERNS);
+}
+
+function matchesReadOnlyInspection(message: string): boolean {
+  return containsAny(message, READ_ONLY_INSPECTION_PATTERNS);
+}
+
+function matchesSpecialistDelegation(message: string): boolean {
+  return containsAny(message, SPECIALIST_DELEGATION_PATTERNS);
+}
+
+function isQuestion(message: string): boolean {
+  return message.trim().endsWith("?") || startsWithExploratory(message);
+}
+
+function hasActionVerb(message: string): boolean {
+  const actionVerbs = [
+    "fix",
+    "change",
+    "implement",
+    "add",
+    "remove",
+    "refactor",
+    "update",
+    "create",
+    "delete",
+    "modify",
+    "write",
+    "edit",
+    "run",
+    "execute",
+    "build",
+    "deploy",
+    "install",
+    "configure",
+    "set up",
+    "redesign",
+  ];
+  return containsAny(message, actionVerbs);
+}
+
+function buildDecision(
+  intent: IntentClass,
+  confidence: number,
+  overrides?: Partial<IntentDecision>
+): IntentDecision {
+  return {
+    intent,
+    confidence,
+    shouldUseTools: (INTENT_TOOL_MODE as Record<IntentClass, ToolMode>)[intent] !== "none",
+    allowedToolMode: (INTENT_TOOL_MODE as Record<IntentClass, ToolMode>)[intent],
+    shouldDelegate: (INTENT_SHOULD_DELEGATE as Record<IntentClass, boolean>)[intent],
+    requiresExplicitApproval: (INTENT_REQUIRES_APPROVAL as Record<IntentClass, boolean>)[intent],
+    reason: `Classified as ${intent} (${confidence}% confidence)`,
+    ...overrides,
+  };
+}
+
+export function classifyIntentDeterministic(message: string): IntentDecision {
+  const trimmed = message.trim();
+  const lower = trimmed.toLowerCase();
+
+  if (trimmed.length < 3) {
+    return buildDecision("unclear", 30, { reason: "Message too short to classify" });
+  }
+
+  // High risk actions checked first
+  if (matchesHighRisk(lower) && hasActionVerb(lower)) {
+    return buildDecision("high_risk_action", 90);
+  }
+
+  // Conversation - highest priority for greetings
+  if (matchesConversation(trimmed)) {
+    return buildDecision("conversation", 95);
+  }
+
+  // Polite action requests - "Can you fix...", "Could you add...", etc.
+  // These are explicit action requests despite being phrased as questions
+  if (matchesPoliteAction(lower) && hasActionVerb(lower)) {
+    return buildDecision("direct_action", 90);
+  }
+
+  // Specialist delegation - check before general delegation
+  if (matchesSpecialistDelegation(lower) && hasActionVerb(lower)) {
+    return buildDecision("specialist_delegation", 85);
+  }
+
+  // Direct read-only inspection patterns
+  if (matchesReadOnlyInspection(lower)) {
+    return buildDecision("read_only_inspection", 85);
+  }
+
+  // Brainstorming patterns
+  if (matchesBrainstorming(lower)) {
+    return buildDecision("brainstorming", 80);
+  }
+
+  // Planning patterns - check before general delegation
+  if (matchesPlanning(lower) && isQuestion(trimmed)) {
+    return buildDecision("planning", 80);
+  }
+  if (matchesPlanning(lower) && hasActionVerb(lower) && lower.includes("create a plan")) {
+    return buildDecision("planning", 85);
+  }
+
+  // Questions
+  if (isQuestion(trimmed)) {
+    // Polite action requests - "Can you fix...", "Could you add..."
+    // These are explicit action requests despite being phrased as questions
+    if (matchesPoliteAction(lower) && hasActionVerb(lower)) {
+      return buildDecision("direct_action", 90);
+    }
+
+    // Tell-me patterns - "Can you tell me...", "Could you tell me..."
+    // These are explanation/read-only, NOT brainstorming
+    if (matchesTellMe(lower)) {
+      if (matchesReadOnlyInspection(lower) || lower.includes("wrong") || lower.includes("broken") || lower.includes("fail") || lower.includes("error") || lower.includes("bug")) {
+        return buildDecision("read_only_inspection", 80);
+      }
+      return buildDecision("explanation", 80);
+    }
+
+    // Read-only inspection for diagnostic questions
+    if (matchesReadOnlyInspection(lower) || lower.includes("wrong") || lower.includes("broken") || lower.includes("fail") || lower.includes("error") || lower.includes("bug")) {
+      return buildDecision("read_only_inspection", 80);
+    }
+    // Brainstorming for opinion/idea questions
+    if (matchesBrainstorming(lower)) {
+      return buildDecision("brainstorming", 80);
+    }
+    // Explanation for "how/what/why does/are/is" questions
+    if (matchesExplanation(lower)) {
+      return buildDecision("explanation", 75);
+    }
+    // Exploratory starts (what/why/how) without specific patterns
+    if (startsWithExploratory(trimmed)) {
+      return buildDecision("brainstorming", 70);
+    }
+    return buildDecision("brainstorming", 65);
+  }
+
+  // Delegation with action verbs - direct action or specialist
+  if (matchesDelegation(lower) && hasActionVerb(lower)) {
+    if (matchesSpecialistDelegation(lower)) {
+      return buildDecision("specialist_delegation", 85);
+    }
+    return buildDecision("direct_action", 85);
+  }
+
+  // Planning without question
+  if (matchesPlanning(lower)) {
+    return buildDecision("planning", 70);
+  }
+
+  // Explanation statements
+  if (matchesExplanation(lower)) {
+    return buildDecision("explanation", 75);
+  }
+
+  return buildDecision("unclear", 50, { reason: "No clear pattern matched" });
+}
+
+export function validateIntentDecision(decision: IntentDecision): IntentDecision {
+  if (decision.confidence < 0 || decision.confidence > 100) {
+    decision.confidence = Math.max(0, Math.min(100, decision.confidence));
+  }
+
+  const expectedToolMode = (INTENT_TOOL_MODE as Record<IntentClass, ToolMode>)[decision.intent];
+  const expectedDelegate = (INTENT_SHOULD_DELEGATE as Record<IntentClass, boolean>)[decision.intent];
+  const expectedApproval = (INTENT_REQUIRES_APPROVAL as Record<IntentClass, boolean>)[decision.intent];
+
+  if (decision.allowedToolMode !== expectedToolMode) {
+    decision.allowedToolMode = expectedToolMode;
+    decision.shouldUseTools = expectedToolMode !== "none";
+  }
+
+  if (decision.shouldDelegate !== expectedDelegate) {
+    decision.shouldDelegate = expectedDelegate;
+  }
+
+  if (decision.requiresExplicitApproval !== expectedApproval) {
+    decision.requiresExplicitApproval = expectedApproval;
+  }
+
+  return decision;
+}

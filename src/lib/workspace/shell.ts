@@ -30,6 +30,36 @@ export function resolveWorkspacePath(input: string): string | null {
   return absolutePath;
 }
 
+export function getActiveProjectRoot(projectId?: string): string {
+  if (!projectId || projectId === "cr8or-studio") {
+    return WORKSPACE_ROOT;
+  }
+  const projectPath = path.join(PROJECTS_ROOT, projectId);
+  return projectPath;
+}
+
+export function resolveProjectPath(projectId: string | undefined, input: string): string | null {
+  const projectRoot = getActiveProjectRoot(projectId);
+  const safePath = sanitizeWorkspacePath(input);
+  if (!safePath) {
+    return null;
+  }
+
+  const absolutePath = path.resolve(projectRoot, safePath);
+  if (!absolutePath.startsWith(projectRoot)) {
+    return null;
+  }
+
+  return absolutePath;
+}
+
+function resolveCommandForPlatform(command: string): string {
+  if (process.platform === "win32" && command.startsWith("npm ")) {
+    return command.replace(/^npm /, "npm.cmd ");
+  }
+  return command;
+}
+
 type RunShellOptions = {
   envOverrides?: Record<string, string | undefined>;
   redactValues?: string[];
@@ -43,7 +73,9 @@ export async function runShell(command: string, cwd: string, options?: RunShellO
     ...(options?.envOverrides ?? {}),
   };
 
-  const { stdout, stderr } = await execAsync(command, {
+  const resolvedCommand = resolveCommandForPlatform(command);
+
+  const { stdout, stderr } = await execAsync(resolvedCommand, {
     cwd,
     env,
     timeout: options?.timeoutMs ?? 120000,
