@@ -335,6 +335,10 @@ export async function POST(request: NextRequest) {
         requestId,
       });
     }
+    const message = error instanceof Error ? error.message : "unknown";
+    if (message.includes("relation") || message.includes("does not exist") || message.includes("table") || message.includes("P2021")) {
+      return internalErrorResponse("Cloud workspace database is not initialized. Run database migrations first.", requestId);
+    }
     return internalErrorResponse("Project workspace operation failed.", requestId);
   }
   })(request);
