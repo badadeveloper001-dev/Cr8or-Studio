@@ -6,7 +6,7 @@ import { appendAuditEvent } from "@/lib/security/audit";
 import { ToolName, ToolContext, ToolResult, ToolMetadata, toolMetadata } from "@/lib/agents/tools";
 import { getWorkspaceRuntime } from "@/lib/workspace/runtime-factory";
 
-function getRuntime(context: ToolContext) {
+async function getRuntime(context: ToolContext) {
   return getWorkspaceRuntime(context.projectId);
 }
 
@@ -119,7 +119,7 @@ function findCommandCatalogEntry(command: string): { key: string; entry: Command
 
 async function executeReadFile(params: { path: string }, context: ToolContext): Promise<ToolResult<{ content: string }>> {
   const startedAt = new Date().toISOString();
-  const runtime = getRuntime(context);
+  const runtime = await getRuntime(context);
 
   try {
     const result = await runtime.readFile(params.path);
@@ -148,7 +148,7 @@ async function executeReadFile(params: { path: string }, context: ToolContext): 
 
 async function executeListFiles(params: { path?: string }, context: ToolContext): Promise<ToolResult<{ files: Array<{ name: string; type: "file" | "directory" }> }>> {
   const startedAt = new Date().toISOString();
-  const runtime = getRuntime(context);
+  const runtime = await getRuntime(context);
 
   try {
     const files = await runtime.listFiles(params.path);
@@ -177,7 +177,7 @@ async function executeListFiles(params: { path?: string }, context: ToolContext)
 
 async function executeWriteFile(params: { path: string; content: string }, context: ToolContext): Promise<ToolResult<{ bytes: number }>> {
   const startedAt = new Date().toISOString();
-  const runtime = getRuntime(context);
+  const runtime = await getRuntime(context);
 
   try {
     const result = await runtime.writeFile(params.path, params.content);
@@ -206,7 +206,7 @@ async function executeWriteFile(params: { path: string; content: string }, conte
 
 async function executeGitStatus(params: Record<string, never>, context: ToolContext): Promise<ToolResult<{ branch: string; changes: string; changedFiles: Array<{ path: string; status: string }>; changedCount: number }>> {
   const startedAt = new Date().toISOString();
-  const runtime = getRuntime(context);
+  const runtime = await getRuntime(context);
 
   try {
     const result = await runtime.gitStatus();
@@ -235,7 +235,7 @@ async function executeGitStatus(params: Record<string, never>, context: ToolCont
 
 async function executeGitDiff(params: { path?: string; staged?: boolean }, context: ToolContext): Promise<ToolResult<{ diff: string; stagedDiff: string }>> {
   const startedAt = new Date().toISOString();
-  const runtime = getRuntime(context);
+  const runtime = await getRuntime(context);
 
   try {
     const result = await runtime.gitDiff(params.path, params.staged);
@@ -264,7 +264,7 @@ async function executeGitDiff(params: { path?: string; staged?: boolean }, conte
 
 async function executeRunCommand(params: { command: string }, context: ToolContext): Promise<ToolResult<{ stdout: string; stderr: string; exitCode: number }>> {
   const startedAt = new Date().toISOString();
-  const runtime = getRuntime(context);
+  const runtime = await getRuntime(context);
   const catalogEntry = findCommandCatalogEntry(params.command);
 
   if (!catalogEntry) {

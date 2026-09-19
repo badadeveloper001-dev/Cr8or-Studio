@@ -19,6 +19,7 @@ model Project {
   tasks       Task[]
   globals     GlobalMemory[]
   locals      LocalAgentMemory[]
+  workspaces  Workspace[]
 }
 
 model Task {
@@ -50,4 +51,20 @@ model LocalAgentMemory {
   note        String
   createdAt   DateTime @default(now())
   project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+model Workspace {
+  id                  String   @id @default(cuid())
+  projectId           String   @unique
+  project             Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  runtimeType         String
+  provider            String?
+  providerWorkspaceId String?
+  repositoryUrl       String?
+  projectName         String?
+  branch              String?
+  state               String
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  lastActiveAt        DateTime?
 }

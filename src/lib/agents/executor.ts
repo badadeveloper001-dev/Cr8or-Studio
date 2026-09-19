@@ -5,6 +5,7 @@ import { getGlobalMemory, getLocalMemory, writeLocalNote } from "@/lib/agents/me
 import { agentSystemPrompts } from "@/lib/agents/prompts";
 import { AgentExecutionState, AgentTask, ToolCallRecord, ToolProgressEvent } from "@/lib/agents/types";
 import { ToolContext, ToolName } from "@/lib/agents/tools";
+import { getWorkspaceRuntime } from "@/lib/workspace/runtime-factory";
 
 export type TaskProgressCallback = (state: AgentExecutionState) => void;
 export type ToolProgressCallback = (event: ToolProgressEvent) => void;
@@ -20,20 +21,6 @@ export function buildInitialDashboard(): AgentExecutionState[] {
     dependencies: agent.dependencies,
     thinking: "Awaiting dependencies",
   }));
-}
-
-function buildToolContext(projectId: string, task: AgentTask, requestId: string): ToolContext {
-  return {
-    projectId,
-    workspaceRoot: process.cwd(),
-    requestId,
-    actorId: task.agentId,
-    actorRole: "agent",
-  };
-}
-
-function getToolPresetForAgent(agentId: string): ToolName[] {
-  return getAgentToolPreset(agentId);
 }
 
 export async function executeTask(
@@ -96,10 +83,11 @@ export async function executeTask(
   try {
     const requestId = `${task.agentId}-${startedAt}`;
     const toolContext = buildToolContext(projectId, task, requestId);
-    const toolNames = getToolPresetForAgent(task.agentId);
+    const toolNames = getAgentToolPreset(task.agentId);
     const hasWriteTools = toolNames.includes("write_file");
 
     if (hasWriteTools) {
+      const runtime = await getWorkspaceRuntime(projectId);
       const toolNames = getAgentToolPreset(task.agentId);
       const result = await runAgentWithTools({
         systemPrompt,
@@ -153,5 +141,15 @@ export async function executeTask(
     finishedAt,
     toolRecords,
     workspaceChanged,
+  };
+}
+
+function buildToolContext(projectId: string, task: AgentTask, requestId: string): ToolContext {
+  return {
+    projectId,
+    workspaceRoot: process.cwd(),
+    requestId,
+    actorId: task.agentId,
+    actorRole: "agent",
   };
 }
