@@ -46,10 +46,10 @@ export function HomeComposer({
         className="block w-full resize-none bg-transparent px-1 py-1 text-[15px] leading-relaxed text-text-primary outline-none placeholder:text-text-muted"
       />
       <div className="mt-2 flex flex-wrap items-center justify-between gap-3 border-t border-border-strong pt-3">
-        <p className="text-xs text-text-muted">Cr8or AI plans the work and delegates to specialist agents.</p>
+        <p className="text-xs text-text-muted">Questions get answers. Tasks get done.</p>
         <Button type="submit" size="sm" disabled={!canSubmit} className="gap-2 rounded-md">
           {isRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowRight className="h-4 w-4" />}
-          Start build
+          Send
         </Button>
       </div>
     </form>

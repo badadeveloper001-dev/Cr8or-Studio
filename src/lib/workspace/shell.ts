@@ -34,7 +34,9 @@ export function getActiveProjectRoot(projectId?: string): string {
   if (!projectId || projectId === "cr8or-studio") {
     return WORKSPACE_ROOT;
   }
-  const projectPath = path.join(PROJECTS_ROOT, projectId);
+  const relativeId = projectId.replace(/^projects[\\/]/, "");
+  const projectPath = path.resolve(PROJECTS_ROOT, relativeId);
+  if (projectPath !== PROJECTS_ROOT && !projectPath.startsWith(PROJECTS_ROOT + path.sep)) throw new Error("Project path is outside the workspace.");
   return projectPath;
 }
 

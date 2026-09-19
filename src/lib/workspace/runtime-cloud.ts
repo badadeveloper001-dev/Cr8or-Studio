@@ -1,3 +1,5 @@
+import path from "node:path";
+import { cloudPath, CLOUD_REPOSITORY_ROOT, shellQuote } from "@/lib/workspace/cloud-path";
 import { Sandbox } from "@daytona/sdk";
 import { DaytonaProvider } from "@/lib/workspace/providers/daytona";
 import {
@@ -16,24 +18,6 @@ interface CloudWorkspaceConfig {
   repositoryUrl?: string;
   branch?: string;
   createdAt: Date;
-}
-
-function validatePath(
-  _projectId: string,
-  relPath: string,
-): { ok: boolean; absolutePath?: string; error?: string } {
-  const safePath = relPath.replace(/\\/g, "/").replace(/^\/+/, "");
-  if (!safePath || safePath.includes("..")) {
-    return { ok: false, error: "Invalid path: traversal or empty path not allowed" };
-  }
-  return { ok: true, absolutePath: safePath };
-}
-
-function resolveCommandForPlatform(command: string): string {
-  if (process.platform === "win32" && command.startsWith("npm ")) {
-    return command.replace(/^npm /, "npm.cmd ");
-  }
-  return command;
 }
 
 export class CloudWorkspaceRuntime {
@@ -67,6 +51,8 @@ export class CloudWorkspaceRuntime {
       if (!this.sandbox) {
         throw new Error(`Sandbox not found: ${this.config.providerWorkspaceId}`);
       }
+      if (this.sandbox.state === "stopped") await this.sandbox.start(60);
+      await this.sandbox.waitUntilStarted();
     }
   }
 
@@ -85,35 +71,27 @@ export class CloudWorkspaceRuntime {
   }
 
   async readFile(relPath: string): Promise<{ content: string; bytes: number }> {
-    const validation = validatePath(this.projectId, relPath);
-    if (!validation.ok) {
-      throw new Error(validation.error);
-    }
+    const absolutePath = cloudPath(relPath);
     const fs = this.getFileSystem();
-    const buffer = await fs.downloadFile(validation.absolutePath!);
+    const buffer = await fs.downloadFile(absolutePath);
     const content = buffer.toString("utf8");
     return { content, bytes: buffer.length };
   }
 
   async writeFile(relPath: string, content: string): Promise<{ bytes: number }> {
-    const validation = validatePath(this.projectId, relPath);
-    if (!validation.ok) {
-      throw new Error(validation.error);
-    }
+    const absolutePath = cloudPath(relPath);
     const fs = this.getFileSystem();
+    await fs.createFolder(path.posix.dirname(absolutePath), "755");
     const buffer = Buffer.from(content, "utf8");
-    await fs.uploadFile(buffer, validation.absolutePath!);
+    await fs.uploadFile(buffer, absolutePath);
     return { bytes: buffer.length };
   }
 
   async listFiles(relPath?: string): Promise<Array<{ name: string; type: "file" | "directory" }>> {
     const targetPath = relPath ?? ".";
-    const validation = validatePath(this.projectId, targetPath);
-    if (!validation.ok) {
-      throw new Error(validation.error);
-    }
+    const absolutePath = cloudPath(targetPath);
     const fs = this.getFileSystem();
-    const files = await fs.listFiles(validation.absolutePath!);
+    const files = await fs.listFiles(absolutePath);
     return files
       .filter((entry) => !entry.name.startsWith("."))
       .slice(0, 200)
@@ -128,7 +106,7 @@ export class CloudWorkspaceRuntime {
       throw new Error("Sandbox not initialized");
     }
     const git = this.provider.getSandboxGit(this.sandbox);
-    const status = await git.status("/workspace");
+    const status = await git.status(CLOUD_REPOSITORY_ROOT);
     const changedFiles = status.fileStatus.map((fs) => ({
       path: fs.name,
       status: `${fs.staging}${fs.worktree}`.trim() || "??",
@@ -143,7 +121,7 @@ export class CloudWorkspaceRuntime {
 
   async gitDiff(relPath?: string, staged?: boolean): Promise<GitDiffResult> {
     const stagedFlag = staged ? "--staged " : "";
-    const fileArg = relPath ? ` -- ${relPath}` : "";
+    const fileArg = relPath ? ` -- ${shellQuote(cloudPath(relPath))}` : "";
 
     const [diffResult, stagedDiffResult] = await Promise.all([
       this.executeCommandInSandbox(`git diff ${stagedFlag}${fileArg}`),
@@ -161,7 +139,7 @@ export class CloudWorkspaceRuntime {
       throw new Error("Sandbox not initialized");
     }
     const proc = this.provider.getSandboxProcess(this.sandbox);
-    const result = await proc.executeCommand(command, "/workspace");
+    const result = await proc.executeCommand(command, CLOUD_REPOSITORY_ROOT);
     return {
       stdout: result.artifacts?.stdout ?? result.result,
       stderr: "",
@@ -170,8 +148,7 @@ export class CloudWorkspaceRuntime {
   }
 
   async runCommand(request: ValidatedCommandRequest): Promise<CommandResult> {
-    const resolvedCommand = resolveCommandForPlatform(request.command);
-    const result = await this.executeCommandInSandbox(resolvedCommand);
+    const result = await this.executeCommandInSandbox(request.command);
     return {
       stdout: result.stdout,
       stderr: result.stderr,

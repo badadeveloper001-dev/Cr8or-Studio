@@ -19,6 +19,10 @@ import { evaluatePolicyGuard } from "@/lib/security/policy";
 import { runSandboxedCommand, SandboxViolationError } from "@/lib/security/sandbox";
 import { PROJECTS_ROOT } from "@/lib/workspace/shell";
 
+import { cloudModeEnabled } from "@/lib/workspace/cloud-projects";
+import { createCloudProject, listCloudProjects, openCloudProject } from "@/lib/workspace/cloud-service";
+export const maxDuration = 300;
+
 const bodySchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("recent") }),
   z.object({
@@ -122,13 +126,12 @@ export async function POST(request: NextRequest) {
     const raw = await request.json();
     const body = bodySchema.parse(raw);
 
-    if (process.env.VERCEL_ENV) {
-      return errorResponse({
-        status: 409,
-        code: "CONFLICT",
-        message: "Workspace project management is unavailable in the deployed app. Run Cr8or Studio locally for file-based project operations.",
-        requestId,
-      });
+    if (cloudModeEnabled()) {
+      if (body.action === "recent") return await listCloudProjects(request);
+      if (body.action === "open") return await openCloudProject(request, body.path);
+      return await createCloudProject(request, body.action === "clone"
+        ? { repositoryUrl: body.repositoryUrl, approvalId: body.approvalId }
+        : { projectName: body.name, approvalId: body.approvalId });
     }
 
     if (body.action === "recent") {

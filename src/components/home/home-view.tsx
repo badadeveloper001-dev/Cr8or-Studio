@@ -24,11 +24,13 @@ export function HomeView({
     createProject,
     openProjectByPath,
     cloneGithubProject,
-    runOrchestration,
+    sendChat,
+    projectError,
+    isChatting,
   } = useWorkspaceControllerContext();
 
   const handleRun = (nextPrompt: string) => {
-    void runOrchestration(nextPrompt, "manual");
+    void sendChat(nextPrompt);
     onEnterWorkspace();
   };
 
@@ -46,10 +48,10 @@ export function HomeView({
             What are you working on?
           </h1>
           <p className="mt-2 max-w-xl text-sm leading-relaxed text-text-secondary">
-            Describe a task and Cr8or AI will plan, delegate, and execute it with specialist agents.
+            Ask a question, explore an idea, or describe what you want to build.
           </p>
           <div className="mt-6">
-            <HomeComposer initialPrompt={prompt} isRunning={isRunning} onSubmit={handleRun} />
+            <HomeComposer initialPrompt={prompt} isRunning={isRunning || isChatting} onSubmit={handleRun} />
           </div>
         </section>
 
@@ -57,20 +59,18 @@ export function HomeView({
           <h2 id="project-actions-heading" className="text-sm font-semibold tracking-tight text-text-primary">
             Start from
           </h2>
+          {projectError ? <p role="alert" className="mt-3 text-sm text-danger">{projectError}</p> : null}
           <div className="mt-3">
             <ProjectActions
               isBusy={isProjectBusy}
-              onCreate={(name) => {
-                void createProject(name);
-                onEnterWorkspace();
+              onCreate={async (name) => {
+                if (await createProject(name)) onEnterWorkspace();
               }}
-              onOpen={(path) => {
-                void openProjectByPath(path);
-                onEnterWorkspace();
+              onOpen={async (path) => {
+                if (await openProjectByPath(path)) onEnterWorkspace();
               }}
               onClone={async (repositoryUrl) => {
-                await cloneGithubProject(repositoryUrl);
-                onEnterWorkspace();
+                if (await cloneGithubProject(repositoryUrl)) onEnterWorkspace();
               }}
             />
           </div>
@@ -79,9 +79,8 @@ export function HomeView({
         <div className="mt-14">
           <RecentProjects
             projects={recentProjects}
-            onOpen={(path) => {
-              void openProjectByPath(path);
-              onEnterWorkspace();
+            onOpen={async (path) => {
+              if (await openProjectByPath(path)) onEnterWorkspace();
             }}
           />
         </div>

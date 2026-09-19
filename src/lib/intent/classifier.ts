@@ -320,6 +320,59 @@ const READ_ONLY_OVERRIDE_PATTERNS = [
   "don't deploy anything",
 ];
 
+const CAPABILITY_QUESTION_STARTS = [
+  "can you build",
+  "can you create",
+  "can you make",
+  "can you implement",
+  "can you add",
+  "can you fix",
+  "can you edit",
+  "can you deploy",
+  "can you run",
+  "can you execute",
+  "can you set up",
+  "could you build",
+  "could you create",
+  "could you make",
+  "could you implement",
+  "could you add",
+  "could you fix",
+  "could you edit",
+  "could you deploy",
+  "could you run",
+  "could you execute",
+  "could you set up",
+  "would you build",
+  "would you create",
+  "would you make",
+  "would you implement",
+  "would you add",
+  "would you fix",
+  "would you edit",
+  "would you deploy",
+  "would you run",
+  "would you execute",
+  "would you set up",
+];
+
+const ACTION_REQUEST_INDICATORS = [
+  "please",
+  "go ahead",
+  "do it",
+  "start",
+  "begin",
+  "now",
+  "right now",
+  "immediately",
+  "let's",
+  "lets",
+  "i need you to",
+  "i want you to",
+  "make sure",
+  "get started",
+];
+
 function startsWithExploratory(message: string): boolean {
   const lower = message.toLowerCase().trim();
   return EXPLORATORY_STARTS.some((start) => lower.startsWith(start));
@@ -385,6 +438,14 @@ function hasNegationOverride(message: string): boolean {
 
 function hasReadOnlyOverride(message: string): boolean {
   return containsAny(message, READ_ONLY_OVERRIDE_PATTERNS);
+}
+
+function matchesCapabilityQuestion(message: string): boolean {
+  const lower = message.toLowerCase().trim();
+  if (!lower.endsWith("?")) return false;
+  if (!containsAny(lower, CAPABILITY_QUESTION_STARTS)) return false;
+  if (containsAny(lower, ACTION_REQUEST_INDICATORS)) return false;
+  return true;
 }
 
 function isQuestion(message: string): boolean {
@@ -468,8 +529,12 @@ export function classifyIntentDeterministic(message: string): IntentDecision {
   }
 
   // Polite action requests - "Can you fix...", "Could you add...", etc.
-  // These are explicit action requests despite being phrased as questions
+  // BUT capability questions like "Can you build a website?" without action intent
+  // should be treated as explanation, not delegation.
   if (matchesPoliteAction(lower) && hasActionVerb(lower)) {
+    if (matchesCapabilityQuestion(lower)) {
+      return buildDecision("explanation", 85, { reason: "Capability question — no action intent detected" });
+    }
     return buildDecision("direct_action", 90);
   }
 
@@ -499,8 +564,11 @@ export function classifyIntentDeterministic(message: string): IntentDecision {
   // Questions
   if (isQuestion(trimmed)) {
     // Polite action requests - "Can you fix...", "Could you add..."
-    // These are explicit action requests despite being phrased as questions
+    // BUT capability questions should be explanation, not delegation
     if (matchesPoliteAction(lower) && hasActionVerb(lower)) {
+      if (matchesCapabilityQuestion(lower)) {
+        return buildDecision("explanation", 85, { reason: "Capability question — no action intent detected" });
+      }
       return buildDecision("direct_action", 90);
     }
 

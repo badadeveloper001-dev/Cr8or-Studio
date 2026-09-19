@@ -35,7 +35,7 @@ const DEFAULT_SANDBOX_CONFIG = {
     memory: 4,
     disk: 10,
   },
-  autoStopInterval: 900,
+  autoStopInterval: 15,
   autoDeleteInterval: 0,
   ephemeral: false,
 };
@@ -109,7 +109,7 @@ export class DaytonaProvider {
       type: "cloud",
       projectId: "",
       capabilities: {
-        preview: false,
+        preview: true,
         sleep: true,
         persistentStorage: true,
         gitSupport: true,

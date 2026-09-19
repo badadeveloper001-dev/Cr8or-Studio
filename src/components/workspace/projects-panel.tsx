@@ -65,10 +65,12 @@ export function ProjectsPanel() {
     openProjectByPath,
     cloneGithubProject,
     isProjectBusy,
+    projectError,
   } = useWorkspaceControllerContext();
 
   return (
     <div className="space-y-5 p-3">
+      {projectError ? <p role="alert" className="text-xs text-danger">{projectError}</p> : null}
       <div className="rounded-md border border-border-strong bg-surface-muted px-3 py-2">
         <p className="text-[11px] text-text-muted">Active project</p>
         <p className="mt-0.5 truncate text-xs text-text-primary">{currentProject.name}</p>

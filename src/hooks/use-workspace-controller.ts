@@ -2,12 +2,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import hljs from "highlight.js";
+import { projectIdFor, workspaceResponseSchema, type ProjectRef } from "@/lib/workspace/project-ref";
 
 import { OrchestrationProgressEvent } from "@/lib/agents/orchestrator";
 import { AgentExecutionState, AgentId, AgentTask, OrchestrationResult } from "@/lib/agents/types";
 import type { IntentClass, ToolMode } from "@/lib/intent/types";
 
-const SEED_PROMPT = "Build a full-stack SaaS authentication system with social login (GitHub, Google), RBAC, session management, and audit logs.";
+const SEED_PROMPT = "";
 
 type DashboardMap = Map<AgentId, AgentExecutionState>;
 
@@ -88,14 +89,7 @@ type LeadInsights = {
   latencyMs: number;
 };
 
-type ProjectRef = {
-  name: string;
-  path: string;
-  updatedAt?: string;
-  workspaceId?: string;
-  runtimeType?: "local" | "cloud";
-  repositoryUrl?: string;
-};
+
 
 type GitChange = {
   path: string;
@@ -255,8 +249,6 @@ export function useWorkspaceController() {
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set(["src"]));
   const [openTabs, setOpenTabs] = useState<EditorTab[]>([
     { id: "cr8or-ai.chat", title: "cr8or-ai.chat" },
-    { id: "README.md", title: "README.md" },
-    { id: "src/components/workspace/workspace-shell.tsx", title: "workspace-shell.tsx", dirty: true },
   ]);
   const [activeTabId, setActiveTabId] = useState("cr8or-ai.chat");
   const [isPaletteOpen, setIsPaletteOpen] = useState(false);
@@ -315,6 +307,7 @@ export function useWorkspaceController() {
   const [projectPathInput, setProjectPathInput] = useState("projects/");
   const [repositoryInput, setRepositoryInput] = useState("");
   const [gitCommitMessage, setGitCommitMessage] = useState("chore: update project via Cr8or Studio");
+  const [projectError, setProjectError] = useState<string | null>(null);
   const [isProjectBusy, setIsProjectBusy] = useState(false);
   const [isGitBusy, setIsGitBusy] = useState(false);
   const [terminalCommand, setTerminalCommand] = useState("");
@@ -331,7 +324,7 @@ export function useWorkspaceController() {
       id: "assistant-seed",
       role: "assistant",
       content:
-        "Cr8or AI online. Share a task and I will delegate execution to the specialist agents automatically.",
+        "Tell me what you want to build, fix, or understand.",
       createdAt: Date.now(),
     },
   ]);
@@ -475,6 +468,7 @@ export function useWorkspaceController() {
     showRightPane,
     terminalEntries,
     currentProject,
+    projectError,
     recentProjects,
     gitSnapshot,
   ]);
@@ -510,7 +504,7 @@ export function useWorkspaceController() {
     setLoadingFilePath(filePath);
     setFileErrorByPath((prev) => ({ ...prev, [filePath]: "" }));
     try {
-      const response = await fetch(`/api/files?path=${encodeURIComponent(filePath)}`);
+      const response = await fetch(`/api/files?path=${encodeURIComponent(filePath)}&projectId=${encodeURIComponent(projectIdFor(currentProject))}`);
       const payload = (await response.json()) as { content?: string; message?: string };
       if (!response.ok) {
         throw new Error(payload.message || `Unable to open ${filePath}`);
@@ -518,15 +512,11 @@ export function useWorkspaceController() {
       setFileContentByPath((prev) => ({ ...prev, [filePath]: payload.content ?? "" }));
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to open file.";
-      if (message.includes("Local workspace files are unavailable in the deployed app")) {
-        setOpenTabs((prev) => prev.filter((tab) => tab.id === "cr8or-ai.chat"));
-        setActiveTabId("cr8or-ai.chat");
-      }
       setFileErrorByPath((prev) => ({ ...prev, [filePath]: message }));
     } finally {
       setLoadingFilePath((current) => (current === filePath ? null : current));
     }
-  }, [fileContentByPath]);
+  }, [fileContentByPath, currentProject]);
 
   useEffect(() => {
     if (activeTabId === "cr8or-ai.chat") return;
@@ -540,13 +530,13 @@ export function useWorkspaceController() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "recent" }),
       });
-      if (!response.ok) return;
-      const data = (await response.json()) as { projects?: ProjectRef[] };
+      const data = (await response.json()) as { projects?: ProjectRef[]; message?: string };
+      if (!response.ok) throw new Error(data.message || "Unable to load recent projects.");
       if (Array.isArray(data.projects)) {
         setRecentProjects(data.projects.slice(0, 20));
       }
-    } catch {
-      // no-op
+    } catch (err) {
+      setProjectError(err instanceof Error ? err.message : "Unable to load recent projects.");
     }
   }, []);
 
@@ -672,145 +662,50 @@ export function useWorkspaceController() {
     void loadRecentProjects();
   }, [loadRecentProjects]);
 
-  const createProject = useCallback(async (nameOverride?: string) => {
-    const name = (nameOverride ?? projectNameInput).trim();
-    if (!name) return;
+  const performProjectAction = useCallback(async (action: "create" | "open" | "clone", value: string): Promise<boolean> => {
+    if (!value.trim()) return false;
     setIsProjectBusy(true);
+    setProjectError(null);
+    const policyAction = action === "create" ? "project.create" : "project.clone";
     try {
       const response = await fetch("/api/projects/workspace", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "create",
-          name,
-          approvalId: approvedActionIds["project.create"],
-        }),
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, ...(action === "create" ? { name: value } : action === "open" ? { path: value } : { repositoryUrl: value }), approvalId: approvedActionIds[policyAction] }),
       });
-      const data = (await response.json()) as { project?: ProjectRef & { files?: Array<{ name: string; type: string }> }; message?: string; requiresApproval?: boolean; preview?: unknown };
+      const data = await response.json();
       if (!response.ok) {
-        if (response.status === 409) {
-          await handleApprovalConflict("project.create", `Create project ${name}`, data as unknown as Record<string, unknown>);
-          return;
+        if (data.requiresApproval) {
+          await handleApprovalConflict(policyAction, "Approve project " + action, data);
+          setProjectError("Approval requested. Open the workspace to approve, then retry this action.");
+          return false;
         }
-        throw new Error(data.message || "Unable to create project.");
+        throw new Error(data.message || "Unable to " + action + " project.");
       }
-      if (data.project) {
-        setCurrentProject({ name: data.project.name, path: data.project.path });
-        appendTerminal(`Project created: ${data.project.path}`);
-        setApprovedActionIds((prev) => ({ ...prev, "project.create": undefined }));
-      }
+      const { project } = workspaceResponseSchema.parse(data);
+      setCurrentProject(project);
+      setOpenTabs([{ id: "cr8or-ai.chat", title: "cr8or-ai.chat" }]);
+      setActiveTabId("cr8or-ai.chat");
+      setFileContentByPath({});
+      setFileErrorByPath({});
+      setGitSnapshot(null);
+      setApprovedActionIds(prev => ({ ...prev, [policyAction]: undefined }));
       setProjectNameInput("");
-      await loadRecentProjects();
-    } catch (err) {
-      appendTerminal(`project error: ${err instanceof Error ? err.message : "create failed"}`);
-    } finally {
-      setIsProjectBusy(false);
-    }
-  }, [appendTerminal, approvedActionIds, handleApprovalConflict, loadRecentProjects, projectNameInput]);
-
-  const openProjectByPath = useCallback(async (projectPath: string) => {
-    const value = projectPath.trim();
-    if (!value) return;
-    setIsProjectBusy(true);
-    try {
-      const response = await fetch("/api/projects/workspace", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "open", path: value }),
-      });
-      if (!response.ok) throw new Error("Unable to open project.");
-      const data = (await response.json()) as { project?: ProjectRef & { files?: Array<{ name: string; type: string }> } };
-      if (data.project) {
-        setCurrentProject({ name: data.project.name, path: data.project.path });
-        appendTerminal(`Project opened: ${data.project.path}`);
-        const file = data.project.files?.find((item) => item.type === "file");
-        if (file) {
-          const relative = `${data.project.path}/${file.name}`;
-          const title = relative.split("/").pop() || relative;
-          setOpenTabs((prev) => {
-            if (prev.some((tab) => tab.id === relative)) {
-              return prev;
-            }
-            return [...prev, { id: relative, title }];
-          });
-          setActiveTabId(relative);
-          void loadFileContent(relative);
-        }
-      }
-      await loadRecentProjects();
-    } catch (err) {
-      appendTerminal(`project error: ${err instanceof Error ? err.message : "open failed"}`);
-    } finally {
-      setIsProjectBusy(false);
-    }
-  }, [appendTerminal, loadFileContent, loadRecentProjects]);
-
-  const cloneGithubProject = useCallback(async (repositoryUrlOverride?: string) => {
-    const repositoryUrl = (repositoryUrlOverride ?? repositoryInput).trim();
-    if (!repositoryUrl) return;
-    setIsProjectBusy(true);
-    try {
-      const isCloud = Boolean(process.env.NEXT_PUBLIC_CLOUD_MODE || process.env.VERCEL_ENV);
-      
-      if (isCloud) {
-        const response = await fetch("/api/workspaces", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ repositoryUrl }),
-        });
-        const data = await response.json() as {
-          ok?: boolean;
-          projectId?: string;
-          workspaceId?: string;
-          projectName?: string;
-          repositoryUrl?: string;
-          message?: string;
-        };
-        if (!response.ok || !data.ok) {
-          throw new Error(data.message || "Cloud workspace creation failed.");
-        }
-        const newProject: ProjectRef = {
-          name: data.projectName || repositoryUrl.split("/").pop()?.replace(/\.git$/, "") || "project",
-          path: data.projectId || "",
-          workspaceId: data.workspaceId,
-          runtimeType: "cloud",
-          repositoryUrl: data.repositoryUrl || repositoryUrl,
-        };
-        setCurrentProject(newProject);
-        appendTerminal(`Cloud workspace created: ${newProject.name}`);
-        setApprovedActionIds((prev) => ({ ...prev, "project.clone": undefined }));
-      } else {
-        const response = await fetch("/api/projects/workspace", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            action: "clone",
-            repositoryUrl,
-            approvalId: approvedActionIds["project.clone"],
-          }),
-        });
-        const data = (await response.json()) as { project?: ProjectRef; message?: string; requiresApproval?: boolean; preview?: unknown };
-        if (!response.ok) {
-          if (response.status === 409) {
-            await handleApprovalConflict("project.clone", `Clone project ${repositoryUrl}`, data as unknown as Record<string, unknown>);
-            return;
-          }
-          throw new Error(data.message || "Clone failed.");
-        }
-        if (data.project) {
-          setCurrentProject({ ...data.project, runtimeType: "local" });
-          appendTerminal(`GitHub project cloned: ${data.project.path}`);
-          setApprovedActionIds((prev) => ({ ...prev, "project.clone": undefined }));
-        }
-      }
       setRepositoryInput("");
+      appendTerminal("Project ready: " + project.name);
+      setStatusLine("Project ready: " + project.name);
       await loadRecentProjects();
+      return true;
     } catch (err) {
-      appendTerminal(`clone error: ${err instanceof Error ? err.message : "clone failed"}`);
-    } finally {
-      setIsProjectBusy(false);
-    }
-  }, [appendTerminal, approvedActionIds, handleApprovalConflict, loadRecentProjects, repositoryInput]);
+      const message = err instanceof Error ? err.message : "Project operation failed.";
+      setProjectError(message);
+      appendTerminal("project error: " + message);
+      return false;
+    } finally { setIsProjectBusy(false); }
+  }, [approvedActionIds, handleApprovalConflict, appendTerminal, loadRecentProjects]);
+
+  const createProject = useCallback((name?: string) => performProjectAction("create", (name ?? projectNameInput).trim()), [performProjectAction, projectNameInput]);
+  const openProjectByPath = useCallback((value: string) => performProjectAction("open", value.trim()), [performProjectAction]);
+  const cloneGithubProject = useCallback((url?: string) => performProjectAction("clone", (url ?? repositoryInput).trim()), [performProjectAction, repositoryInput]);
 
   const runGitStatus = useCallback(async () => {
     setIsGitBusy(true);
@@ -1452,7 +1347,7 @@ export function useWorkspaceController() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           prompt: orchestrationPrompt,
-          projectId: currentProject.workspaceId || (currentProject.path === "." ? "workspace-root" : (currentProject.path || "default-project")),
+          projectId: projectIdFor(currentProject),
         }),
         signal: abortRef.current.signal,
       });
@@ -1639,7 +1534,7 @@ export function useWorkspaceController() {
     } finally {
       setIsRunning(false);
     }
-  }, [addExecutionReceipt, appendTerminal, currentProject.path, isRunning, prompt, updateAgent]);
+  }, [addExecutionReceipt, appendTerminal, currentProject, isRunning, prompt, updateAgent]);
 
   const handleChatAttachmentSelection = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) return;
@@ -1735,13 +1630,7 @@ export function useWorkspaceController() {
       return;
     }
 
-    pushChatMessage("user", userContent);
-    appendTerminal(`chat> ${rawMessage || "[image analysis request]"}`);
-    if (!forcedMessage) {
-      setChatInput("");
-    }
-    setIsChatting(true);
-    setStatusLine("Cr8or AI is reviewing your request...");
+
 
     try {
       const response = await fetch("/api/chat/main", {
@@ -1749,6 +1638,8 @@ export function useWorkspaceController() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message,
+          projectId: projectIdFor(currentProject),
+          delegationPolicy,
           attachments: attachmentsToSend.map(({ name, mimeType, dataUrl }) => ({ name, mimeType, dataUrl })),
           history: chatMessages.slice(-12).map((entry) => ({ role: entry.role, content: entry.content })),
         }),
@@ -1829,7 +1720,7 @@ export function useWorkspaceController() {
       setIsChatting(false);
       setTimeout(() => chatInputRef.current?.focus(), 0);
     }
-  }, [appendTerminal, chatAttachments, chatInput, chatMessages, delegationPolicy, isChatting, isRunning, pushChatMessage, runOrchestration, lastOrchestrationResult]);
+  }, [appendTerminal, chatAttachments, chatInput, chatMessages, delegationPolicy, isChatting, isRunning, pushChatMessage, runOrchestration, lastOrchestrationResult, currentProject]);
 
   const commandItems: CommandItem[] = [
     {
@@ -2455,5 +2346,6 @@ export function useWorkspaceController() {
     activeLanguage,
     highlightedDocumentHtml,
     currentIntent,
+    projectError,
   };
 }

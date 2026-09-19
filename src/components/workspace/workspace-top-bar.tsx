@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import {
   ChevronDown,
   Command,
+  ExternalLink,
   FolderGit2,
   GitBranch,
   Globe,
@@ -14,6 +15,7 @@ import {
   PanelRight,
   Settings,
   SquareTerminal,
+  X,
 } from "lucide-react";
 
 import { useWorkspaceControllerContext } from "@/components/app/workspace-controller-context";
@@ -83,6 +85,7 @@ export function WorkspaceTopBar({
   const [menuOpen, setMenuOpen] = useState(false);
   const [previewState, setPreviewState] = useState<"idle" | "starting" | "running" | "failed">("idle");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewPanelOpen, setPreviewPanelOpen] = useState(false);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -92,6 +95,15 @@ export function WorkspaceTopBar({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [menuOpen]);
+
+  useEffect(() => {
+    if (!previewPanelOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setPreviewPanelOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [previewPanelOpen]);
 
   const statusText = isRunning
     ? `${running} running${completed > 0 ? ` · ${completed} done` : ""}`
@@ -107,7 +119,7 @@ export function WorkspaceTopBar({
 
   const handlePreview = async () => {
     if (previewState === "running" && previewUrl) {
-      window.open(previewUrl, "_blank");
+      setPreviewPanelOpen(true);
       return;
     }
     setPreviewState("starting");
@@ -123,12 +135,14 @@ export function WorkspaceTopBar({
       }
       setPreviewUrl(data.url || null);
       setPreviewState("running");
+      setPreviewPanelOpen(true);
     } catch {
       setPreviewState("failed");
     }
   };
 
   return (
+    <>
     <header className="flex h-12 shrink-0 items-center justify-between gap-2 border-b border-border-strong bg-surface px-2">
       <div className="flex min-w-0 items-center gap-1.5">
         <div className="hidden md:block">
@@ -248,5 +262,43 @@ export function WorkspaceTopBar({
         </div>
       </div>
     </header>
+    {previewPanelOpen && previewUrl ? (
+      <div className="fixed inset-0 z-50 flex flex-col bg-background md:inset-y-4 md:inset-x-4 md:rounded-lg md:border md:border-border-strong md:shadow-lg">
+        <div className="flex h-12 shrink-0 items-center justify-between border-b border-border-strong bg-surface px-3">
+          <div className="min-w-0">
+            <p className="truncate text-xs font-medium text-text-primary">Preview</p>
+            <p className="truncate text-[10px] text-text-muted">{currentProject.name}</p>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => window.open(previewUrl, "_blank")}
+              className="h-7 gap-1 text-[11px]"
+            >
+              <ExternalLink className="h-3 w-3" />
+              Open externally
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => setPreviewPanelOpen(false)}
+              className="h-7 w-7 p-0"
+            >
+              <X className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        </div>
+        <iframe
+          src={previewUrl}
+          title="Preview"
+          className="min-h-0 flex-1 border-0 bg-white"
+          sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+        />
+      </div>
+    ) : null}
+    </>
   );
 }

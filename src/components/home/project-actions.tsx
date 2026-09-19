@@ -49,6 +49,7 @@ function ActionRow({
         <span className="text-sm font-medium text-text-primary">{label}</span>
       </div>
       <input
+        aria-label={label}
         value={value}
         onChange={(event) => setValue(event.target.value)}
         placeholder={placeholder}
@@ -76,7 +77,7 @@ export function ProjectActions({ isBusy, onCreate, onOpen, onClone }: ProjectAct
       <ActionRow
         icon={<FolderOpen className="h-4 w-4" />}
         label="Open project"
-        placeholder="Project path, e.g. projects/my-app"
+        placeholder="Project ID, path, or GitHub repository URL"
         actionLabel="Open"
         busyLabel="Opening..."
         isBusy={isBusy}

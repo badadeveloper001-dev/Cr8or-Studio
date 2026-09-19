@@ -8,6 +8,7 @@ function normalizeProjectId(projectId: string): string {
 }
 
 async function getProjectWorkspaceConfig(projectId: string) {
+  if (!process.env.DATABASE_URL && !process.env.VERCEL_ENV && process.env.CR8OR_WORKSPACE_MODE !== "cloud" && !projectId.startsWith("cloud-")) return { type: "local" as const };
   const normalizedId = normalizeProjectId(projectId);
   const workspace = await prisma.workspace.findUnique({
     where: { projectId: normalizedId },
@@ -40,7 +41,7 @@ export async function getWorkspaceRuntime(projectId: string) {
     const { DaytonaProvider } = await import("@/lib/workspace/providers/daytona");
     const provider = new DaytonaProvider({ apiKey, apiUrl });
     const { CloudWorkspaceRuntime } = await import("@/lib/workspace/runtime-cloud");
-    return new CloudWorkspaceRuntime({
+    const runtime = new CloudWorkspaceRuntime({
       id: `cloud-${normalizeProjectId(projectId)}`,
       projectId: normalizeProjectId(projectId),
       provider,
@@ -49,8 +50,11 @@ export async function getWorkspaceRuntime(projectId: string) {
       branch: config.cloudConfig.branch,
       createdAt: new Date(),
     });
+    await runtime.initialize();
+    return runtime;
   }
 
+  if (process.env.VERCEL_ENV || process.env.CR8OR_WORKSPACE_MODE === "cloud" || projectId.startsWith("cloud-")) throw new Error("Select or clone a cloud project before accessing workspace files.");
   const { LocalWorkspaceRuntime } = await import("@/lib/workspace/runtime-local");
   return new LocalWorkspaceRuntime(normalizeProjectId(projectId));
 }

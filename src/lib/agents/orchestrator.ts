@@ -53,13 +53,13 @@ function detectDomains(prompt: string): (keyof DomainAgentMap)[] {
   const lower = prompt.toLowerCase();
   const domains: (keyof DomainAgentMap)[] = [];
 
-  if (/(ui|frontend|component|page|screen|interface|client|react|next\.js|tailwind|shadcn)/.test(lower)) {
+  if (/(ui|frontend|component|page|screen|interface|client|react|next\.js|tailwind|shadcn|button|spacing|margin|padding|layout|style|css|text|color|icon|form|input|modal|dialog|dropdown|menu|nav|header|footer|sidebar|table|list|card|badge|alert|tooltip|design|visual|typography|responsive|animation|hover|focus)/.test(lower)) {
     domains.push("ui_frontend");
   }
-  if (/(api|backend|server|endpoint|route|business logic|auth|service)/.test(lower)) {
+  if (/(api|backend|server|endpoint|route|business logic|auth|service|function|method|class|module|package|middleware|handler|controller)/.test(lower)) {
     domains.push("backend_api");
   }
-  if (/(database|schema|prisma|migration|query|sql|postgres)/.test(lower)) {
+  if (/(database|schema|prisma|migration|query|sql|postgres|table|column|field|index|model|entity|relation)/.test(lower)) {
     domains.push("database");
   }
   if (/(mobile|ios|android|react native|flutter|swift|kotlin)/.test(lower)) {
@@ -87,10 +87,8 @@ function detectDomains(prompt: string): (keyof DomainAgentMap)[] {
     domains.push("product_planning");
   }
 
-  // Default: if no specific domain detected, include architecture and product
-  if (domains.length === 0) {
-    domains.push("architecture", "product_planning");
-  }
+  // No default fallback — if no domain detected, orchestrator creates no specialist tasks
+  // and the response comes from the main agent's direct knowledge.
 
   return domains;
 }

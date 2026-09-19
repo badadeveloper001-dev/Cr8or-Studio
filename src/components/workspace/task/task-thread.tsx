@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronDown, ChevronRight, ImagePlus, Loader2, Play, Send, StopCircle, X } from "lucide-react";
+import { ChevronDown, ChevronRight, ImagePlus, Loader2, Send, StopCircle, X } from "lucide-react";
 
 import { useWorkspaceControllerContext } from "@/components/app/workspace-controller-context";
 import { Button } from "@/components/ui/button";
@@ -10,7 +10,7 @@ import { ChangedFilesSummary } from "@/components/workspace/task/changed-files-s
 import { InlineApproval } from "@/components/workspace/task/inline-approval";
 import { TaskMessage } from "@/components/workspace/task/task-message";
 
-import type { DelegationPolicy } from "@/hooks/use-workspace-controller";
+
 
 function TaskComposer() {
   const {
@@ -26,8 +26,6 @@ function TaskComposer() {
     isRunning,
     sendChat,
     handleChatAttachmentSelection,
-    delegationPolicy,
-    setDelegationPolicy,
     prompt,
     runOrchestration,
   } = useWorkspaceControllerContext();
@@ -109,19 +107,7 @@ function TaskComposer() {
               >
                 Clear
               </Button>
-              <label htmlFor="task-thread-policy" className="sr-only">
-                Delegation policy
-              </label>
-              <select
-                id="task-thread-policy"
-                value={delegationPolicy}
-                onChange={(event) => setDelegationPolicy(event.target.value as DelegationPolicy)}
-                className="h-7 rounded-md border border-border-strong bg-surface px-1.5 text-[11px] text-text-secondary outline-none transition-colors focus:border-accent"
-              >
-                <option value="auto">Auto</option>
-                <option value="ask">Ask</option>
-                <option value="chat-only">Chat</option>
-              </select>
+
             </div>
             <div className="flex items-center gap-1.5">
               {isRunning ? (
@@ -135,18 +121,7 @@ function TaskComposer() {
                   <StopCircle className="h-3.5 w-3.5" />
                   Stop
                 </Button>
-              ) : (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => void runOrchestration(chatInput.trim() || prompt, "manual")}
-                  className="gap-1.5"
-                  title="Delegate to agents"
-                >
-                  <Play className="h-3.5 w-3.5" />
-                </Button>
-              )}
+              ) : null}
               <Button type="button" size="sm" onClick={() => void sendChat()} disabled={!canSend} className="gap-1.5">
                 {isChatting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
                 Send

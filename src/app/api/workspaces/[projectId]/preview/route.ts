@@ -34,6 +34,35 @@ async function resolveDaytonaSandbox(projectId: string) {
   return sandbox;
 }
 
+async function isDevServerRunning(sandbox: Awaited<ReturnType<typeof resolveDaytonaSandbox>>): Promise<boolean> {
+  if (!sandbox) return false;
+  try {
+    const proc = sandbox.process;
+    const result = await proc.executeCommand(
+      "pgrep -f 'next dev' > /dev/null 2>&1 && echo RUNNING || echo STOPPED",
+      "/workspace/repo",
+    );
+    const output = (result.artifacts?.stdout ?? result.result ?? "").trim();
+    return output.includes("RUNNING");
+  } catch {
+    return false;
+  }
+}
+
+async function getDevScript(sandbox: Awaited<ReturnType<typeof resolveDaytonaSandbox>>): Promise<string> {
+  if (!sandbox) return "npm run dev";
+  try {
+    const fs = sandbox.fs;
+    const buffer = await fs.downloadFile("/workspace/repo/package.json");
+    const pkg = JSON.parse(buffer.toString("utf8")) as { scripts?: Record<string, string> };
+    if (pkg.scripts?.dev) return "npm run dev";
+    if (pkg.scripts?.start) return "npm start";
+    return "npm run dev";
+  } catch {
+    return "npm run dev";
+  }
+}
+
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ projectId: string }> },
@@ -58,10 +87,13 @@ export async function POST(
       }
 
       if (payload.action === "start" || payload.action === "refresh") {
-        if (payload.action === "start") {
+        const alreadyRunning = await isDevServerRunning(sandbox);
+
+        if (!alreadyRunning) {
+          const devScript = await getDevScript(sandbox);
           const proc = sandbox.process;
           await proc.executeCommand(
-            "npm run dev -- --port 3000 --hostname 0.0.0.0",
+            `${devScript} -- --port ${PREVIEW_PORT} --hostname 0.0.0.0`,
             "/workspace/repo",
           );
         }
@@ -81,7 +113,7 @@ export async function POST(
       if (payload.action === "stop") {
         const proc = sandbox.process;
         await proc.executeCommand(
-          "pkill -f 'next dev' || true",
+          "pkill -f 'next dev' || pkill -f 'next-server' || true",
           "/workspace/repo",
         );
         return NextResponse.json({ ok: true, status: "stopped" });
