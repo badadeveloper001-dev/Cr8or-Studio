@@ -1,4 +1,4 @@
-import { Daytona, Sandbox, FileSystem, Process, Git } from "@daytona/sdk";
+import { Daytona, Sandbox, FileSystem, Process, Git, CreateSandboxFromSnapshotParams } from "@daytona/sdk";
 import { WorkspaceMetadata } from "@/lib/workspace/runtime";
 
 interface DaytonaProviderConfig {
@@ -15,24 +15,14 @@ interface DaytonaSandboxConfig {
   gitRepo?: string;
   gitBranch?: string;
   envVars?: Record<string, string>;
-  resources?: {
-    cpu?: number;
-    memory?: number;
-    disk?: number;
-  };
   autoStopInterval?: number;
   autoDeleteInterval?: number;
   ephemeral?: boolean;
   labels?: Record<string, string>;
 }
 
-const DEFAULT_SANDBOX_CONFIG = {
+const DEFAULT_SANDBOX_CONFIG: CreateSandboxFromSnapshotParams = {
   user: "daytona",
-  resources: {
-    cpu: 2,
-    memory: 4,
-    disk: 10,
-  },
   autoStopInterval: 15,
   autoDeleteInterval: 0,
   ephemeral: false,
@@ -51,11 +41,10 @@ export class DaytonaProvider {
   }
 
   async createSandbox(config: DaytonaSandboxConfig): Promise<Sandbox> {
-    const sandboxConfig = {
+    const sandboxConfig: CreateSandboxFromSnapshotParams = {
       ...DEFAULT_SANDBOX_CONFIG,
       ...config,
       user: config.user || DEFAULT_SANDBOX_CONFIG.user,
-      resources: { ...DEFAULT_SANDBOX_CONFIG.resources, ...config.resources },
       autoStopInterval: config.autoStopInterval ?? DEFAULT_SANDBOX_CONFIG.autoStopInterval,
       autoDeleteInterval: config.autoDeleteInterval ?? DEFAULT_SANDBOX_CONFIG.autoDeleteInterval,
     };
