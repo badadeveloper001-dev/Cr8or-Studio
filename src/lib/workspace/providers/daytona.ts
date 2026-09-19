@@ -1,28 +1,10 @@
 import { Daytona, Sandbox, FileSystem, Process, Git } from "@daytona/sdk";
-import {
-  WorkspaceRuntime,
-  WorkspaceMetadata,
-  WorkspaceCapabilities,
-  GitStatusResult,
-  GitDiffResult,
-  CommandResult,
-  ValidatedCommandRequest,
-} from "@/lib/workspace/runtime";
+import { WorkspaceMetadata } from "@/lib/workspace/runtime";
 
 interface DaytonaProviderConfig {
   apiKey: string;
   apiUrl?: string;
   target?: string;
-}
-
-interface CloudWorkspaceConfig {
-  id: string;
-  projectId: string;
-  provider: "daytona";
-  providerWorkspaceId: string;
-  repositoryUrl?: string;
-  branch?: string;
-  createdAt: Date;
 }
 
 interface DaytonaSandboxConfig {
@@ -59,7 +41,7 @@ const DEFAULT_SANDBOX_CONFIG = {
 };
 
 export class DaytonaProvider {
-  private client: any;
+  private client: Daytona;
   private config: DaytonaProviderConfig;
 
   constructor(config: DaytonaProviderConfig) {
@@ -70,7 +52,7 @@ export class DaytonaProvider {
     });
   }
 
-  async createSandbox(config: any): Promise<any> {
+  async createSandbox(config: DaytonaSandboxConfig): Promise<Sandbox> {
     const sandboxConfig = {
       ...DEFAULT_SANDBOX_CONFIG,
       ...config,
@@ -86,7 +68,7 @@ export class DaytonaProvider {
     return sandbox;
   }
 
-  async getSandbox(id: string): Promise<any> {
+  async getSandbox(id: string): Promise<Sandbox | null> {
     try {
       return await this.client.get(id);
     } catch {
@@ -101,27 +83,27 @@ export class DaytonaProvider {
     }
   }
 
-  async listSandboxes(): Promise<any[]> {
-    const sandboxes = [];
+  async listSandboxes(): Promise<Sandbox[]> {
+    const sandboxes: Sandbox[] = [];
     for await (const sandbox of this.client.list()) {
       sandboxes.push(sandbox);
     }
     return sandboxes;
   }
 
-  getSandboxFileSystem(sandbox: any): any {
+  getSandboxFileSystem(sandbox: Sandbox): FileSystem {
     return sandbox.fs;
   }
 
-  getSandboxProcess(sandbox: any): any {
+  getSandboxProcess(sandbox: Sandbox): Process {
     return sandbox.process;
   }
 
-  getSandboxGit(sandbox: any): any {
+  getSandboxGit(sandbox: Sandbox): Git {
     return sandbox.git;
   }
 
-  async getSandboxMetadata(sandbox: any): Promise<any> {
+  async getSandboxMetadata(sandbox: Sandbox): Promise<WorkspaceMetadata> {
     return {
       id: sandbox.id,
       type: "cloud",
@@ -140,7 +122,7 @@ export class DaytonaProvider {
   }
 }
 
-export function createDaytonaProvider(config: { apiKey: string; apiUrl?: string }): any {
+export function createDaytonaProvider(config: { apiKey: string; apiUrl?: string }): DaytonaProvider {
   return new DaytonaProvider(config);
 }
 

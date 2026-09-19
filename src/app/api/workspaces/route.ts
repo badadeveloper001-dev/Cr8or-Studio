@@ -158,9 +158,7 @@ export async function POST(request: NextRequest) {
       // Clone repository
       try {
         const git = sandbox.git;
-        await git.clone(body.repositoryUrl, {
-          branch: body.branch || "main",
-        });
+        await git.clone(body.repositoryUrl, "/workspace/repo", body.branch || "main");
       } catch (error) {
         // Clean up sandbox on clone failure
         await sandbox.delete();
@@ -179,7 +177,7 @@ export async function POST(request: NextRequest) {
       const runtime = new CloudWorkspaceRuntime({
         id: `cloud-${projectId}`,
         projectId,
-        provider: "daytona",
+        provider,
         providerWorkspaceId: sandbox.id,
         repositoryUrl: body.repositoryUrl,
         branch: body.branch,
@@ -194,7 +192,7 @@ export async function POST(request: NextRequest) {
           workspace: {
             id: sandbox.id,
             projectId,
-            provider: "daytona",
+        provider,
             repositoryUrl: body.repositoryUrl,
             branch: body.branch || "main",
             state: "ready",

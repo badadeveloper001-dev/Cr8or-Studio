@@ -1,26 +1,4 @@
-import { LocalWorkspaceRuntime } from "@/lib/workspace/runtime-local";
-import { CloudWorkspaceRuntime } from "@/lib/workspace/runtime-cloud";
 import { prisma } from "@/lib/db/prisma";
-
-interface WorkspaceConfig {
-  id: string;
-  type: "local" | "cloud";
-  projectId: string;
-  provider?: string;
-  providerWorkspaceId?: string;
-  repositoryUrl?: string;
-  branch?: string;
-}
-
-interface ProjectWorkspaceConfig {
-  type: "local" | "cloud";
-  cloudConfig?: {
-    provider: string;
-    providerWorkspaceId: string;
-    repositoryUrl?: string;
-    branch?: string;
-  };
-}
 
 function normalizeProjectId(projectId: string): string {
   if (!projectId || projectId === "cr8or-studio" || projectId === "workspace-root") {
@@ -50,17 +28,23 @@ async function getProjectWorkspaceConfig(projectId: string) {
   };
 }
 
-export async function getWorkspaceRuntime(projectId: string): Promise<any> {
-  const normalizedId = normalizeProjectId(projectId);
+export async function getWorkspaceRuntime(projectId: string) {
   const config = await getProjectWorkspaceConfig(projectId);
 
   if (config.type === "cloud" && config.cloudConfig) {
+    const apiKey = process.env.DAYTONA_API_KEY;
+    const apiUrl = process.env.DAYTONA_API_URL;
+    if (!apiKey) {
+      throw new Error("DAYTONA_API_KEY environment variable is required for cloud workspaces");
+    }
+    const { DaytonaProvider } = await import("@/lib/workspace/providers/daytona");
+    const provider = new DaytonaProvider({ apiKey, apiUrl });
     const { CloudWorkspaceRuntime } = await import("@/lib/workspace/runtime-cloud");
     return new CloudWorkspaceRuntime({
       id: `cloud-${normalizeProjectId(projectId)}`,
       projectId: normalizeProjectId(projectId),
-      provider: config.cloudConfig.provider,
-      providerWorkspaceId: config.cloudConfig.providerWorkspaceId,
+      provider,
+      providerWorkspaceId: config.cloudConfig.providerWorkspaceId || "",
       repositoryUrl: config.cloudConfig.repositoryUrl,
       branch: config.cloudConfig.branch,
       createdAt: new Date(),
@@ -78,8 +62,6 @@ export async function setProjectToCloud(
   repositoryUrl?: string,
   branch?: string
 ): Promise<void> {
-  const normalizedId = normalizeProjectId(projectId);
-  
   await prisma.workspace.upsert({
     where: { projectId: normalizeProjectId(projectId) },
     update: {
@@ -105,8 +87,6 @@ export async function setProjectToCloud(
 }
 
 export async function setProjectToLocal(projectId: string): Promise<void> {
-  const normalizedId = normalizeProjectId(projectId);
-  
   await prisma.workspace.upsert({
     where: { projectId: normalizeProjectId(projectId) },
     update: {
@@ -128,9 +108,8 @@ export async function setProjectToLocal(projectId: string): Promise<void> {
 }
 
 export async function getProjectWorkspaceType(projectId: string): Promise<"local" | "cloud"> {
-  const normalizedId = normalizeProjectId(projectId);
   const workspace = await prisma.workspace.findUnique({
-    where: { projectId: normalizedId },
+    where: { projectId: normalizeProjectId(projectId) },
   });
   return (workspace?.runtimeType as "local" | "cloud") || "local";
 }

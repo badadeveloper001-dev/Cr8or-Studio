@@ -4,8 +4,7 @@ import { runAgentWithTools, getAgentToolPreset } from "@/lib/agents/tool-loop";
 import { getGlobalMemory, getLocalMemory, writeLocalNote } from "@/lib/agents/memory";
 import { agentSystemPrompts } from "@/lib/agents/prompts";
 import { AgentExecutionState, AgentTask, ToolCallRecord, ToolProgressEvent } from "@/lib/agents/types";
-import { ToolContext, ToolName } from "@/lib/agents/tools";
-import { getWorkspaceRuntime } from "@/lib/workspace/runtime-factory";
+import { ToolContext } from "@/lib/agents/tools";
 
 export type TaskProgressCallback = (state: AgentExecutionState) => void;
 export type ToolProgressCallback = (event: ToolProgressEvent) => void;
@@ -87,8 +86,6 @@ export async function executeTask(
     const hasWriteTools = toolNames.includes("write_file");
 
     if (hasWriteTools) {
-      const runtime = await getWorkspaceRuntime(projectId);
-      const toolNames = getAgentToolPreset(task.agentId);
       const result = await runAgentWithTools({
         systemPrompt,
         userMessage,

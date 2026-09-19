@@ -1,10 +1,7 @@
-import { promises as fs } from "node:fs";
-import path from "node:path";
+import { Sandbox } from "@daytona/sdk";
 import { DaytonaProvider } from "@/lib/workspace/providers/daytona";
 import {
-  WorkspaceRuntime,
   WorkspaceMetadata,
-  WorkspaceCapabilities,
   GitStatusResult,
   GitDiffResult,
   CommandResult,
@@ -14,47 +11,21 @@ import {
 interface CloudWorkspaceConfig {
   id: string;
   projectId: string;
-  provider: "daytona";
+  provider: DaytonaProvider;
   providerWorkspaceId: string;
   repositoryUrl?: string;
   branch?: string;
   createdAt: Date;
 }
 
-const SECRET_SENSITIVE_PATHS = [
-  ".env",
-  ".env.local",
-  ".env.production",
-  ".env.development",
-  ".env.test",
-  "secrets",
-  ".secret",
-  "*.pem",
-  "*.key",
-  "id_rsa",
-  "id_ed25519",
-  ".npmrc",
-  "credentials",
-  "credential",
-];
-
-function isSecretSensitivePath(relPath: string): boolean {
-  const normalized = relPath.replace(/\\/g, "/").toLowerCase();
-  return SECRET_SENSITIVE_PATHS.some((secret) => {
-    if (secret.includes("*")) {
-      const pattern = secret.replace(/\*/g, ".*");
-      return new RegExp(`^${pattern}$`).test(normalized);
-    }
-    return normalized === secret || normalized.startsWith(`${secret}/`) || normalized.endsWith(`/${secret}`);
-  });
-}
-
-function validatePath(projectId: string | undefined, relPath: string): { ok: boolean; absolutePath?: string; error?: string } {
+function validatePath(
+  _projectId: string,
+  relPath: string,
+): { ok: boolean; absolutePath?: string; error?: string } {
   const safePath = relPath.replace(/\\/g, "/").replace(/^\/+/, "");
   if (!safePath || safePath.includes("..")) {
     return { ok: false, error: "Invalid path: traversal or empty path not allowed" };
   }
-  // For cloud workspaces, paths are relative to workspace root (/workspace)
   return { ok: true, absolutePath: safePath };
 }
 
@@ -63,18 +34,6 @@ function resolveCommandForPlatform(command: string): string {
     return command.replace(/^npm /, "npm.cmd ");
   }
   return command;
-}
-
-function parseChanges(raw: string): Array<{ path: string; status: string }> {
-  return raw
-    .split("\n")
-    .map((line) => line.trimEnd())
-    .filter(Boolean)
-    .map((line) => {
-      const status = line.slice(0, 2).trim() || "?";
-      const path = line.slice(3).trim();
-      return { path, status };
-    });
 }
 
 export class CloudWorkspaceRuntime {
@@ -89,12 +48,12 @@ export class CloudWorkspaceRuntime {
   } as const;
   readonly id: string;
 
-  private provider: any;
-  private sandbox: any;
+  private provider: DaytonaProvider;
+  private sandbox: Sandbox | null = null;
   private createdAt: Date;
-  private config: any;
+  private config: CloudWorkspaceConfig;
 
-  constructor(config: any) {
+  constructor(config: CloudWorkspaceConfig) {
     this.config = config;
     this.projectId = config.projectId;
     this.id = config.id;
@@ -125,22 +84,15 @@ export class CloudWorkspaceRuntime {
     return this.provider.getSandboxProcess(this.sandbox);
   }
 
-  private getGit() {
-    if (!this.sandbox) {
-      throw new Error("Sandbox not initialized");
-    }
-    return this.provider.getSandboxGit(this.sandbox);
-  }
-
   async readFile(relPath: string): Promise<{ content: string; bytes: number }> {
     const validation = validatePath(this.projectId, relPath);
     if (!validation.ok) {
       throw new Error(validation.error);
     }
-
     const fs = this.getFileSystem();
-    const content = await fs.downloadFile(validation.absolutePath!);
-    return { content, bytes: Buffer.byteLength(content, "utf8") };
+    const buffer = await fs.downloadFile(validation.absolutePath!);
+    const content = buffer.toString("utf8");
+    return { content, bytes: buffer.length };
   }
 
   async writeFile(relPath: string, content: string): Promise<{ bytes: number }> {
@@ -148,13 +100,10 @@ export class CloudWorkspaceRuntime {
     if (!validation.ok) {
       throw new Error(validation.error);
     }
-
     const fs = this.getFileSystem();
-    await fs.uploadFile({
-      path: validation.absolutePath!,
-      content: Buffer.from(content, "utf8"),
-    });
-    return { bytes: Buffer.byteLength(content, "utf8") };
+    const buffer = Buffer.from(content, "utf8");
+    await fs.uploadFile(buffer, validation.absolutePath!);
+    return { bytes: buffer.length };
   }
 
   async listFiles(relPath?: string): Promise<Array<{ name: string; type: "file" | "directory" }>> {
@@ -163,43 +112,42 @@ export class CloudWorkspaceRuntime {
     if (!validation.ok) {
       throw new Error(validation.error);
     }
-
     const fs = this.getFileSystem();
     const files = await fs.listFiles(validation.absolutePath!);
     return files
-      .filter((entry: any) => !entry.name.startsWith("."))
+      .filter((entry) => !entry.name.startsWith("."))
       .slice(0, 200)
-      .map((entry: any): { name: string; type: "file" | "directory" } => ({
+      .map((entry): { name: string; type: "file" | "directory" } => ({
         name: entry.name,
-        type: entry.isDirectory ? "directory" : "file",
+        type: entry.isDir ? "directory" : "file",
       }));
   }
 
   async gitStatus(): Promise<GitStatusResult> {
-    const git = this.getGit();
-    const [statusResult, branchResult] = await Promise.all([
-      this.runGitCommand("status --short"),
-      this.runGitCommand("branch --show-current"),
-    ]);
-
-    const changes = statusResult.stdout;
-    const changedFiles = parseChanges(changes);
-
+    if (!this.sandbox) {
+      throw new Error("Sandbox not initialized");
+    }
+    const git = this.provider.getSandboxGit(this.sandbox);
+    const status = await git.status("/workspace");
+    const changedFiles = status.fileStatus.map((fs) => ({
+      path: fs.name,
+      status: `${fs.staging}${fs.worktree}`.trim() || "??",
+    }));
     return {
-      branch: branchResult.stdout.trim(),
-      changes,
+      branch: status.currentBranch,
+      changes: changedFiles.map((f) => `${f.status} ${f.path}`).join("\n"),
       changedFiles,
       changedCount: changedFiles.length,
     };
   }
 
   async gitDiff(relPath?: string, staged?: boolean): Promise<GitDiffResult> {
-    const fileArg = relPath ? ` -- ${relPath}` : "";
     const stagedFlag = staged ? "--staged " : "";
+    const fileArg = relPath ? ` -- ${relPath}` : "";
 
     const [diffResult, stagedDiffResult] = await Promise.all([
-      this.runGitCommand(`diff ${stagedFlag}${fileArg}`),
-      this.runGitCommand(`diff --staged${fileArg}`),
+      this.executeCommandInSandbox(`git diff ${stagedFlag}${fileArg}`),
+      this.executeCommandInSandbox(`git diff --staged${fileArg}`),
     ]);
 
     return {
@@ -208,65 +156,35 @@ export class CloudWorkspaceRuntime {
     };
   }
 
-  private async runGitCommand(command: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-    const process = this.provider.getSandboxProcess(this.sandbox);
-    const resolvedCommand = `git ${command}`;
-    const result = await this.executeCommandInSandbox(resolvedCommand);
-    return result;
-  }
-
   private async executeCommandInSandbox(command: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-    const process = this.provider.getSandboxProcess(this.sandbox);
-    const result = await process.executeCommand({
-      command,
-      cwd: "/workspace",
-    });
+    if (!this.sandbox) {
+      throw new Error("Sandbox not initialized");
+    }
+    const proc = this.provider.getSandboxProcess(this.sandbox);
+    const result = await proc.executeCommand(command, "/workspace");
     return {
-      stdout: result.stdout,
-      stderr: result.stderr,
-      exitCode: result.exitCode ?? 0,
+      stdout: result.artifacts?.stdout ?? result.result,
+      stderr: "",
+      exitCode: result.exitCode,
     };
   }
 
   async runCommand(request: ValidatedCommandRequest): Promise<CommandResult> {
-    const { command, rules, timeoutMs } = request;
-    const resolvedCommand = resolveCommandForPlatform(command);
-    
-    // Translate rules for Windows platform as well
-    const translatedRules = process.platform === "win32"
-      ? request.rules.map(rule => {
-          if (rule.kind === "exact" && rule.value.startsWith("npm ")) {
-            return { kind: "exact" as const, value: rule.value.replace(/^npm /, "npm.cmd ") };
-          }
-          if (rule.kind === "prefix" && rule.value.startsWith("npm ")) {
-            return { kind: "prefix" as const, value: rule.value.replace(/^npm /, "npm.cmd ") };
-          }
-          return rule;
-        })
-      : request.rules;
-
+    const resolvedCommand = resolveCommandForPlatform(request.command);
     const result = await this.executeCommandInSandbox(resolvedCommand);
-
-    const exitCode = result.stderr && !result.stdout ? 1 : 0;
     return {
       stdout: result.stdout,
       stderr: result.stderr,
-      exitCode,
+      exitCode: result.exitCode,
     };
   }
 
-  async getMetadata(): Promise<any> {
+  async getMetadata(): Promise<WorkspaceMetadata> {
     return {
       id: this.id,
       type: this.type,
       projectId: this.projectId,
-      capabilities: {
-        preview: false,
-        sleep: true,
-        persistentStorage: true,
-        gitSupport: true,
-        nodeSupport: true,
-      },
+      capabilities: this.capabilities,
       state: "ready",
       createdAt: this.createdAt,
       lastActiveAt: new Date(),
@@ -274,6 +192,6 @@ export class CloudWorkspaceRuntime {
   }
 }
 
-export function createCloudWorkspaceRuntime(config: any): any {
+export function createCloudWorkspaceRuntime(config: CloudWorkspaceConfig): CloudWorkspaceRuntime {
   return new CloudWorkspaceRuntime(config);
 }
