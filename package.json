@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "node -e \"try{if(process.env.DATABASE_URL){const{execSync}=require('child_process');execSync('npx prisma migrate deploy',{stdio:'inherit'})}}catch(e){console.warn('⚠ Database migration skipped:',e.message);process.exitCode=0}\" && prisma generate && next build",
+    "build": "node -e \"if(process.env.DATABASE_URL){require('child_process').execSync('npx prisma migrate deploy',{stdio:'inherit'})}\" && prisma generate && next build",
     "db:migrate": "prisma migrate deploy",
     "start": "next start",
     "lint": "eslint",

@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
+import { PrismaClientKnownRequestError, PrismaClientInitializationError } from "@prisma/client/runtime/library";
 
 import { errorResponse, internalErrorResponse } from "@/lib/http/api-response";
 import { withRouteMetrics } from "@/lib/observability/sli";
@@ -335,9 +336,13 @@ export async function POST(request: NextRequest) {
         requestId,
       });
     }
-    const message = error instanceof Error ? error.message : "unknown";
-    if (message.includes("relation") || message.includes("does not exist") || message.includes("table") || message.includes("P2021")) {
-      return internalErrorResponse("Cloud workspace database is not initialized. Run database migrations first.", requestId);
+    if (error instanceof PrismaClientKnownRequestError) {
+      console.error(`[db-error] requestId=${requestId} prismaCode=${error.code} operation=projects/workspace`);
+      return internalErrorResponse("Cloud workspace database error.", requestId);
+    }
+    if (error instanceof PrismaClientInitializationError) {
+      console.error(`[db-error] requestId=${requestId} prismaCode=P1001 operation=projects/workspace`);
+      return internalErrorResponse("Cr8or could not connect to its workspace database.", requestId);
     }
     return internalErrorResponse("Project workspace operation failed.", requestId);
   }

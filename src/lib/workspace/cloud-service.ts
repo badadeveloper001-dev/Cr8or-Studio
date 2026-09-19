@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
+import { PrismaClientKnownRequestError, PrismaClientInitializationError, PrismaClientRustPanicError } from "@prisma/client/runtime/library";
 import { prisma } from "@/lib/db/prisma";
 import { authorizeRoute } from "@/lib/security/authorization";
 import { evaluatePolicyGuard } from "@/lib/security/policy";
@@ -15,15 +16,39 @@ const createSchema = z.object({
   branch: z.string().trim().min(1).max(200).optional(), approvalId: z.string().uuid().optional(),
 });
 
-function isPrismaMissingTable(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : "";
-  return message.includes("relation") || message.includes("does not exist") || message.includes("table") || message.includes("P2021");
+function logDbError(requestId: string, operation: string, error: unknown) {
+  const code = error instanceof PrismaClientKnownRequestError ? error.code
+    : error instanceof PrismaClientInitializationError ? "P1001"
+    : error instanceof PrismaClientRustPanicError ? "PANIC"
+    : "UNKNOWN";
+  console.error(`[db-error] requestId=${requestId} operation=${operation} prismaCode=${code}`);
+}
+
+function classifyDbError(error: unknown): string {
+  if (error instanceof PrismaClientKnownRequestError) {
+    switch (error.code) {
+      case "P2021":
+        return "Cloud workspace database table is missing. Run database migrations.";
+      case "P2022":
+        return "Cloud workspace database schema is outdated. Run database migrations.";
+      default:
+        return "Unable to load cloud projects.";
+    }
+  }
+  if (error instanceof PrismaClientInitializationError) {
+    return "Cr8or could not connect to its workspace database.";
+  }
+  if (error instanceof PrismaClientRustPanicError) {
+    return "Cloud workspace database encountered an internal error.";
+  }
+  return "Unable to load cloud projects.";
 }
 
 export async function listCloudProjects(request: NextRequest) {
   const auth = await authorizeRoute(request, { route: "api/workspaces", minRole: "viewer" });
   if (!auth.ok) return auth.response;
   if (!cloudModeEnabled()) return NextResponse.json({ ok: true, mode: "local", projects: [] });
+  const requestId = randomUUID();
   try {
     const workspaces = await prisma.workspace.findMany({
       where: { runtimeType: "cloud", ...(auth.session.role === "owner" ? {} : { project: { description: cloudOwnerDescription(auth.session.userId) } }) },
@@ -31,16 +56,15 @@ export async function listCloudProjects(request: NextRequest) {
     });
     return NextResponse.json({ ok: true, mode: "cloud", projects: workspaces.map(cloudProjectRef) });
   } catch (error) {
-    if (isPrismaMissingTable(error)) {
-      return internalErrorResponse("Cloud workspace database is not initialized. Run database migrations first.");
-    }
-    return internalErrorResponse("Unable to load cloud projects.");
+    logDbError(requestId, "listCloudProjects", error);
+    return internalErrorResponse(classifyDbError(error), requestId);
   }
 }
 
 export async function openCloudProject(request: NextRequest, value: string) {
   const auth = await authorizeRoute(request, { route: "api/workspaces:open", minRole: "viewer" });
   if (!auth.ok) return auth.response;
+  const requestId = randomUUID();
   let parsedUrl: string | undefined;
   try {
     if (value.startsWith("https://")) {
@@ -57,16 +81,15 @@ export async function openCloudProject(request: NextRequest, value: string) {
     await getWorkspaceRuntime(workspace.projectId);
     return NextResponse.json({ ok: true, project: cloudProjectRef(workspace) });
   } catch (error) {
-    if (isPrismaMissingTable(error)) {
-      return internalErrorResponse("Cloud workspace database is not initialized. Run database migrations first.");
-    }
-    return internalErrorResponse("Unable to open cloud project.");
+    logDbError(requestId, "openCloudProject", error);
+    return internalErrorResponse(classifyDbError(error), requestId);
   }
 }
 
 export async function createCloudProject(request: NextRequest, raw: unknown) {
   const auth = await authorizeRoute(request, { route: "api/workspaces:create", minRole: "maintainer" });
   if (!auth.ok) return auth.response;
+  const requestId = randomUUID();
 
   let body: z.infer<typeof createSchema>;
   try {
@@ -98,10 +121,8 @@ export async function createCloudProject(request: NextRequest, raw: unknown) {
       return NextResponse.json({ ok: true, project: cloudProjectRef(existing) });
     }
   } catch (error) {
-    if (isPrismaMissingTable(error)) {
-      return internalErrorResponse("Cloud workspace database is not initialized. Run database migrations first.");
-    }
-    return internalErrorResponse("Unable to check for existing project.");
+    logDbError(requestId, "createCloudProject.findExisting", error);
+    return internalErrorResponse(classifyDbError(error), requestId);
   }
 
   const name = body.projectName || repo!.repo;
@@ -129,8 +150,9 @@ export async function createCloudProject(request: NextRequest, raw: unknown) {
     return NextResponse.json({ ok: true, project: cloudProjectRef(project.workspaces[0]) }, { status: 201 });
   } catch (error) {
     await sandbox.delete().catch(() => undefined);
-    if (isPrismaMissingTable(error)) {
-      return internalErrorResponse("Cloud workspace database is not initialized. Run database migrations first.");
+    logDbError(requestId, "createCloudProject.create", error);
+    if (error instanceof PrismaClientKnownRequestError || error instanceof PrismaClientInitializationError) {
+      return internalErrorResponse(classifyDbError(error), requestId);
     }
     const message = error instanceof Error ? error.message : "";
     if (repo && (message.includes("not found") || message.includes("404") || message.includes("authentication") || message.includes("access"))) {
