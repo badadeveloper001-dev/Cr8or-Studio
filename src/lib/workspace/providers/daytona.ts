@@ -10,7 +10,6 @@ interface DaytonaProviderConfig {
 interface DaytonaSandboxConfig {
   id?: string;
   name: string;
-  image?: string;
   user?: string;
   gitProvider?: "github" | "gitlab" | "bitbucket";
   gitRepo?: string;
@@ -28,7 +27,6 @@ interface DaytonaSandboxConfig {
 }
 
 const DEFAULT_SANDBOX_CONFIG = {
-  image: "daytonaio/workspace:latest",
   user: "daytona",
   resources: {
     cpu: 2,
@@ -56,7 +54,6 @@ export class DaytonaProvider {
     const sandboxConfig = {
       ...DEFAULT_SANDBOX_CONFIG,
       ...config,
-      image: config.image || DEFAULT_SANDBOX_CONFIG.image,
       user: config.user || DEFAULT_SANDBOX_CONFIG.user,
       resources: { ...DEFAULT_SANDBOX_CONFIG.resources, ...config.resources },
       autoStopInterval: config.autoStopInterval ?? DEFAULT_SANDBOX_CONFIG.autoStopInterval,
