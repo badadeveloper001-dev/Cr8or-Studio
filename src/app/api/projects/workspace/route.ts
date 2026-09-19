@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { PrismaClientKnownRequestError, PrismaClientInitializationError } from "@prisma/client/runtime/library";
+import { PrismaClientKnownRequestError, PrismaClientInitializationError, PrismaClientUnknownRequestError } from "@prisma/client/runtime/library";
 
 import { errorResponse, internalErrorResponse } from "@/lib/http/api-response";
 import { withRouteMetrics } from "@/lib/observability/sli";
@@ -343,6 +343,12 @@ export async function POST(request: NextRequest) {
     if (error instanceof PrismaClientInitializationError) {
       console.error(`[db-error] requestId=${requestId} prismaCode=P1001 operation=projects/workspace`);
       return internalErrorResponse("Cr8or could not connect to its workspace database.", requestId);
+    }
+    if (error instanceof PrismaClientUnknownRequestError) {
+      const msg = error instanceof Error ? error.message : "";
+      const isConn = msg.includes("Can't reach database server") || msg.includes("ECONNREFUSED");
+      console.error(`[db-error] requestId=${requestId} prismaCode=${isConn ? "P1001" : "P5000"} operation=projects/workspace`);
+      return internalErrorResponse(isConn ? "Cr8or could not connect to its workspace database." : "Cloud workspace database error.", requestId);
     }
     return internalErrorResponse("Project workspace operation failed.", requestId);
   }

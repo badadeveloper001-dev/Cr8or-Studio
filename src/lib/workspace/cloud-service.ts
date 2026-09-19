@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { PrismaClientKnownRequestError, PrismaClientInitializationError, PrismaClientRustPanicError } from "@prisma/client/runtime/library";
+import { PrismaClientKnownRequestError, PrismaClientInitializationError, PrismaClientUnknownRequestError, PrismaClientRustPanicError } from "@prisma/client/runtime/library";
 import { prisma } from "@/lib/db/prisma";
 import { authorizeRoute } from "@/lib/security/authorization";
 import { evaluatePolicyGuard } from "@/lib/security/policy";
@@ -16,11 +16,17 @@ const createSchema = z.object({
   branch: z.string().trim().min(1).max(200).optional(), approvalId: z.string().uuid().optional(),
 });
 
+function isConnectionError(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : "";
+  return msg.includes("Can't reach database server") || msg.includes("ECONNREFUSED") || msg.includes("ETIMEDOUT") || msg.includes("ENOTFOUND");
+}
+
 function logDbError(requestId: string, operation: string, error: unknown) {
-  const code = error instanceof PrismaClientKnownRequestError ? error.code
-    : error instanceof PrismaClientInitializationError ? "P1001"
-    : error instanceof PrismaClientRustPanicError ? "PANIC"
-    : "UNKNOWN";
+  let code = "UNKNOWN";
+  if (error instanceof PrismaClientKnownRequestError) code = error.code;
+  else if (error instanceof PrismaClientInitializationError) code = error.errorCode ?? "P1001";
+  else if (error instanceof PrismaClientUnknownRequestError) code = isConnectionError(error) ? "P1001" : "P5000";
+  else if (error instanceof PrismaClientRustPanicError) code = "PANIC";
   console.error(`[db-error] requestId=${requestId} operation=${operation} prismaCode=${code}`);
 }
 
@@ -37,6 +43,12 @@ function classifyDbError(error: unknown): string {
   }
   if (error instanceof PrismaClientInitializationError) {
     return "Cr8or could not connect to its workspace database.";
+  }
+  if (error instanceof PrismaClientUnknownRequestError) {
+    if (isConnectionError(error)) {
+      return "Cr8or could not connect to its workspace database.";
+    }
+    return "Unable to load cloud projects.";
   }
   if (error instanceof PrismaClientRustPanicError) {
     return "Cloud workspace database encountered an internal error.";
@@ -151,7 +163,7 @@ export async function createCloudProject(request: NextRequest, raw: unknown) {
   } catch (error) {
     await sandbox.delete().catch(() => undefined);
     logDbError(requestId, "createCloudProject.create", error);
-    if (error instanceof PrismaClientKnownRequestError || error instanceof PrismaClientInitializationError) {
+    if (error instanceof PrismaClientKnownRequestError || error instanceof PrismaClientInitializationError || error instanceof PrismaClientUnknownRequestError) {
       return internalErrorResponse(classifyDbError(error), requestId);
     }
     const message = error instanceof Error ? error.message : "";
