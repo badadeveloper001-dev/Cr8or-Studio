@@ -1,4 +1,5 @@
 import { Daytona, Sandbox, FileSystem, Process, Git, CreateSandboxFromSnapshotParams } from "@daytona/sdk";
+import type { SandboxState } from "@daytona/api-client";
 import { WorkspaceMetadata } from "@/lib/workspace/runtime";
 
 interface DaytonaProviderConfig {
@@ -75,6 +76,63 @@ export class DaytonaProvider {
       sandboxes.push(sandbox);
     }
     return sandboxes;
+  }
+
+  async findSandboxByName(name: string): Promise<Sandbox | null> {
+    for await (const sandbox of this.client.list({ name })) {
+      if (sandbox.name === name) {
+        await sandbox.refreshData();
+        return sandbox;
+      }
+    }
+    return null;
+  }
+
+  async ensureSandbox(config: DaytonaSandboxConfig): Promise<Sandbox> {
+    const existing = await this.findSandboxByName(config.name);
+    if (existing) {
+      return this.recoverSandbox(existing);
+    }
+
+    try {
+      const sandbox = await this.createSandbox(config);
+      return sandbox;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      if (!message.includes("already exists")) {
+        throw error;
+      }
+      const retry = await this.findSandboxByName(config.name);
+      if (!retry) {
+        throw error;
+      }
+      return this.recoverSandbox(retry);
+    }
+  }
+
+  private async recoverSandbox(sandbox: Sandbox): Promise<Sandbox> {
+    const state = sandbox.state as SandboxState | undefined;
+    switch (state) {
+      case "started":
+        return sandbox;
+      case "starting":
+        await sandbox.waitUntilStarted();
+        return sandbox;
+      case "stopped":
+        await sandbox.start(60);
+        await sandbox.waitUntilStarted();
+        return sandbox;
+      case "error":
+      case "build_failed":
+        if (sandbox.recoverable) {
+          await sandbox.delete();
+          throw new Error("RECREATE_NEEDED");
+        }
+        throw new Error(`Sandbox is in an unrecoverable state: ${state}`);
+      default:
+        await sandbox.waitUntilStarted();
+        return sandbox;
+    }
   }
 
   getSandboxFileSystem(sandbox: Sandbox): FileSystem {

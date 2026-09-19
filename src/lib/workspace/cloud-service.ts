@@ -142,26 +142,75 @@ export async function createCloudProject(request: NextRequest, raw: unknown) {
 
   let sandbox;
   try {
-    sandbox = await provider.createSandbox({ name: projectId });
+    sandbox = await provider.ensureSandbox({ name: projectId });
   } catch (error) {
-    return internalErrorResponse(`Daytona workspace creation failed: ${error instanceof Error ? error.message : "unknown"}`);
+    const message = error instanceof Error ? error.message : "unknown";
+    if (message === "RECREATE_NEEDED") {
+      try {
+        sandbox = await provider.createSandbox({ name: projectId });
+      } catch (retryErr) {
+        return internalErrorResponse(`Daytona workspace creation failed: ${retryErr instanceof Error ? retryErr.message : "unknown"}`);
+      }
+    } else {
+      return internalErrorResponse(`Daytona workspace creation failed: ${message}`);
+    }
   }
 
   try {
-    if (repo) {
-      const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
-      await sandbox.git.clone(repo.url, CLOUD_REPOSITORY_ROOT, body.branch, undefined, token ? "x-access-token" : undefined, token);
-    } else {
-      await sandbox.fs.createFolder(CLOUD_REPOSITORY_ROOT, "755");
+    const existingProject = await prisma.project.findUnique({
+      where: { id: projectId },
+      include: { workspaces: true },
+    });
+    if (existingProject && existingProject.workspaces.length > 0) {
+      return NextResponse.json({ ok: true, project: cloudProjectRef(existingProject.workspaces[0]) });
     }
+
+    if (repo) {
+      const git = provider.getSandboxGit(sandbox);
+      const status = await git.status(CLOUD_REPOSITORY_ROOT).catch(() => null);
+      const alreadyCloned = status !== null;
+
+      if (!alreadyCloned) {
+        const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+        await git.clone(repo.url, CLOUD_REPOSITORY_ROOT, body.branch, undefined, token ? "x-access-token" : undefined, token);
+      }
+    } else {
+      await sandbox.fs.createFolder(CLOUD_REPOSITORY_ROOT, "755").catch(() => undefined);
+    }
+
     const branch = repo ? (await sandbox.git.status(CLOUD_REPOSITORY_ROOT)).currentBranch : null;
-    const project = await prisma.project.create({ data: {
-      id: projectId, name, description: cloudOwnerDescription(auth.session.userId), framework: "unknown", language: "unknown", repository: repo?.url,
-      workspaces: { create: { runtimeType: "cloud", provider: "daytona", providerWorkspaceId: sandbox.id, repositoryUrl: repo?.url, projectName: name, branch, state: "ready" } },
-    }, include: { workspaces: true } });
-    return NextResponse.json({ ok: true, project: cloudProjectRef(project.workspaces[0]) }, { status: 201 });
+
+    const project = await prisma.project.upsert({
+      where: { id: projectId },
+      update: {},
+      create: {
+        id: projectId, name, description: cloudOwnerDescription(auth.session.userId), framework: "unknown", language: "unknown", repository: repo?.url,
+      },
+      include: { workspaces: true },
+    });
+
+    if (project.workspaces.length === 0) {
+      await prisma.workspace.create({
+        data: {
+          projectId,
+          runtimeType: "cloud",
+          provider: "daytona",
+          providerWorkspaceId: sandbox.id,
+          repositoryUrl: repo?.url,
+          projectName: name,
+          branch,
+          state: "ready",
+        },
+      });
+    }
+
+    const updatedProject = await prisma.project.findUnique({
+      where: { id: projectId },
+      include: { workspaces: true },
+    });
+
+    return NextResponse.json({ ok: true, project: cloudProjectRef(updatedProject!.workspaces[0]) }, { status: 201 });
   } catch (error) {
-    await sandbox.delete().catch(() => undefined);
     logDbError(requestId, "createCloudProject.create", error);
     if (error instanceof PrismaClientKnownRequestError || error instanceof PrismaClientInitializationError || error instanceof PrismaClientUnknownRequestError) {
       return internalErrorResponse(classifyDbError(error), requestId);

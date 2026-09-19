@@ -51,8 +51,19 @@ export class CloudWorkspaceRuntime {
       if (!this.sandbox) {
         throw new Error(`Sandbox not found: ${this.config.providerWorkspaceId}`);
       }
-      if (this.sandbox.state === "stopped") await this.sandbox.start(60);
-      await this.sandbox.waitUntilStarted();
+      const state = this.sandbox.state;
+      if (state === "stopped") {
+        await this.sandbox.start(60);
+        await this.sandbox.waitUntilStarted();
+      } else if (state === "error" || state === "build_failed") {
+        if (this.sandbox.recoverable) {
+          await this.sandbox.delete();
+          throw new Error("SANDBOX_RECREATE_NEEDED");
+        }
+        throw new Error(`Sandbox is in an unrecoverable state: ${state}`);
+      } else if (state !== "started") {
+        await this.sandbox.waitUntilStarted();
+      }
     }
   }
 
