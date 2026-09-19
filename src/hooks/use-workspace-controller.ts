@@ -35,7 +35,7 @@ type TerminalEntry = {
 
 type RunStatus = "running" | "completed" | "failed" | "cancelled";
 
-type RunHistoryItem = {
+export type RunHistoryItem = {
   id: string;
   prompt: string;
   source: "manual" | "chat";
@@ -52,7 +52,7 @@ type RunHistoryItem = {
 type ExecutionReceiptStatus = "verified" | "failed" | "pending";
 type ExecutionReceiptKind = "orchestration" | "git" | "deploy" | "github";
 
-type ExecutionReceipt = {
+export type ExecutionReceipt = {
   id: string;
   kind: ExecutionReceiptKind;
   title: string;
@@ -92,6 +92,9 @@ type ProjectRef = {
   name: string;
   path: string;
   updatedAt?: string;
+  workspaceId?: string;
+  runtimeType?: "local" | "cloud";
+  repositoryUrl?: string;
 };
 
 type GitChange = {
@@ -747,27 +750,58 @@ export function useWorkspaceController() {
     if (!repositoryUrl) return;
     setIsProjectBusy(true);
     try {
-      const response = await fetch("/api/projects/workspace", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "clone",
-          repositoryUrl,
-          approvalId: approvedActionIds["project.clone"],
-        }),
-      });
-      const data = (await response.json()) as { project?: ProjectRef; message?: string; requiresApproval?: boolean; preview?: unknown };
-      if (!response.ok) {
-        if (response.status === 409) {
-          await handleApprovalConflict("project.clone", `Clone project ${repositoryUrl}`, data as unknown as Record<string, unknown>);
-          return;
+      const isCloud = Boolean(process.env.NEXT_PUBLIC_CLOUD_MODE || process.env.VERCEL_ENV);
+      
+      if (isCloud) {
+        const response = await fetch("/api/workspaces", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ repositoryUrl }),
+        });
+        const data = await response.json() as {
+          ok?: boolean;
+          projectId?: string;
+          workspaceId?: string;
+          projectName?: string;
+          repositoryUrl?: string;
+          message?: string;
+        };
+        if (!response.ok || !data.ok) {
+          throw new Error(data.message || "Cloud workspace creation failed.");
         }
-        throw new Error(data.message || "Clone failed.");
-      }
-      if (data.project) {
-        setCurrentProject({ name: data.project.name, path: data.project.path });
-        appendTerminal(`GitHub project cloned: ${data.project.path}`);
+        const newProject: ProjectRef = {
+          name: data.projectName || repositoryUrl.split("/").pop()?.replace(/\.git$/, "") || "project",
+          path: data.projectId || "",
+          workspaceId: data.workspaceId,
+          runtimeType: "cloud",
+          repositoryUrl: data.repositoryUrl || repositoryUrl,
+        };
+        setCurrentProject(newProject);
+        appendTerminal(`Cloud workspace created: ${newProject.name}`);
         setApprovedActionIds((prev) => ({ ...prev, "project.clone": undefined }));
+      } else {
+        const response = await fetch("/api/projects/workspace", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "clone",
+            repositoryUrl,
+            approvalId: approvedActionIds["project.clone"],
+          }),
+        });
+        const data = (await response.json()) as { project?: ProjectRef; message?: string; requiresApproval?: boolean; preview?: unknown };
+        if (!response.ok) {
+          if (response.status === 409) {
+            await handleApprovalConflict("project.clone", `Clone project ${repositoryUrl}`, data as unknown as Record<string, unknown>);
+            return;
+          }
+          throw new Error(data.message || "Clone failed.");
+        }
+        if (data.project) {
+          setCurrentProject({ ...data.project, runtimeType: "local" });
+          appendTerminal(`GitHub project cloned: ${data.project.path}`);
+          setApprovedActionIds((prev) => ({ ...prev, "project.clone": undefined }));
+        }
       }
       setRepositoryInput("");
       await loadRecentProjects();
@@ -1418,7 +1452,7 @@ export function useWorkspaceController() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           prompt: orchestrationPrompt,
-          projectId: currentProject.path === "." ? "workspace-root" : (currentProject.path || "default-project"),
+          projectId: currentProject.workspaceId || (currentProject.path === "." ? "workspace-root" : (currentProject.path || "default-project")),
         }),
         signal: abortRef.current.signal,
       });

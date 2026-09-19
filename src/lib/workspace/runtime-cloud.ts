@@ -40,7 +40,7 @@ export class CloudWorkspaceRuntime {
   readonly type = "cloud" as const;
   readonly projectId: string;
   readonly capabilities = {
-    preview: false,
+    preview: true,
     sleep: true,
     persistentStorage: true,
     gitSupport: true,

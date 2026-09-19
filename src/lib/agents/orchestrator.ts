@@ -104,9 +104,7 @@ function createTasksForDomains(prompt: string, domains: (keyof DomainAgentMap)[]
     }
   }
 
-  // Always include architecture and product for context
-  agentIds.add("architect");
-  agentIds.add("product");
+  // Only include agents materially needed for the detected domains
 
   return Array.from(agentIds).map((agentId) => ({
     id: `${agentId}-${nanoid(6)}`,

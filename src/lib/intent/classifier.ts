@@ -258,6 +258,68 @@ const FOLLOWUP_PATTERNS = [
   "findings of the",
 ];
 
+const NEGATION_PATTERNS = [
+  "don't build",
+  "don't create",
+  "don't implement",
+  "don't fix",
+  "don't change",
+  "don't modify",
+  "don't edit",
+  "don't refactor",
+  "don't add",
+  "don't remove",
+  "don't update",
+  "don't deploy",
+  "don't run",
+  "don't execute",
+  "do not build",
+  "do not create",
+  "do not implement",
+  "do not fix",
+  "do not change",
+  "do not modify",
+  "do not edit",
+  "do not refactor",
+  "do not add",
+  "do not remove",
+  "do not update",
+  "do not deploy",
+  "do not run",
+  "do not execute",
+  "never mind",
+  "skip build",
+  "skip create",
+  "skip implementation",
+];
+
+const READ_ONLY_OVERRIDE_PATTERNS = [
+  "just answer",
+  "just explain",
+  "just tell me",
+  "just describe",
+  "just show me",
+  "only answer",
+  "only explain",
+  "only tell me",
+  "only describe",
+  "just read",
+  "just look",
+  "just check",
+  "just analyze",
+  "don't build anything",
+  "don't build a",
+  "don't create anything",
+  "don't create a",
+  "don't implement anything",
+  "don't change anything",
+  "don't modify anything",
+  "don't edit anything",
+  "don't fix anything",
+  "don't run anything",
+  "don't deploy anything",
+];
+
 function startsWithExploratory(message: string): boolean {
   const lower = message.toLowerCase().trim();
   return EXPLORATORY_STARTS.some((start) => lower.startsWith(start));
@@ -317,6 +379,14 @@ function matchesFollowup(message: string): boolean {
   return containsAny(message, FOLLOWUP_PATTERNS);
 }
 
+function hasNegationOverride(message: string): boolean {
+  return containsAny(message, NEGATION_PATTERNS);
+}
+
+function hasReadOnlyOverride(message: string): boolean {
+  return containsAny(message, READ_ONLY_OVERRIDE_PATTERNS);
+}
+
 function isQuestion(message: string): boolean {
   return message.trim().endsWith("?") || startsWithExploratory(message);
 }
@@ -370,6 +440,15 @@ export function classifyIntentDeterministic(message: string): IntentDecision {
 
   if (trimmed.length < 3) {
     return buildDecision("unclear", 30, { reason: "Message too short to classify" });
+  }
+
+  // Negation overrides: explicit "don't build/fix/etc." or "just answer/explain"
+  // must NOT delegate regardless of action words present
+  if (hasNegationOverride(lower) || hasReadOnlyOverride(lower)) {
+    if (matchesReadOnlyInspection(lower) || lower.includes("wrong") || lower.includes("broken") || lower.includes("error") || lower.includes("bug")) {
+      return buildDecision("read_only_inspection", 85, { reason: "Negation/override detected with diagnostic context" });
+    }
+    return buildDecision("explanation", 85, { reason: "Negation/override detected — conversation only" });
   }
 
   // High risk actions checked first

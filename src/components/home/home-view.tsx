@@ -68,8 +68,8 @@ export function HomeView({
                 void openProjectByPath(path);
                 onEnterWorkspace();
               }}
-              onClone={(repositoryUrl) => {
-                void cloneGithubProject(repositoryUrl);
+              onClone={async (repositoryUrl) => {
+                await cloneGithubProject(repositoryUrl);
                 onEnterWorkspace();
               }}
             />

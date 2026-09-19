@@ -6,8 +6,10 @@ import {
   Command,
   FolderGit2,
   GitBranch,
+  Globe,
   History,
   Home as HomeIcon,
+  Loader2,
   PanelLeft,
   PanelRight,
   Settings,
@@ -79,6 +81,8 @@ export function WorkspaceTopBar({
     setShowBottomPanel,
   } = useWorkspaceControllerContext();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [previewState, setPreviewState] = useState<"idle" | "starting" | "running" | "failed">("idle");
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -100,6 +104,29 @@ export function WorkspaceTopBar({
     { label: "Settings", Icon: Settings, id: "settings", onSelect: () => onSelectSection("settings") },
     { label: "Home", Icon: HomeIcon, id: "home", onSelect: onHome },
   ];
+
+  const handlePreview = async () => {
+    if (previewState === "running" && previewUrl) {
+      window.open(previewUrl, "_blank");
+      return;
+    }
+    setPreviewState("starting");
+    try {
+      const response = await fetch(`/api/workspaces/${currentProject.path}/preview`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "start" }),
+      });
+      const data = await response.json() as { ok?: boolean; url?: string; status?: string; message?: string };
+      if (!response.ok || !data.ok) {
+        throw new Error(data.message || "Preview failed");
+      }
+      setPreviewUrl(data.url || null);
+      setPreviewState("running");
+    } catch {
+      setPreviewState("failed");
+    }
+  };
 
   return (
     <header className="flex h-12 shrink-0 items-center justify-between gap-2 border-b border-border-strong bg-surface px-2">
@@ -125,6 +152,24 @@ export function WorkspaceTopBar({
         <span className={cn("hidden max-w-48 truncate text-[11px] sm:block", isRunning ? "text-accent" : "text-text-muted")}>
           {statusText}
         </span>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => void handlePreview()}
+          disabled={previewState === "starting"}
+          className="hidden h-8 gap-1.5 rounded-md sm:inline-flex"
+        >
+          {previewState === "starting" ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Globe className="h-3.5 w-3.5" />
+          )}
+          {previewState === "idle" && "Preview"}
+          {previewState === "starting" && "Starting…"}
+          {previewState === "running" && "Preview ●"}
+          {previewState === "failed" && "Preview failed"}
+        </Button>
         <Button
           type="button"
           variant="outline"
