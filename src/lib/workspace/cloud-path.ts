@@ -1,6 +1,6 @@
 import path from "node:path";
 
-export const CLOUD_REPOSITORY_ROOT = "/workspace/repo";
+export const CLOUD_REPOSITORY_ROOT = "repo";
 
 export function cloudPath(input = "."): string {
   const relative = input.replace(/\\/g, "/");
