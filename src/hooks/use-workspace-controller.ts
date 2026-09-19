@@ -332,6 +332,7 @@ export function useWorkspaceController() {
       createdAt: Date.now(),
     },
   ]);
+  const [lastOrchestrationResult, setLastOrchestrationResult] = useState<OrchestrationResult | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const paletteInputRef = useRef<HTMLInputElement | null>(null);
@@ -1466,6 +1467,7 @@ export function useWorkspaceController() {
               setTimeline(event.result.timeline);
               setSynthesis(event.result.synthesis);
               setStatusLine(event.result.summary);
+              setLastOrchestrationResult(event.result);
               appendTerminal(`Done: ${event.result.summary}`);
 
               const completedAgents = event.result.timeline.filter((task) => task.status === "completed").length;
@@ -1498,6 +1500,28 @@ export function useWorkspaceController() {
                     : item,
                 ),
               );
+
+              // Add final assistant message with orchestration result to chat
+              const synthesisText = event.result.synthesis
+                ? Object.entries(event.result.synthesis)
+                    .filter(([, v]) => Array.isArray(v) && v.length > 0)
+                    .map(([k, v]) => `${k.charAt(0).toUpperCase() + k.slice(1)}:\n${(v as string[]).map((s) => `- ${s}`).join("\n")}`)
+                    .join("\n\n")
+                : "No synthesis available.";
+
+              const finalMessage = event.result.summary
+                ? `${event.result.summary}\n\n${synthesisText}`
+                : synthesisText;
+
+              setChatMessages((prev) => [
+                ...prev,
+                {
+                  id: `assistant-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`,
+                  role: "assistant",
+                  content: finalMessage || "The task finished, but Cr8or did not receive a final synthesis.",
+                  createdAt: Date.now(),
+                },
+              ]);
 
               // Check if any task had workspaceChanged and trigger git refresh
               const hasWorkspaceChanges = event.result.timeline.some((task) => task.workspaceChanged);
@@ -1641,6 +1665,50 @@ export function useWorkspaceController() {
     setIsChatting(true);
     setStatusLine("Cr8or AI is reviewing your request...");
 
+    // Check for follow-up questions about previous orchestration result
+    const lowerMessage = rawMessage.toLowerCase();
+    const isFollowup = (
+      lastOrchestrationResult &&
+      (/\bwhere (are|is) the result/.test(lowerMessage) ||
+        /\bwhere (are|is) the results?\b/.test(lowerMessage) ||
+        /\bwhat did (you|the) (find|result)/.test(lowerMessage) ||
+        /\bwhat did the (inspection|review|analysis|scan)\b/.test(lowerMessage) ||
+        /\bshow me the (result|results|findings?)\b/.test(lowerMessage) ||
+        /\bgive me the result/.test(lowerMessage) ||
+        /\bwhat (were|was) the (result|results|findings?)\b/.test(lowerMessage) ||
+        /\bsummarize (what|the)\b/.test(lowerMessage) ||
+        /\bwhat did the (inspection|review|analysis)\b/.test(lowerMessage))
+    );
+
+    if (isFollowup) {
+      // Return the last orchestration result directly
+      const result = lastOrchestrationResult!;
+      const synthesisText = result.synthesis
+        ? Object.entries(result.synthesis)
+            .filter(([, v]) => Array.isArray(v) && v.length > 0)
+            .map(([k, v]) => `${k.charAt(0).toUpperCase() + k.slice(1)}:\n${(v as string[]).map((s) => `- ${s}`).join("\n")}`)
+            .join("\n\n")
+        : "No synthesis available.";
+
+      const finalMessage = result.summary
+        ? `${result.summary}\n\n${synthesisText}`
+        : synthesisText;
+
+      pushChatMessage("assistant", finalMessage || "The task finished, but Cr8or did not receive a final synthesis.");
+      appendTerminal("Follow-up answered from previous orchestration result.");
+      setStatusLine("Answered from previous result.");
+      setIsChatting(false);
+      return;
+    }
+
+    pushChatMessage("user", userContent);
+    appendTerminal(`chat> ${rawMessage || "[image analysis request]"}`);
+    if (!forcedMessage) {
+      setChatInput("");
+    }
+    setIsChatting(true);
+    setStatusLine("Cr8or AI is reviewing your request...");
+
     try {
       const response = await fetch("/api/chat/main", {
         method: "POST",
@@ -1727,7 +1795,7 @@ export function useWorkspaceController() {
       setIsChatting(false);
       setTimeout(() => chatInputRef.current?.focus(), 0);
     }
-  }, [appendTerminal, chatAttachments, chatInput, chatMessages, delegationPolicy, isChatting, isRunning, pushChatMessage, runOrchestration]);
+  }, [appendTerminal, chatAttachments, chatInput, chatMessages, delegationPolicy, isChatting, isRunning, pushChatMessage, runOrchestration, lastOrchestrationResult]);
 
   const commandItems: CommandItem[] = [
     {

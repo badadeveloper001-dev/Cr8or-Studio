@@ -14,6 +14,7 @@ const INTENT_SCHEMA = z.object({
     "direct_action",
     "specialist_delegation",
     "high_risk_action",
+    "followup_result",
     "unclear",
   ]),
   confidence: z.number().min(0).max(100),
@@ -32,6 +33,7 @@ Categories:
 - direct_action: Clear execution intent with action verbs ("fix", "implement", "add", "update", "refactor", "create")
 - specialist_delegation: Complex multi-faceted tasks needing specialist ownership ("redesign", "build system", "implement feature")
 - high_risk_action: Destructive or irreversible actions ("delete", "commit", "push", "deploy", "drop", "destroy")
+- followup_result: Asking about results of a previous run ("where are the results", "what did you find", "what did you find", "show me the results")
 - unclear: Cannot determine from message alone
 
 Rules:
@@ -39,6 +41,7 @@ Rules:
 - Prefer read_only_inspection for diagnostic language without action verbs
 - Require clear action verbs (fix, implement, add, change, etc.) for direct_action
 - High risk needs explicit destructive/irreversible language
+- Follow-up questions about previous results should be classified as followup_result
 - Confidence 0-100
 - Brief reason (1-2 sentences)
 `;

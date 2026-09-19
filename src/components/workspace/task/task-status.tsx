@@ -33,6 +33,7 @@ const INTENT_CONFIG: Record<
   direct_action: { label: "Acting", Icon: Wrench, tone: "text-success" },
   specialist_delegation: { label: "Delegating", Icon: Zap, tone: "text-warning" },
   high_risk_action: { label: "High risk", Icon: AlertOctagon, tone: "text-danger" },
+  followup_result: { label: "Follow-up", Icon: MessageSquare, tone: "text-accent" },
   unclear: { label: "Unclear", Icon: HelpCircle, tone: "text-text-muted" },
 };
 

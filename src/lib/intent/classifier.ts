@@ -232,6 +232,32 @@ const SPECIALIST_DELEGATION_PATTERNS = [
   "build feature",
 ];
 
+const FOLLOWUP_PATTERNS = [
+  "where are the results",
+  "where is the result",
+  "what did you find",
+  "what did you find",
+  "what did the",
+  "show me the results",
+  "show me the result",
+  "show me what",
+  "give me the result",
+  "give me the results",
+  "what were the results",
+  "what were the findings",
+  "summarize what",
+  "summarize the",
+  "what did you find",
+  "what was found",
+  "what did the inspection",
+  "what did the review",
+  "what did the analysis",
+  "what did the scan",
+  "results of the",
+  "outcome of the",
+  "findings of the",
+];
+
 function startsWithExploratory(message: string): boolean {
   const lower = message.toLowerCase().trim();
   return EXPLORATORY_STARTS.some((start) => lower.startsWith(start));
@@ -285,6 +311,10 @@ function matchesReadOnlyInspection(message: string): boolean {
 
 function matchesSpecialistDelegation(message: string): boolean {
   return containsAny(message, SPECIALIST_DELEGATION_PATTERNS);
+}
+
+function matchesFollowup(message: string): boolean {
+  return containsAny(message, FOLLOWUP_PATTERNS);
 }
 
 function isQuestion(message: string): boolean {
@@ -350,6 +380,12 @@ export function classifyIntentDeterministic(message: string): IntentDecision {
   // Conversation - highest priority for greetings
   if (matchesConversation(trimmed)) {
     return buildDecision("conversation", 95);
+  }
+
+  // Follow-up questions about previous results - check before other patterns
+  // These should NOT delegate and should use the last orchestration result
+  if (matchesFollowup(lower)) {
+    return buildDecision("followup_result", 90);
   }
 
   // Polite action requests - "Can you fix...", "Could you add...", etc.
