@@ -223,8 +223,9 @@ export async function runAgentWithTools(input: ToolLoopInput): Promise<ToolLoopR
         }
 
         if (result.requiresApproval) {
+          const approvalMessage = `Action paused because approval is required for ${toolName}${paramsSummary ? ` (${paramsSummary})` : ""}.`;
           return {
-            output: "",
+            output: approvalMessage,
             toolRecords,
             workspaceChanged,
             requiresApproval: true,

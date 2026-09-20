@@ -102,12 +102,19 @@ export async function executeTask(
       output = await runAgentLLM(systemPrompt, userMessage);
     }
   } catch (err) {
+    const errorMessage = err instanceof Error ? err.message : "Unknown error";
     updateState({
       status: "failed",
       progress: 0,
-      thinking: err instanceof Error ? err.message : "Unknown error.",
+      thinking: errorMessage,
     });
-    return { ...task, status: "failed", startedAt, finishedAt: new Date().toISOString() };
+    return {
+      ...task,
+      status: "failed",
+      output: `Task failed: ${errorMessage}`,
+      startedAt,
+      finishedAt: new Date().toISOString(),
+    };
   }
 
   writeLocalNote(projectId, task.agentId, {

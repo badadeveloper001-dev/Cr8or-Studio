@@ -1359,6 +1359,9 @@ export function useWorkspaceController() {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      let doneReceived = false;
+      let errorReceived = false;
+      let malformedEventDetected = false;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -1393,6 +1396,7 @@ export function useWorkspaceController() {
               setStatusLine(lineText);
               appendTerminal(lineText);
             } else if (event.type === "done") {
+              doneReceived = true;
               setTimeline(event.result.timeline);
               setSynthesis(event.result.synthesis);
               setStatusLine(event.result.summary);
@@ -1459,6 +1463,7 @@ export function useWorkspaceController() {
                 void runGitStatus();
               }
             } else if (event.type === "error") {
+              errorReceived = true;
               setError(event.message);
               setActiveBottomTab("problems");
               appendTerminal(`error: ${event.message}`);
@@ -1482,9 +1487,48 @@ export function useWorkspaceController() {
               );
             }
           } catch {
-            // skip malformed SSE lines
+            malformedEventDetected = true;
+            appendTerminal("warning: received malformed event from orchestration stream");
           }
         }
+      }
+
+      // Completion guarantee: if stream ended without done or error, surface a fallback message
+      if (!doneReceived && !errorReceived) {
+        const latencyMs = Math.max(Date.now() - startTime, 0);
+        const reason = malformedEventDetected
+          ? "The orchestration stream ended with malformed events before producing a result."
+          : "The orchestration stream closed before producing a final result.";
+        setError(reason);
+        setActiveBottomTab("problems");
+        appendTerminal(`error: ${reason}`);
+        addExecutionReceipt({
+          kind: "orchestration",
+          title: "Delegated run incomplete",
+          status: "failed",
+          evidence: [reason],
+        });
+        setRunHistory((prev) =>
+          prev.map((item) =>
+            item.id === runId
+              ? {
+                  ...item,
+                  status: "failed",
+                  durationMs: latencyMs,
+                }
+              : item,
+          ),
+        );
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            id: `assistant-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`,
+            role: "assistant",
+            content: "The delegated run stopped before producing a final result. Please try again or check the activity panel for details.",
+            createdAt: Date.now(),
+          },
+        ]);
+        setStatusLine("Orchestration stopped without completion.");
       }
     } catch (err) {
       const latencyMs = Math.max(Date.now() - startTime, 0);
@@ -1510,6 +1554,15 @@ export function useWorkspaceController() {
               : item,
           ),
         );
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            id: `assistant-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`,
+            role: "assistant",
+            content: `The delegated run encountered an error: ${message}`,
+            createdAt: Date.now(),
+          },
+        ]);
       } else {
         addExecutionReceipt({
           kind: "orchestration",
