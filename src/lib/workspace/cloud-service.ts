@@ -93,8 +93,13 @@ export async function openCloudProject(request: NextRequest, value: string) {
     await getWorkspaceRuntime(workspace.projectId);
     return NextResponse.json({ ok: true, project: cloudProjectRef(workspace) });
   } catch (error) {
-    logDbError(requestId, "openCloudProject", error);
-    return internalErrorResponse(classifyDbError(error), requestId);
+    const isDbError = error instanceof PrismaClientKnownRequestError || error instanceof PrismaClientInitializationError || error instanceof PrismaClientUnknownRequestError || error instanceof PrismaClientRustPanicError;
+    if (isDbError) {
+      logDbError(requestId, "openCloudProject", error);
+      return internalErrorResponse(classifyDbError(error), requestId);
+    }
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return internalErrorResponse(`Cloud workspace error: ${message}`, requestId);
   }
 }
 
@@ -133,8 +138,13 @@ export async function createCloudProject(request: NextRequest, raw: unknown) {
       return NextResponse.json({ ok: true, project: cloudProjectRef(existing) });
     }
   } catch (error) {
-    logDbError(requestId, "createCloudProject.findExisting", error);
-    return internalErrorResponse(classifyDbError(error), requestId);
+    const isDbError = error instanceof PrismaClientKnownRequestError || error instanceof PrismaClientInitializationError || error instanceof PrismaClientUnknownRequestError || error instanceof PrismaClientRustPanicError;
+    if (isDbError) {
+      logDbError(requestId, "createCloudProject.findExisting", error);
+      return internalErrorResponse(classifyDbError(error), requestId);
+    }
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return internalErrorResponse(`Cloud workspace error: ${message}`, requestId);
   }
 
   const name = body.projectName || repo!.repo;

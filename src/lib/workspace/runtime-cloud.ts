@@ -20,6 +20,39 @@ interface CloudWorkspaceConfig {
   createdAt: Date;
 }
 
+async function updateWorkspaceMapping(projectId: string, providerWorkspaceId: string): Promise<void> {
+  try {
+    const { prisma } = await import("@/lib/db/prisma");
+    await prisma.workspace.update({
+      where: { projectId },
+      data: {
+        providerWorkspaceId,
+        state: "ready",
+        lastActiveAt: new Date(),
+        updatedAt: new Date(),
+      },
+    });
+  } catch {
+    console.error(`[cloud-runtime] Failed to persist recovered sandbox ID for project ${projectId}`);
+  }
+}
+
+async function ensureRepoCloned(
+  provider: DaytonaProvider,
+  sandbox: Sandbox,
+  repositoryUrl?: string,
+  branch?: string,
+): Promise<void> {
+  if (!repositoryUrl) return;
+  const git = provider.getSandboxGit(sandbox);
+  try {
+    await git.status(CLOUD_REPOSITORY_ROOT);
+  } catch {
+    const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+    await git.clone(repositoryUrl, CLOUD_REPOSITORY_ROOT, branch, undefined, token ? "x-access-token" : undefined, token);
+  }
+}
+
 export class CloudWorkspaceRuntime {
   readonly type = "cloud" as const;
   readonly projectId: string;
@@ -46,24 +79,60 @@ export class CloudWorkspaceRuntime {
   }
 
   async initialize(): Promise<void> {
-    if (this.provider && this.config.providerWorkspaceId) {
+    if (!this.provider) return;
+
+    // A. Try persisted providerWorkspaceId first
+    if (this.config.providerWorkspaceId) {
       this.sandbox = await this.provider.getSandbox(this.config.providerWorkspaceId);
-      if (!this.sandbox) {
-        throw new Error(`Sandbox not found: ${this.config.providerWorkspaceId}`);
+      if (this.sandbox) {
+        await this.recoverSandboxState();
+        return;
       }
-      const state = this.sandbox.state;
-      if (state === "stopped") {
-        await this.sandbox.start(60);
-        await this.sandbox.waitUntilStarted();
-      } else if (state === "error" || state === "build_failed") {
-        if (this.sandbox.recoverable) {
-          await this.sandbox.delete();
-          throw new Error("SANDBOX_RECREATE_NEEDED");
-        }
-        throw new Error(`Sandbox is in an unrecoverable state: ${state}`);
-      } else if (state !== "started") {
-        await this.sandbox.waitUntilStarted();
+      // Persisted ID is stale — fall through to name-based recovery
+    }
+
+    // B. Try finding sandbox by deterministic name (projectId)
+    const byName = await this.provider.findSandboxByName(this.config.projectId);
+    if (byName) {
+      this.sandbox = byName;
+      await this.recoverSandboxState();
+      await updateWorkspaceMapping(this.config.projectId, byName.id);
+      this.config.providerWorkspaceId = byName.id;
+      await ensureRepoCloned(this.provider, this.sandbox, this.config.repositoryUrl, this.config.branch);
+      return;
+    }
+
+    // C. No sandbox found by ID or name — create/recover one
+    try {
+      this.sandbox = await this.provider.ensureSandbox({ name: this.config.projectId });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "";
+      if (message === "RECREATE_NEEDED") {
+        this.sandbox = await this.provider.createSandbox({ name: this.config.projectId });
+      } else {
+        throw new Error(`Cloud workspace sandbox was unavailable and could not be recovered: ${message || "unknown error"}`);
       }
+    }
+    await this.recoverSandboxState();
+    await updateWorkspaceMapping(this.config.projectId, this.sandbox.id);
+    this.config.providerWorkspaceId = this.sandbox.id;
+    await ensureRepoCloned(this.provider, this.sandbox, this.config.repositoryUrl, this.config.branch);
+  }
+
+  private async recoverSandboxState(): Promise<void> {
+    if (!this.sandbox) return;
+    const state = this.sandbox.state;
+    if (state === "stopped") {
+      await this.sandbox.start(60);
+      await this.sandbox.waitUntilStarted();
+    } else if (state === "error" || state === "build_failed") {
+      if (this.sandbox.recoverable) {
+        await this.sandbox.delete();
+        throw new Error("SANDBOX_RECREATE_NEEDED");
+      }
+      throw new Error(`Sandbox is in an unrecoverable state: ${state}`);
+    } else if (state !== "started") {
+      await this.sandbox.waitUntilStarted();
     }
   }
 
