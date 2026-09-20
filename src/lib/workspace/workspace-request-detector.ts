@@ -1,4 +1,4 @@
-type WorkspaceRequestType = "read_file" | "list_files" | "git_status" | "git_diff" | "inspect_project" | null;
+type WorkspaceRequestType = "read_file" | "list_files" | "git_status" | "git_diff" | "inspect_project" | "check_readiness" | null;
 
 export interface WorkspaceRequest {
   type: WorkspaceRequestType;
@@ -45,6 +45,16 @@ const INSPECT_PATTERNS = [
   /^(?:project|repo|codebase)\s+(?:structure|architecture|layout|overview|inspection)\s*$/i,
 ];
 
+const READINESS_PATTERNS = [
+  /(?:is|does)\s+(?:this\s+)?(?:project|app|code|repo|codebase)\s+(?:ready|work|run)\s*(?:locally|locally\?|to\s+run)?/i,
+  /(?:can|will)\s+(?:this\s+)?(?:project|app|code|repo|codebase)\s+(?:run|work|start)\s*(?:locally|locally\?|on\s+my\s+machine)?/i,
+  /(?:check|verify|test|assess)\s+(?:local\s+)?(?:readiness|setup|prerequisites|dependencies|environment)/i,
+  /(?:ready|setup|prerequisites|dependencies)\s+(?:to\s+run|for\s+local|check|status)/i,
+  /(?:will|can)\s+it\s+(?:run|work|start)\s*(?:locally|locally\?|on\s+my\s+machine)?/i,
+  /^(?:readiness|setup|prerequisites)\s*$/i,
+  /(?:check|verify|test|assess)\s+(?:project|app|code|repo|codebase)\s+(?:dependencies|prerequisites|readiness|setup|environment)/i,
+];
+
 function normalizePath(raw: string | undefined): string | undefined {
   if (!raw) return undefined;
   const trimmed = raw.trim().replace(/^["']|["']$/g, "");
@@ -70,6 +80,12 @@ export function detectWorkspaceRequest(message: string): WorkspaceRequest {
   for (const pattern of INSPECT_PATTERNS) {
     if (pattern.test(trimmed)) {
       return { type: "inspect_project" };
+    }
+  }
+
+  for (const pattern of READINESS_PATTERNS) {
+    if (pattern.test(trimmed)) {
+      return { type: "check_readiness" };
     }
   }
 

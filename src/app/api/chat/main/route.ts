@@ -12,7 +12,7 @@ import { getSecretReadiness } from "@/lib/security/secrets";
 import { classifyIntent } from "@/lib/intent";
 import { getWorkspaceConfig, getWorkspaceRuntime } from "@/lib/workspace/runtime-factory";
 import { detectWorkspaceRequest } from "@/lib/workspace/workspace-request-detector";
-import { performWorkspaceInspection } from "@/lib/workspace/workspace-inspection";
+import { performReadOnlyTaskLoop, performLocalReadinessCheck } from "@/lib/workspace/workspace-inspection";
 
 const chatBodySchema = z.object({
   message: z.string(),
@@ -315,7 +315,10 @@ async function handleDirectWorkspaceRequest(
         };
       }
       case "inspect_project": {
-        return performWorkspaceInspection(runtime);
+        return performReadOnlyTaskLoop(runtime);
+      }
+      case "check_readiness": {
+        return performLocalReadinessCheck(runtime);
       }
     }
   } catch (err) {

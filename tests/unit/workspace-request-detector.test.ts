@@ -184,6 +184,53 @@ describe("detectWorkspaceRequest", () => {
     });
   });
 
+  describe("check_readiness", () => {
+    it("detects 'is this project ready to run locally'", () => {
+      const result = detectWorkspaceRequest("is this project ready to run locally");
+      expect(result.type).toBe("check_readiness");
+    });
+
+    it("detects 'can this project run locally'", () => {
+      const result = detectWorkspaceRequest("can this project run locally");
+      expect(result.type).toBe("check_readiness");
+    });
+
+    it("detects 'check local readiness'", () => {
+      const result = detectWorkspaceRequest("check local readiness");
+      expect(result.type).toBe("check_readiness");
+    });
+
+    it("detects 'verify prerequisites'", () => {
+      const result = detectWorkspaceRequest("verify prerequisites");
+      expect(result.type).toBe("check_readiness");
+    });
+
+    it("detects 'will it run locally'", () => {
+      const result = detectWorkspaceRequest("will it run locally");
+      expect(result.type).toBe("check_readiness");
+    });
+
+    it("detects 'readiness'", () => {
+      const result = detectWorkspaceRequest("readiness");
+      expect(result.type).toBe("check_readiness");
+    });
+
+    it("detects 'check project dependencies'", () => {
+      const result = detectWorkspaceRequest("check project dependencies");
+      expect(result.type).toBe("check_readiness");
+    });
+
+    it("does not detect 'fix the readiness'", () => {
+      const result = detectWorkspaceRequest("fix the readiness");
+      expect(result.type).toBeNull();
+    });
+
+    it("does not detect 'deploy the project'", () => {
+      const result = detectWorkspaceRequest("deploy the project");
+      expect(result.type).toBeNull();
+    });
+  });
+
   describe("non-read operations", () => {
     it("ignores 'fix the navbar'", () => {
       const result = detectWorkspaceRequest("fix the navbar");
