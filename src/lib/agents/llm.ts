@@ -126,6 +126,34 @@ export function getModel(config: LLMConfig): LanguageModel {
   return openai(config.model);
 }
 
+export function getModelForTools(config: LLMConfig): LanguageModel {
+  if (config.provider === "anthropic") {
+    const apiKey = getSecret("ANTHROPIC_API_KEY");
+    if (!apiKey) {
+      throw new Error("Missing Anthropic API key.");
+    }
+    const anthropic = createAnthropic({ apiKey });
+    return anthropic(config.model);
+  }
+
+  if (config.provider === "deepseek") {
+    const apiKey = getSecret("DEEPSEEK_API_KEY");
+    if (!apiKey) {
+      throw new Error("Missing DeepSeek API key.");
+    }
+    const baseURL = process.env.DEEPSEEK_BASE_URL?.trim() || "https://api.deepseek.com/v1";
+    const deepseek = createOpenAI({ apiKey, baseURL });
+    return deepseek(config.model);
+  }
+
+  const apiKey = getSecret("OPENAI_API_KEY");
+  if (!apiKey) {
+    throw new Error("Missing OpenAI API key.");
+  }
+  const openai = createOpenAI({ apiKey });
+  return openai(config.model);
+}
+
 async function runDeepSeekChatCompletion(
   systemPrompt: string,
   userMessage: string,

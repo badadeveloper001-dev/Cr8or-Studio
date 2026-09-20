@@ -5,7 +5,7 @@ import { z } from "zod";
 import { ToolName, ToolContext, toolMetadata, toolParameterSchemas, createToolSet, AGENT_TOOL_TIER_MAP, AGENT_TOOL_PRESETS, ToolPermissionTier } from "@/lib/agents/tools";
 import { executeTool } from "@/lib/agents/tool-executor";
 import { AgentTask, ToolCallRecord, ToolProgressEvent } from "@/lib/agents/types";
-import { getModel } from "@/lib/agents/llm";
+import { getDefaultLLMConfig, getModelForTools } from "@/lib/agents/llm";
 
 const MAX_TOOL_TURNS = 5;
 
@@ -74,7 +74,7 @@ function buildToolReceiptsMessage(records: ToolCallRecord[]): string {
   return lines.join("\n");
 }
 
-function buildToolSchemasForModel(toolNames: ToolName[], context: ToolContext): Record<string, ReturnType<typeof dynamicTool>> {
+function buildToolSchemasForModel(toolNames: ToolName[]): Record<string, ReturnType<typeof dynamicTool>> {
   const schemas: Record<string, ReturnType<typeof dynamicTool>> = {};
   for (const name of toolNames) {
     const schema = toolParameterSchemas[name];
@@ -82,13 +82,6 @@ function buildToolSchemasForModel(toolNames: ToolName[], context: ToolContext): 
     schemas[name] = dynamicTool({
       description: metadata.description,
       inputSchema: zodSchema(schema as z.ZodSchema<unknown>),
-      execute: async (params: unknown) => {
-        const result = await executeTool(name, params, context);
-        if (!result.ok) {
-          throw new Error(result.error ?? "Tool execution failed");
-        }
-        return result.data;
-      },
     });
   }
   return schemas;
@@ -120,6 +113,19 @@ export interface ToolLoopResult {
 export async function runAgentWithTools(input: ToolLoopInput): Promise<ToolLoopResult> {
   const { systemPrompt, userMessage, agentId, toolNames, context, onToolProgress } = input;
 
+  let model: ReturnType<typeof getModelForTools>;
+  try {
+    model = getModelForTools(getDefaultLLMConfig());
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : "Unknown provider error";
+    return {
+      output: `Workspace tools are available, but the configured AI provider could not start a tool-enabled response. ${reason}`,
+      toolRecords: [],
+      workspaceChanged: false,
+      requiresApproval: false,
+    };
+  }
+
   const toolRecords: ToolCallRecord[] = [];
   let workspaceChanged = false;
   let currentUserMessage = userMessage;
@@ -128,22 +134,34 @@ export async function runAgentWithTools(input: ToolLoopInput): Promise<ToolLoopR
   while (turnCount < MAX_TOOL_TURNS) {
     turnCount++;
 
-    const model = getModel({ provider: "openai", model: "gpt-4o-mini", maxTokens: 4096 });
-
     const toolsPrompt = formatToolsForPrompt(toolNames);
     const receiptsMessage = buildToolReceiptsMessage(toolRecords);
 
     const fullSystemPrompt = `${systemPrompt}\n\n${toolsPrompt}\n\nRules:\n- Use tools only when the user actually asked for execution.\n- Conversational/brainstorming requests should not trigger file editing.\n- Inspect before editing.\n- Modify the smallest necessary files.\n- Do not rewrite unrelated code.\n- Validate after edits when appropriate.\n- Never commit or push.\n- Stop when approval is required.\n- Max ${MAX_TOOL_TURNS} tool turns.${receiptsMessage}`;
 
-    const toolsForModel = buildToolSchemasForModel(toolNames, context);
+    const toolsForModel = buildToolSchemasForModel(toolNames);
 
-    const { text, toolCalls } = await generateText({
-      model,
-      system: fullSystemPrompt,
-      prompt: currentUserMessage,
-      tools: toolsForModel,
-      temperature: 0.2,
-    });
+    let text: string;
+    let toolCalls: Array<{ toolName: string; args?: unknown; input?: unknown }> | undefined;
+    try {
+      const result = await generateText({
+        model,
+        system: fullSystemPrompt,
+        prompt: currentUserMessage,
+        tools: toolsForModel,
+        temperature: 0.2,
+      });
+      text = result.text;
+      toolCalls = result.toolCalls as Array<{ toolName: string; args?: unknown; input?: unknown }> | undefined;
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : "Unknown model error";
+      return {
+        output: `Workspace tools are available, but the AI provider could not complete a tool-enabled response. ${reason}`,
+        toolRecords,
+        workspaceChanged,
+        requiresApproval: false,
+      };
+    }
 
     if (toolCalls && toolCalls.length > 0) {
       for (const toolCall of toolCalls) {
