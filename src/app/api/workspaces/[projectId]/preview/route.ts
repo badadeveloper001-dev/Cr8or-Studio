@@ -5,6 +5,7 @@ import { errorResponse, internalErrorResponse } from "@/lib/http/api-response";
 import { withRouteMetrics } from "@/lib/observability/sli";
 import { authorizeRoute } from "@/lib/security/authorization";
 import { prisma } from "@/lib/db/prisma";
+import { CLOUD_REPOSITORY_ROOT } from "@/lib/workspace/cloud-path";
 
 const previewBodySchema = z.object({
   action: z.enum(["start", "refresh", "stop"]),
@@ -12,6 +13,9 @@ const previewBodySchema = z.object({
 
 const PREVIEW_PORT = 3000;
 const PREVIEW_TTL_SECONDS = 3600;
+const PREVIEW_SESSION_ID = "cr8or-preview";
+const READINESS_POLL_INTERVAL_MS = 1500;
+const READINESS_MAX_ATTEMPTS = 12;
 
 async function resolveDaytonaSandbox(projectId: string) {
   const workspace = await prisma.workspace.findUnique({
@@ -40,7 +44,7 @@ async function isDevServerRunning(sandbox: Awaited<ReturnType<typeof resolveDayt
     const proc = sandbox.process;
     const result = await proc.executeCommand(
       "pgrep -f 'next dev' > /dev/null 2>&1 && echo RUNNING || echo STOPPED",
-      "/workspace/repo",
+      CLOUD_REPOSITORY_ROOT,
     );
     const output = (result.artifacts?.stdout ?? result.result ?? "").trim();
     return output.includes("RUNNING");
@@ -53,7 +57,8 @@ async function getDevScript(sandbox: Awaited<ReturnType<typeof resolveDaytonaSan
   if (!sandbox) return "npm run dev";
   try {
     const fs = sandbox.fs;
-    const buffer = await fs.downloadFile("/workspace/repo/package.json");
+    const pkgPath = `${CLOUD_REPOSITORY_ROOT}/package.json`;
+    const buffer = await fs.downloadFile(pkgPath);
     const pkg = JSON.parse(buffer.toString("utf8")) as { scripts?: Record<string, string> };
     if (pkg.scripts?.dev) return "npm run dev";
     if (pkg.scripts?.start) return "npm start";
@@ -63,12 +68,57 @@ async function getDevScript(sandbox: Awaited<ReturnType<typeof resolveDaytonaSan
   }
 }
 
+async function waitForDevServer(sandbox: Awaited<ReturnType<typeof resolveDaytonaSandbox>>): Promise<{ ready: boolean; error?: string }> {
+  if (!sandbox) return { ready: false, error: "Sandbox unavailable" };
+  const proc = sandbox.process;
+
+  for (let attempt = 0; attempt < READINESS_MAX_ATTEMPTS; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, READINESS_POLL_INTERVAL_MS));
+    try {
+      const check = await proc.executeCommand(
+        `curl -s -o /dev/null -w "%{http_code}" http://localhost:${PREVIEW_PORT}/ || echo "000"`,
+        CLOUD_REPOSITORY_ROOT,
+      );
+      const status = (check.artifacts?.stdout ?? check.result ?? "").trim();
+      if (status === "200" || status === "301" || status === "302") {
+        return { ready: true };
+      }
+    } catch {
+      // Server not yet responding, continue polling
+    }
+  }
+
+  const stillRunning = await isDevServerRunning(sandbox);
+  if (!stillRunning) {
+    return { ready: false, error: "Dev server process exited before becoming ready" };
+  }
+
+  return { ready: false, error: "Dev server did not respond within expected time" };
+}
+
+async function stopPreviewProcesses(sandbox: Awaited<ReturnType<typeof resolveDaytonaSandbox>>): Promise<void> {
+  if (!sandbox) return;
+  const proc = sandbox.process;
+  try {
+    await proc.executeCommand(
+      "pkill -f 'next dev' || true",
+      CLOUD_REPOSITORY_ROOT,
+    );
+    await proc.executeCommand(
+      "pkill -f 'next-server' || true",
+      CLOUD_REPOSITORY_ROOT,
+    );
+  } catch {
+    // Best-effort kill
+  }
+}
+
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ projectId: string }> },
 ) {
   return withRouteMetrics("api/workspaces/preview", async (request: NextRequest, { requestId }) => {
-    const auth = await authorizeRoute(request, { route: "api/workspaces/preview", minRole: "viewer", requestId });
+    const auth = await authorizeRoute(request, { route: "api/workspaces:preview", minRole: "viewer", requestId });
     if (!auth.ok) return auth.response;
 
     try {
@@ -90,12 +140,49 @@ export async function POST(
         const alreadyRunning = await isDevServerRunning(sandbox);
 
         if (!alreadyRunning) {
+          await stopPreviewProcesses(sandbox);
+
           const devScript = await getDevScript(sandbox);
           const proc = sandbox.process;
-          await proc.executeCommand(
-            `${devScript} -- --port ${PREVIEW_PORT} --hostname 0.0.0.0`,
-            "/workspace/repo",
-          );
+
+          try {
+            await proc.createSession(PREVIEW_SESSION_ID);
+          } catch {
+            // Session may already exist, try to delete and recreate
+            try {
+              await proc.deleteSession(PREVIEW_SESSION_ID);
+              await proc.createSession(PREVIEW_SESSION_ID);
+            } catch {
+              // If session creation still fails, fall back to executeCommand with timeout
+              await proc.executeCommand(
+                `${devScript} -- --port ${PREVIEW_PORT} --hostname 0.0.0.0 &`,
+                CLOUD_REPOSITORY_ROOT,
+              );
+            }
+          }
+
+          try {
+            await proc.executeSessionCommand(PREVIEW_SESSION_ID, {
+              command: `${devScript} -- --port ${PREVIEW_PORT} --hostname 0.0.0.0`,
+              runAsync: true,
+            });
+          } catch {
+            // If session command fails, try direct background execution
+            await proc.executeCommand(
+              `nohup ${devScript} -- --port ${PREVIEW_PORT} --hostname 0.0.0.0 > /tmp/preview.log 2>&1 &`,
+              CLOUD_REPOSITORY_ROOT,
+            );
+          }
+
+          const { ready, error } = await waitForDevServer(sandbox);
+          if (!ready) {
+            return errorResponse({
+              status: 502,
+              code: "UPSTREAM_ERROR",
+              message: error || "Dev server failed to start.",
+              requestId,
+            });
+          }
         }
 
         const signedUrl = await sandbox.getSignedPreviewUrl(PREVIEW_PORT, PREVIEW_TTL_SECONDS);
@@ -111,11 +198,13 @@ export async function POST(
       }
 
       if (payload.action === "stop") {
-        const proc = sandbox.process;
-        await proc.executeCommand(
-          "pkill -f 'next dev' || pkill -f 'next-server' || true",
-          "/workspace/repo",
-        );
+        await stopPreviewProcesses(sandbox);
+        try {
+          const proc = sandbox.process;
+          await proc.deleteSession(PREVIEW_SESSION_ID);
+        } catch {
+          // Best-effort cleanup
+        }
         return NextResponse.json({ ok: true, status: "stopped" });
       }
 
