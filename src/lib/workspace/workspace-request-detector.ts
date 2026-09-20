@@ -1,4 +1,4 @@
-type WorkspaceRequestType = "read_file" | "list_files" | "git_status" | "git_diff" | null;
+type WorkspaceRequestType = "read_file" | "list_files" | "git_status" | "git_diff" | "inspect_project" | null;
 
 export interface WorkspaceRequest {
   type: WorkspaceRequestType;
@@ -32,6 +32,19 @@ const GIT_DIFF_PATTERNS = [
   /^(?:show|display)\s+(?:the\s+)?changes?\s*$/i,
 ];
 
+const INSPECT_PATTERNS = [
+  /(?:inspect|examine|analyze|analyse|review|explore|survey|scan)\s+(?:the\s+)?(?:project|repo|repository|codebase|source|code|workspace|structure|architecture|app)/i,
+  /(?:show|tell)\s+(?:me\s+)?(?:the\s+)?(?:project|repo|repository|codebase|source|code|workspace|structure|architecture|app)\s+(?:structure|architecture|layout|setup|organization|folders?|directories)/i,
+  /(?:what|which)\s+(?:are\s+)?(?:the\s+)?(?:main|important|key)\s+(?:folders?|directories|files?|modules?|components?)\s*(?:in|of|for)?\s*(?:the\s+)?(?:project|repo|repository|codebase|source|code|workspace|app)?/i,
+  /(?:where|what)\s+(?:does|is|are)\s+(?:the\s+)?(?:app|supabase|database|auth|api|entry\s*point|config|routing|layout)\s+(?:live|code|file|setup|config)/i,
+  /(?:inspect|show|list)\s+(?:the\s+)?(?:main\s+)?(?:folders?|directories|source\s+directories)/i,
+  /(?:where)\s+(?:does|is)\s+[\w.-]+\s+(?:live|code|setup)/i,
+  /^(?:inspect|examine|analyze|explore)\s+(?:the\s+)?(?:project|repo|codebase)\s*$/i,
+  /^show\s+(?:me\s+)?(?:the\s+)?(?:project|repo|codebase)\s+(?:structure|architecture|layout)\s*$/i,
+  /^tell\s+me\s+(?:about|how)\s+(?:the\s+)?(?:project|repo|codebase|app)\s+(?:(?:is\s+)?(?:structured|organized|laid\s+out|set\s+up)|structure|architecture|layout|setup)\s*$/i,
+  /^(?:project|repo|codebase)\s+(?:structure|architecture|layout|overview|inspection)\s*$/i,
+];
+
 function normalizePath(raw: string | undefined): string | undefined {
   if (!raw) return undefined;
   const trimmed = raw.trim().replace(/^["']|["']$/g, "");
@@ -52,6 +65,12 @@ export function detectWorkspaceRequest(message: string): WorkspaceRequest {
 
   if (isMutatingIntent(trimmed)) {
     return { type: null };
+  }
+
+  for (const pattern of INSPECT_PATTERNS) {
+    if (pattern.test(trimmed)) {
+      return { type: "inspect_project" };
+    }
   }
 
   for (const pattern of LIST_PATTERNS) {

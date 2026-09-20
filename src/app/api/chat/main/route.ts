@@ -12,6 +12,7 @@ import { getSecretReadiness } from "@/lib/security/secrets";
 import { classifyIntent } from "@/lib/intent";
 import { getWorkspaceConfig, getWorkspaceRuntime } from "@/lib/workspace/runtime-factory";
 import { detectWorkspaceRequest } from "@/lib/workspace/workspace-request-detector";
+import { performWorkspaceInspection } from "@/lib/workspace/workspace-inspection";
 
 const chatBodySchema = z.object({
   message: z.string(),
@@ -312,6 +313,9 @@ async function handleDirectWorkspaceRequest(
           reply: `Current diff:\n\n\`\`\`diff\n${preview}\n\`\`\``,
           suggestions: ["Show me git status", "List the files in the project root"],
         };
+      }
+      case "inspect_project": {
+        return performWorkspaceInspection(runtime);
       }
     }
   } catch (err) {

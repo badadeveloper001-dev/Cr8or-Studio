@@ -112,6 +112,78 @@ describe("detectWorkspaceRequest", () => {
     });
   });
 
+  describe("inspect_project", () => {
+    it("detects 'inspect the project structure'", () => {
+      const result = detectWorkspaceRequest("inspect the project structure");
+      expect(result.type).toBe("inspect_project");
+    });
+
+    it("detects 'inspect the project'", () => {
+      const result = detectWorkspaceRequest("inspect the project");
+      expect(result.type).toBe("inspect_project");
+    });
+
+    it("detects 'analyze the codebase'", () => {
+      const result = detectWorkspaceRequest("analyze the codebase");
+      expect(result.type).toBe("inspect_project");
+    });
+
+    it("detects 'show me the project structure'", () => {
+      const result = detectWorkspaceRequest("show me the project structure");
+      expect(result.type).toBe("inspect_project");
+    });
+
+    it("detects 'tell me about the project structure'", () => {
+      const result = detectWorkspaceRequest("tell me about the project structure");
+      expect(result.type).toBe("inspect_project");
+    });
+
+    it("detects 'what are the main folders'", () => {
+      const result = detectWorkspaceRequest("what are the main folders");
+      expect(result.type).toBe("inspect_project");
+    });
+
+    it("detects 'where does the app live'", () => {
+      const result = detectWorkspaceRequest("where does the app live");
+      expect(result.type).toBe("inspect_project");
+    });
+
+    it("detects 'where does supabase live'", () => {
+      const result = detectWorkspaceRequest("where does supabase live");
+      expect(result.type).toBe("inspect_project");
+    });
+
+    it("detects 'inspect the source directories'", () => {
+      const result = detectWorkspaceRequest("inspect the source directories");
+      expect(result.type).toBe("inspect_project");
+    });
+
+    it("detects 'explore the repository'", () => {
+      const result = detectWorkspaceRequest("explore the repository");
+      expect(result.type).toBe("inspect_project");
+    });
+
+    it("detects 'project architecture'", () => {
+      const result = detectWorkspaceRequest("project architecture");
+      expect(result.type).toBe("inspect_project");
+    });
+
+    it("detects 'show project architecture'", () => {
+      const result = detectWorkspaceRequest("show project architecture");
+      expect(result.type).toBe("inspect_project");
+    });
+
+    it("does not detect 'fix the project structure'", () => {
+      const result = detectWorkspaceRequest("fix the project structure");
+      expect(result.type).toBeNull();
+    });
+
+    it("does not detect 'build the project'", () => {
+      const result = detectWorkspaceRequest("build the project");
+      expect(result.type).toBeNull();
+    });
+  });
+
   describe("non-read operations", () => {
     it("ignores 'fix the navbar'", () => {
       const result = detectWorkspaceRequest("fix the navbar");
