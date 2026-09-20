@@ -1,0 +1,86 @@
+type WorkspaceRequestType = "read_file" | "list_files" | "git_status" | "git_diff" | null;
+
+export interface WorkspaceRequest {
+  type: WorkspaceRequestType;
+  path?: string;
+}
+
+const READ_FILE_PATTERNS = [
+  /^(?:read|open|cat|view|display)\s+['"]?([\w./\\-]+(?:\.\w+)?)['"]?\s*(?:\s+and\s+.*)?$/i,
+  /^show\s+me\s+['"]?([\w./\\-]+(?:\.\w+)?)['"]?\s*$/i,
+  /^(?:what(?:'s| is) in|what does)\s+['"]?([\w./\\-]+(?:\.\w+)?)['"]?\s*$/i,
+];
+
+const LIST_PATTERNS = [
+  /^(?:list|ls|dir)\s+(?:the\s+)?(?:files?|directory|folder|project\s+files?)\s*$/i,
+  /^(?:show|display)\s+(?:the\s+)?(?:project\s+)?(?:root|directory|folder|files?)\s*$/i,
+  /^(?:what(?:'s| is) in)\s+(?:the\s+)?(?:project|root|directory|folder)\s*$/i,
+  /^files?\s*$/i,
+  /^project\s+files?\s*$/i,
+];
+
+const GIT_STATUS_PATTERNS = [
+  /^git\s+status\s*$/i,
+  /^(?:show|display|get)\s+(?:the\s+)?(?:me\s+)?git\s+status\s*$/i,
+  /^(?:what(?:'s| has)|what)\s+(?:been\s+)?changed\s*$/i,
+  /^changes?\s*$/i,
+];
+
+const GIT_DIFF_PATTERNS = [
+  /^git\s+diff\s*$/i,
+  /^(?:show|display|get)\s+(?:(?:the|me)\s+)*(?:git\s+)?diff(?:\s+for\s+.*)?$/i,
+  /^(?:show|display)\s+(?:the\s+)?changes?\s*$/i,
+];
+
+function normalizePath(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  const trimmed = raw.trim().replace(/^["']|["']$/g, "");
+  if (!trimmed || trimmed === "." || trimmed === "./") return undefined;
+  return trimmed.replace(/^\.\//, "");
+}
+
+function isMutatingIntent(message: string): boolean {
+  const lower = message.toLowerCase();
+  const mutatingPatterns = [
+    /\b(?:fix|edit|change|modify|update|write|create|delete|remove|refactor|build|implement|deploy|commit|push|install|add|remove)\b/i,
+  ];
+  return mutatingPatterns.some((p) => p.test(lower));
+}
+
+export function detectWorkspaceRequest(message: string): WorkspaceRequest {
+  const trimmed = message.trim();
+
+  if (isMutatingIntent(trimmed)) {
+    return { type: null };
+  }
+
+  for (const pattern of LIST_PATTERNS) {
+    if (pattern.test(trimmed)) {
+      return { type: "list_files" };
+    }
+  }
+
+  for (const pattern of GIT_STATUS_PATTERNS) {
+    if (pattern.test(trimmed)) {
+      return { type: "git_status" };
+    }
+  }
+
+  for (const pattern of GIT_DIFF_PATTERNS) {
+    if (pattern.test(trimmed)) {
+      return { type: "git_diff" };
+    }
+  }
+
+  for (const pattern of READ_FILE_PATTERNS) {
+    const match = trimmed.match(pattern);
+    if (match) {
+      const rawPath = match[1]?.trim();
+      if (rawPath) {
+        return { type: "read_file", path: normalizePath(rawPath) };
+      }
+    }
+  }
+
+  return { type: null };
+}

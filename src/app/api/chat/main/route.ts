@@ -10,7 +10,8 @@ import { withRouteMetrics } from "@/lib/observability/sli";
 import { authorizeRoute } from "@/lib/security/authorization";
 import { getSecretReadiness } from "@/lib/security/secrets";
 import { classifyIntent } from "@/lib/intent";
-import { getWorkspaceConfig } from "@/lib/workspace/runtime-factory";
+import { getWorkspaceConfig, getWorkspaceRuntime } from "@/lib/workspace/runtime-factory";
+import { detectWorkspaceRequest } from "@/lib/workspace/workspace-request-detector";
 
 const chatBodySchema = z.object({
   message: z.string(),
@@ -207,6 +208,123 @@ function buildDelegationAcknowledgement(message: string): { reply: string; sugge
   };
 }
 
+async function handleDirectWorkspaceRequest(
+  projectId: string,
+  message: string,
+): Promise<{ reply: string; suggestions: string[] } | null> {
+  const request = detectWorkspaceRequest(message);
+  if (!request.type) return null;
+
+  let runtime;
+  try {
+    runtime = await getWorkspaceRuntime(projectId);
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : "Workspace unavailable";
+    return {
+      reply: `The selected workspace could not be opened: ${reason}`,
+      suggestions: ["Select a different project", "Check workspace status in the activity panel"],
+    };
+  }
+
+  try {
+    switch (request.type) {
+      case "read_file": {
+        if (!request.path) {
+          return {
+            reply: "Please specify which file to read. For example: \"Read package.json\" or \"Read src/app/page.tsx\".",
+            suggestions: ["Read package.json", "List the files in the project root"],
+          };
+        }
+        if (request.path === "package.json") {
+          const result = await runtime.readFile("package.json");
+          try {
+            const pkg = JSON.parse(result.content);
+            const name = pkg.name;
+            const version = pkg.version;
+            if (name) {
+              const detail = version ? ` (version ${version})` : "";
+              return {
+                reply: `The project name is \`${name}\`${detail}.`,
+                suggestions: ["List the files in the project root", "Show me git status"],
+              };
+            }
+            return {
+              reply: "`package.json` was read successfully, but it has no `name` field.",
+              suggestions: ["List the files in the project root", "Show me git status"],
+            };
+          } catch {
+            return {
+              reply: "`package.json` was read but could not be parsed as JSON.",
+              suggestions: ["List the files in the project root"],
+            };
+          }
+        }
+        const result = await runtime.readFile(request.path);
+        const preview = result.content.length > 3000
+          ? result.content.slice(0, 3000) + "\n\n... (truncated)"
+          : result.content;
+        return {
+          reply: `Contents of \`${request.path}\`:\n\n\`\`\`\n${preview}\n\`\`\``,
+          suggestions: ["List the files in the project root", "Show me git status"],
+        };
+      }
+      case "list_files": {
+        const files = await runtime.listFiles(".");
+        if (files.length === 0) {
+          return {
+            reply: "The project root is empty.",
+            suggestions: ["Show me git status"],
+          };
+        }
+        const directories = files.filter((f) => f.type === "directory").map((f) => `${f.name}/`);
+        const fileNames = files.filter((f) => f.type === "file").map((f) => f.name);
+        const listing = [...directories, ...fileNames].join("\n");
+        return {
+          reply: `Files in project root:\n\n\`\`\`\n${listing}\n\`\`\``,
+          suggestions: ["Read package.json", "Show me git status"],
+        };
+      }
+      case "git_status": {
+        const status = await runtime.gitStatus();
+        const lines = [`Branch: ${status.branch}`, `Changed files: ${status.changedCount}`];
+        if (status.changedFiles.length > 0) {
+          lines.push("");
+          lines.push(status.changedFiles.map((f) => `${f.status.padEnd(10)} ${f.path}`).join("\n"));
+        }
+        return {
+          reply: lines.join("\n"),
+          suggestions: ["Show me git diff", "List the files in the project root"],
+        };
+      }
+      case "git_diff": {
+        const diff = await runtime.gitDiff();
+        const combined = [diff.stagedDiff, diff.diff].filter(Boolean).join("\n\n");
+        if (!combined) {
+          return {
+            reply: "No changes detected in the working tree.",
+            suggestions: ["Show me git status", "List the files in the project root"],
+          };
+        }
+        const preview = combined.length > 4000
+          ? combined.slice(0, 4000) + "\n\n... (truncated)"
+          : combined;
+        return {
+          reply: `Current diff:\n\n\`\`\`diff\n${preview}\n\`\`\``,
+          suggestions: ["Show me git status", "List the files in the project root"],
+        };
+      }
+    }
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : "Unknown error";
+    return {
+      reply: `Workspace operation failed: ${reason}`,
+      suggestions: ["Check workspace status in the activity panel"],
+    };
+  }
+
+  return null;
+}
+
 export async function POST(request: NextRequest) {
   return withRouteMetrics("api/chat/main", async (request: NextRequest, { requestId }) => {
   const auth = await authorizeRoute(request, { route: "api/chat/main", minRole: "viewer", requestId });
@@ -217,6 +335,26 @@ export async function POST(request: NextRequest) {
   try {
     const raw = await request.json();
     const payload = chatBodySchema.parse(raw);
+
+    // Direct workspace actions bypass intent classification and delegation
+    if (payload.projectId) {
+      const directResult = await handleDirectWorkspaceRequest(payload.projectId, payload.message);
+      if (directResult) {
+        return NextResponse.json(
+          {
+            reply: directResult.reply,
+            suggestions: directResult.suggestions,
+            shouldDelegate: false,
+            delegatePrompt: payload.message,
+            intent: "read_only_inspection",
+            allowedToolMode: "read-only",
+            requiresExplicitApproval: false,
+          },
+          { status: 200 },
+        );
+      }
+    }
+
     const intentDecision = await classifyIntent(payload.message);
 
     const shouldDelegate = intentDecision.shouldDelegate && intentDecision.allowedToolMode !== "none";
@@ -298,7 +436,8 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    return internalErrorResponse("Failed to generate main agent reply.", requestId);
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return internalErrorResponse(`Failed to generate main agent reply: ${message}`, requestId);
   }
   })(request);
 }
