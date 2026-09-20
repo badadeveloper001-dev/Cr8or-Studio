@@ -83,9 +83,8 @@ export async function executeTask(
     const requestId = `${task.agentId}-${startedAt}`;
     const toolContext = buildToolContext(projectId, task, requestId);
     const toolNames = getAgentToolPreset(task.agentId);
-    const hasWriteTools = toolNames.includes("write_file");
 
-    if (hasWriteTools) {
+    if (toolNames.length > 0) {
       const result = await runAgentWithTools({
         systemPrompt,
         userMessage,

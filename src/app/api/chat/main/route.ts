@@ -2,14 +2,19 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
 import { ChatImageAttachment, runAgentLLM } from "@/lib/agents/llm";
+import { runAgentWithTools, getDefaultToolPreset } from "@/lib/agents/tool-loop";
+import { ToolContext } from "@/lib/agents/tools";
+import { AgentTask } from "@/lib/agents/types";
 import { errorResponse, internalErrorResponse } from "@/lib/http/api-response";
 import { withRouteMetrics } from "@/lib/observability/sli";
 import { authorizeRoute } from "@/lib/security/authorization";
 import { getSecretReadiness } from "@/lib/security/secrets";
 import { classifyIntent } from "@/lib/intent";
+import { getWorkspaceConfig } from "@/lib/workspace/runtime-factory";
 
 const chatBodySchema = z.object({
   message: z.string(),
+  projectId: z.string().optional(),
   attachments: z
     .array(
       z.object({
@@ -67,18 +72,30 @@ Suggestions:
 - <suggestion 3>
 `.trim();
 
-function buildCapabilityContext() {
+async function buildCapabilityContext(projectId?: string) {
   const readiness = getSecretReadiness();
-  const localFilesAvailable = !process.env.VERCEL_ENV;
+
+  let workspaceLine: string;
+  if (projectId) {
+    try {
+      const config = await getWorkspaceConfig(projectId);
+      if (config.type === "cloud") {
+        workspaceLine = "- Workspace file access: available (cloud runtime). Repository files can be read with workspace tools. GitHub integration is secondary for files already cloned.";
+      } else {
+        workspaceLine = "- Workspace file access: available (local runtime). Repository files can be read and edited directly.";
+      }
+    } catch {
+      workspaceLine = "- Workspace file access: unavailable (workspace lookup failed). Use GitHub integration for repository access.";
+    }
+  } else {
+    workspaceLine = "- Workspace file access: no project selected. Select a project to enable workspace file tools, or use GitHub integration for repository access.";
+  }
 
   return [
     "Runtime capabilities:",
     `- GitHub integration ready: ${readiness.checks.github ? "yes" : "no"}`,
     `- Vercel integration ready: ${readiness.checks.vercel ? "yes" : "no"}`,
-    `- Local workspace file access available: ${localFilesAvailable ? "yes" : "no"}`,
-    localFilesAvailable
-      ? "- You may refer to local workspace editing as available in this runtime."
-      : "- In deployed/runtime-hosted mode, local repository files are not directly readable; use GitHub integration for repository access.",
+    workspaceLine,
   ].join("\n");
 }
 
@@ -221,7 +238,40 @@ export async function POST(request: NextRequest) {
     }
 
     const prompt = buildChatPrompt(payload.history, payload.message, payload.attachments);
-    const rawReply = await runAgentLLM(`${MAIN_AGENT_SYSTEM_PROMPT}\n\n${buildCapabilityContext()}`, prompt, undefined, payload.attachments ?? []);
+    const capabilityContext = await buildCapabilityContext(payload.projectId);
+
+    let rawReply: string;
+
+    if (intentDecision.allowedToolMode === "read-only" && payload.projectId) {
+      const toolNames = getDefaultToolPreset();
+      const task: AgentTask = {
+        id: `main-chat-${requestId}`,
+        agentId: "product" as AgentTask["agentId"],
+        title: "Main chat read-only request",
+        input: prompt,
+        dependsOn: [],
+        status: "pending",
+      };
+      const context: ToolContext = {
+        projectId: payload.projectId,
+        workspaceRoot: process.cwd(),
+        requestId,
+        actorId: "main-chat",
+        actorRole: "assistant",
+      };
+      const result = await runAgentWithTools({
+        systemPrompt: `${MAIN_AGENT_SYSTEM_PROMPT}\n\n${capabilityContext}`,
+        userMessage: prompt,
+        agentId: "main-chat",
+        toolNames,
+        context,
+        task,
+      });
+      rawReply = result.output;
+    } else {
+      rawReply = await runAgentLLM(`${MAIN_AGENT_SYSTEM_PROMPT}\n\n${capabilityContext}`, prompt, undefined, payload.attachments ?? []);
+    }
+
     const parsed = parseReply(rawReply);
     const reply = stripDelegationClaims(parsed.response);
 
