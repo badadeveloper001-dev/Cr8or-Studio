@@ -1,5 +1,3 @@
-import { SecretName } from "@/lib/security/secrets";
-
 const GENERIC_SECRET_PATTERNS: RegExp[] = [
   /\b(ghp|github_pat)_[A-Za-z0-9_]{20,}\b/g,
   /\bsk-[A-Za-z0-9]{16,}\b/g,
@@ -14,7 +12,7 @@ function escapeRegExp(value: string): string {
 export function redactText(input: string, extras: string[] = []): string {
   let output = input;
 
-  const envSecretNames: SecretName[] = [
+  const envSecretNames = [
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
     "DEEPSEEK_API_KEY",
@@ -22,6 +20,11 @@ export function redactText(input: string, extras: string[] = []): string {
     "GH_TOKEN",
     "VERCEL_TOKEN",
     "NEXT_PUBLIC_SUPABASE_ANON_KEY",
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "DATABASE_URL",
+    "DIRECT_URL",
+    "DAYTONA_API_KEY",
+    "CR8OR_DEV_API_TOKEN",
   ];
 
   for (const key of envSecretNames) {

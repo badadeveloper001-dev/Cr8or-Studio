@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { ZodError } from "zod";
+import { redactText } from "@/lib/security/redaction";
 
 export type ApiErrorCode =
   | "INVALID_REQUEST"
@@ -22,10 +23,10 @@ export function errorResponse(options: ApiErrorOptions) {
   return NextResponse.json(
     {
       ok: false,
-      message: options.message,
+      message: redactText(options.message),
       error: {
         code: options.code,
-        message: options.message,
+        message: redactText(options.message),
         details: options.details,
         requestId: options.requestId,
       },

@@ -15,15 +15,15 @@ export function HomeTopBar({
   showWorkspace: boolean;
 }) {
   return (
-    <header className="flex h-16 items-center justify-between gap-3 px-4 sm:px-8">
+    <header className="flex h-20 items-center justify-between gap-3 border-b border-border bg-surface px-5 sm:px-10">
       <div className="flex items-center gap-2.5">
         <span
           aria-hidden="true"
-          className="inline-flex h-7 w-7 items-center justify-center rounded-md bg-accent text-[10px] font-semibold tracking-tight text-accent-foreground"
+          className="inline-flex h-10 w-10 items-center justify-center rounded-xl bg-accent text-sm font-semibold tracking-tight text-accent-foreground"
         >
           C8
         </span>
-        <span className="text-sm font-semibold tracking-tight text-text-primary">Cr8or Studio</span>
+        <span className="text-base font-semibold tracking-tight text-text-primary">Cr8or <span className="font-normal text-text-muted">Studio</span></span>
       </div>
       <div className="flex items-center gap-2">
         {showWorkspace ? (

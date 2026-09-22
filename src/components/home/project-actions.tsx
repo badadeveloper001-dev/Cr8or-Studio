@@ -63,9 +63,16 @@ function ActionRow({
 }
 
 export function ProjectActions({ isBusy, onCreate, onOpen, onClone }: ProjectActionProps) {
+  const [action, setAction] = useState<"new" | "open" | "clone">("new");
   return (
-    <div className="divide-y divide-border-strong border-y border-border-strong">
-      <ActionRow
+    <div>
+      <div className="mb-3 flex flex-wrap gap-2" aria-label="Project actions">
+        {([["new", "New project"], ["open", "Open existing"], ["clone", "Import from GitHub"]] as const).map(([id, label]) => (
+          <button key={id} type="button" aria-pressed={action === id} onClick={() => setAction(id)} className={`rounded-lg px-3 py-2 text-sm transition-colors ${action === id ? "bg-accent/10 font-medium text-accent" : "text-text-secondary hover:bg-surface-muted"}`}>{label}</button>
+        ))}
+      </div>
+      {action === "new" ? <ActionRow
+        key="new"
         icon={<FolderPlus className="h-4 w-4" />}
         label="New project"
         placeholder="Project name"
@@ -73,8 +80,8 @@ export function ProjectActions({ isBusy, onCreate, onOpen, onClone }: ProjectAct
         busyLabel="Creating..."
         isBusy={isBusy}
         onSubmit={onCreate}
-      />
-      <ActionRow
+      /> : action === "open" ? <ActionRow
+        key="open"
         icon={<FolderOpen className="h-4 w-4" />}
         label="Open project"
         placeholder="Project ID, path, or GitHub repository URL"
@@ -82,8 +89,8 @@ export function ProjectActions({ isBusy, onCreate, onOpen, onClone }: ProjectAct
         busyLabel="Opening..."
         isBusy={isBusy}
         onSubmit={onOpen}
-      />
-      <ActionRow
+      /> : <ActionRow
+        key="clone"
         icon={<FolderGit2 className="h-4 w-4" />}
         label="Clone repository"
         placeholder="https://github.com/org/repo.git"
@@ -91,7 +98,7 @@ export function ProjectActions({ isBusy, onCreate, onOpen, onClone }: ProjectAct
         busyLabel="Cloning..."
         isBusy={isBusy}
         onSubmit={onClone}
-      />
+      />}
     </div>
   );
 }

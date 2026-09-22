@@ -129,9 +129,9 @@ export function WorkspaceView({
   initialSection: WorkspaceSection;
   onExitToHome: () => void;
 }) {
-  const { setShowBottomPanel } = useWorkspaceControllerContext();
+  const { setShowBottomPanel, setActiveTabId } = useWorkspaceControllerContext();
   const [section, setSection] = useState<WorkspaceSection>(initialSection);
-  const [secondaryOpen, setSecondaryOpen] = useState(true);
+  const [secondaryOpen, setSecondaryOpen] = useState(initialSection !== "tasks");
   const [rightOpen, setRightOpen] = useState(false);
   const [sheet, setSheet] = useState<SheetState>(null);
   const [reviewOpen, setReviewOpen] = useState(false);
@@ -139,7 +139,8 @@ export function WorkspaceView({
 
   const handleSelectSection = (next: WorkspaceSection) => {
     setSection(next);
-    setSecondaryOpen(true);
+    setSecondaryOpen(next !== "tasks");
+    if (next === "tasks") setActiveTabId("cr8or-ai.chat");
   };
 
   const handleOpenTerminal = () => {
@@ -193,7 +194,7 @@ export function WorkspaceView({
       <MobileNav
         active={section}
         onHome={onExitToHome}
-        onWorkspace={() => setSection("tasks")}
+        onWorkspace={() => handleSelectSection("tasks")}
         onChanges={() => setSheet("source-control")}
         onMore={() => setSheet("more")}
       />

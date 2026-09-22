@@ -3,6 +3,9 @@ import { z } from "zod";
 import { orchestrate, OrchestrationProgressEvent } from "@/lib/agents/orchestrator";
 import { withRouteMetrics } from "@/lib/observability/sli";
 import { authorizeRoute } from "@/lib/security/authorization";
+import { redactText } from "@/lib/security/redaction";
+
+export const maxDuration = 300;
 
 const bodySchema = z.object({
   prompt: z.string().min(5),
@@ -52,7 +55,7 @@ export async function POST(request: NextRequest) {
         await orchestrate(payload, encode);
       } catch (err) {
         const message = err instanceof Error ? err.message : "Orchestration failed.";
-        encode({ type: "error", message });
+        encode({ type: "error", message: redactText(message) });
       } finally {
         controller.close();
       }

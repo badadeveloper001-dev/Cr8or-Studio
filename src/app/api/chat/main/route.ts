@@ -236,7 +236,7 @@ async function handleDirectWorkspaceRequest(
             suggestions: ["Read package.json", "List the files in the project root"],
           };
         }
-        if (request.path === "package.json") {
+        if (request.path === "package.json" && /(?:project|package).*name|name.*(?:project|package)/i.test(message)) {
           const result = await runtime.readFile("package.json");
           try {
             const pkg = JSON.parse(result.content);
@@ -373,7 +373,7 @@ export async function POST(request: NextRequest) {
           reply: ack.reply,
           suggestions: ack.suggestions,
           shouldDelegate: true,
-          delegatePrompt: payload.message,
+          delegatePrompt: buildChatPrompt(payload.history, payload.message),
           intent: intentDecision.intent,
           allowedToolMode: intentDecision.allowedToolMode,
           requiresExplicitApproval: intentDecision.requiresExplicitApproval,

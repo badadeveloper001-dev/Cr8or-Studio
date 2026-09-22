@@ -1367,7 +1367,7 @@ export function useWorkspaceController() {
         const { done, value } = await reader.read();
         if (done) break;
 
-        buffer += decoder.decode(value, { stream: true });
+        buffer = (buffer + decoder.decode(value, { stream: true })).replace(/\r\n/g, "\n");
         const lines = buffer.split("\n\n");
         buffer = lines.pop() ?? "";
 
@@ -1404,12 +1404,13 @@ export function useWorkspaceController() {
               appendTerminal(`Done: ${event.result.summary}`);
 
               const completedAgents = event.result.timeline.filter((task) => task.status === "completed").length;
+              const allCompleted = event.result.timeline.length > 0 && completedAgents === event.result.timeline.length;
               const insights = summarizeLeadInsights(event.result.timeline, startTime, Date.now());
               setLeadInsights(insights);
               addExecutionReceipt({
                 kind: "orchestration",
-                title: "Delegated run completed",
-                status: "verified",
+                title: allCompleted ? "Delegated run completed" : "Delegated run incomplete",
+                status: allCompleted ? "verified" : "failed",
                 evidence: [
                   `Run ID: ${event.result.requestId}`,
                   `Summary: ${event.result.summary}`,
@@ -1422,7 +1423,7 @@ export function useWorkspaceController() {
                   item.id === runId
                     ? {
                         ...item,
-                        status: "completed",
+                        status: allCompleted ? "completed" : "failed",
                         durationMs: insights.latencyMs,
                         completedAgents,
                         totalAgents: event.result.timeline.length,
@@ -1464,6 +1465,8 @@ export function useWorkspaceController() {
               }
             } else if (event.type === "error") {
               errorReceived = true;
+              pushChatMessage("assistant", `The delegated run encountered an error: ${event.message}`);
+              setStatusLine("Delegated run failed. See the conversation for details.");
               setError(event.message);
               setActiveBottomTab("problems");
               appendTerminal(`error: ${event.message}`);
@@ -1564,6 +1567,7 @@ export function useWorkspaceController() {
           },
         ]);
       } else {
+        pushChatMessage("assistant", "The delegated run was cancelled. Any actions already completed remain visible in the activity panel.");
         addExecutionReceipt({
           kind: "orchestration",
           title: "Delegated run cancelled",
@@ -1587,7 +1591,7 @@ export function useWorkspaceController() {
     } finally {
       setIsRunning(false);
     }
-  }, [addExecutionReceipt, appendTerminal, currentProject, isRunning, prompt, updateAgent]);
+  }, [addExecutionReceipt, appendTerminal, currentProject, isRunning, prompt, updateAgent, pushChatMessage, loadApprovals, requestApproval, runGitStatus]);
 
   const handleChatAttachmentSelection = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) return;

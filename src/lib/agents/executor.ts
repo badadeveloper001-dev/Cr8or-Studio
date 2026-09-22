@@ -5,6 +5,7 @@ import { getGlobalMemory, getLocalMemory, writeLocalNote } from "@/lib/agents/me
 import { agentSystemPrompts } from "@/lib/agents/prompts";
 import { AgentExecutionState, AgentTask, ToolCallRecord, ToolProgressEvent } from "@/lib/agents/types";
 import { ToolContext } from "@/lib/agents/tools";
+import { redactText } from "@/lib/security/redaction";
 
 export type TaskProgressCallback = (state: AgentExecutionState) => void;
 export type ToolProgressCallback = (event: ToolProgressEvent) => void;
@@ -78,6 +79,7 @@ export async function executeTask(
   let toolRecords: ToolCallRecord[] = [];
   let workspaceChanged = false;
   let requiresApproval = false;
+  let failed = false;
 
   try {
     const requestId = `${task.agentId}-${startedAt}`;
@@ -98,11 +100,12 @@ export async function executeTask(
       toolRecords = result.toolRecords;
       workspaceChanged = result.workspaceChanged;
       requiresApproval = result.requiresApproval;
+      failed = result.failed ?? false;
     } else {
       output = await runAgentLLM(systemPrompt, userMessage);
     }
   } catch (err) {
-    const errorMessage = err instanceof Error ? err.message : "Unknown error";
+    const errorMessage = redactText(err instanceof Error ? err.message : "Unknown error");
     updateState({
       status: "failed",
       progress: 0,
@@ -118,14 +121,14 @@ export async function executeTask(
   }
 
   writeLocalNote(projectId, task.agentId, {
-    note: `Completed '${task.title}'. Output length: ${output.length} chars. Tool calls: ${toolRecords.length}.`,
+    note: `${failed ? "Failed" : requiresApproval ? "Blocked" : "Completed"} '${task.title}'. Output length: ${output.length} chars. Tool calls: ${toolRecords.length}.`,
   });
 
   const finishedAt = new Date().toISOString();
 
-  const finalStatus = requiresApproval ? "blocked" : "completed";
-  const finalProgress = requiresApproval ? 80 : 100;
-  const finalThinking = requiresApproval
+  const finalStatus = failed ? "failed" : requiresApproval ? "blocked" : "completed";
+  const finalProgress = failed ? 0 : requiresApproval ? 80 : 100;
+  const finalThinking = failed ? "The task could not finish. See its output for details." : requiresApproval
     ? "Work paused - approval required for tool action."
     : "Work package completed and shared with Orchestrator.";
 
@@ -139,7 +142,7 @@ export async function executeTask(
     ...task,
     status: finalStatus,
     output,
-    confidence: 0.9,
+    confidence: failed ? 0 : 0.9,
     startedAt,
     finishedAt,
     toolRecords,

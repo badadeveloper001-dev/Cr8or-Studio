@@ -18,6 +18,7 @@ export function HomeComposer({
   const canSubmit = draft.trim().length > 0 && !isRunning;
 
   return (
+    <div>
     <form
       onSubmit={(event) => {
         event.preventDefault();
@@ -25,7 +26,7 @@ export function HomeComposer({
         if (!value || isRunning) return;
         onSubmit(value);
       }}
-      className="rounded-xl border border-border-strong bg-surface p-3 transition-colors focus-within:border-accent"
+      className="rounded-2xl border border-border-strong bg-surface p-5 shadow-[0_8px_32px_-16px_rgba(20,50,45,0.18)] transition-colors focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/10"
     >
       <label htmlFor="home-composer" className="sr-only">
         What are you working on?
@@ -35,23 +36,29 @@ export function HomeComposer({
         value={draft}
         onChange={(event) => setDraft(event.target.value)}
         onKeyDown={(event) => {
-          if (event.key === "Enter" && !event.shiftKey) {
+          if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
             event.preventDefault();
             const value = draft.trim();
             if (value && !isRunning) onSubmit(value);
           }
         }}
         rows={3}
-        placeholder="Describe a feature, fix a bug, refactor a module, or ask a question..."
+        placeholder="I want to build..."
         className="block w-full resize-none bg-transparent px-1 py-1 text-[15px] leading-relaxed text-text-primary outline-none placeholder:text-text-muted"
       />
       <div className="mt-2 flex flex-wrap items-center justify-between gap-3 border-t border-border-strong pt-3">
-        <p className="text-xs text-text-muted">Questions get answers. Tasks get done.</p>
-        <Button type="submit" size="sm" disabled={!canSubmit} className="gap-2 rounded-md">
+        <p className="text-xs text-text-muted">Describe your idea in your own words.</p>
+        <Button type="submit" size="sm" disabled={!canSubmit} className="gap-2 rounded-lg bg-accent px-4 text-accent-foreground hover:bg-accent/90">
           {isRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowRight className="h-4 w-4" />}
-          Send
+          Let’s create
         </Button>
       </div>
     </form>
+    <div className="mt-4 flex flex-wrap gap-2">
+      {["Explore this project", "Plan a new feature", "Find and fix a bug"].map((idea) => (
+        <button key={idea} type="button" disabled={isRunning} onClick={() => setDraft(idea)} className="rounded-full border border-border bg-surface px-3.5 py-2 text-xs text-text-secondary transition-colors hover:border-accent/40 hover:text-accent disabled:opacity-50">{idea}</button>
+      ))}
+    </div>
+    </div>
   );
 }

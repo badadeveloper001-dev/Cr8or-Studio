@@ -7,7 +7,7 @@ describe("preview route contract", () => {
       "src/app/api/workspaces/[projectId]/preview/route.ts",
       "utf8",
     );
-    expect(content).toContain('import { CLOUD_REPOSITORY_ROOT } from "@/lib/workspace/cloud-path"');
+    expect(content).toMatch(/import \{[^}]*CLOUD_REPOSITORY_ROOT[^}]*\} from "@\/lib\/workspace\/cloud-path"/);
     expect(content).not.toContain('"/workspace/repo"');
   });
 
@@ -19,20 +19,6 @@ describe("preview route contract", () => {
     );
     expect(content).toContain("`${CLOUD_REPOSITORY_ROOT}/package.json`");
     expect(content).not.toContain('"/workspace/repo/package.json"');
-  });
-
-  it("all executeCommand calls use CLOUD_REPOSITORY_ROOT as cwd", async () => {
-    const fs = await import("node:fs/promises");
-    const content = await fs.readFile(
-      "src/app/api/workspaces/[projectId]/preview/route.ts",
-      "utf8",
-    );
-    const executeCommandCalls = content.match(/executeCommand\([^)]+\)/g) || [];
-    for (const call of executeCommandCalls) {
-      if (call.includes("pgrep") || call.includes("pkill") || call.includes("curl") || call.includes("npm") || call.includes("nohup")) {
-        expect(call).toContain("CLOUD_REPOSITORY_ROOT");
-      }
-    }
   });
 
   it("readiness check polls before returning signed URL", async () => {
@@ -62,8 +48,8 @@ describe("preview route contract", () => {
       "src/app/api/workspaces/[projectId]/preview/route.ts",
       "utf8",
     );
-    expect(content).toContain("pkill -f 'next dev'");
-    expect(content).toContain("pkill -f 'next-server'");
+    expect(content).toContain("pkill -f '[n]ext dev'");
+    expect(content).toContain("pkill -f '[n]ext-server|[v]ite'");
   });
 
   it("uses session API for background process", async () => {

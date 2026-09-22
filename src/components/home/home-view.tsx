@@ -41,24 +41,25 @@ export function HomeView({
         onEnterWorkspace={onEnterWorkspace}
         showWorkspace={currentProject.path !== "."}
       />
-      <main className="mx-auto w-full max-w-3xl px-4 pb-24 pt-8 sm:px-8 sm:pt-14">
-        <section aria-labelledby="home-heading">
-          <p className="text-xs font-medium uppercase tracking-[0.16em] text-text-muted">Cr8or Studio</p>
-          <h1 id="home-heading" className="mt-3 text-2xl font-semibold tracking-tight text-text-primary sm:text-3xl">
-            What are you working on?
+      <main className="mx-auto w-full max-w-6xl px-5 pb-24 pt-12 sm:px-10 sm:pt-20">
+        <section aria-labelledby="home-heading" className="mx-auto max-w-3xl">
+          <p className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.16em] text-accent"><span className="h-1.5 w-1.5 rounded-full bg-accent" aria-hidden="true" />Your creative workspace</p>
+          <h1 id="home-heading" className="mt-5 text-4xl font-semibold leading-[1.1] tracking-[-0.04em] text-text-primary sm:text-5xl">
+            What will you create today?
           </h1>
           <p className="mt-2 max-w-xl text-sm leading-relaxed text-text-secondary">
-            Ask a question, explore an idea, or describe what you want to build.
+            Start with an idea. Build something useful. Make it better, together.
           </p>
-          <div className="mt-6">
+          <div className="mt-8">
             <HomeComposer initialPrompt={prompt} isRunning={isRunning || isChatting} onSubmit={handleRun} />
           </div>
         </section>
 
-        <section aria-labelledby="project-actions-heading" className="mt-14">
-          <h2 id="project-actions-heading" className="text-sm font-semibold tracking-tight text-text-primary">
-            Start from
+        <section aria-labelledby="project-actions-heading" className="mt-14 rounded-2xl border border-border bg-surface p-5 sm:p-7">
+          <h2 id="project-actions-heading" className="text-base font-semibold tracking-tight text-text-primary">
+            Bring your project
           </h2>
+          <p className="mt-1 text-sm text-text-secondary">Start fresh or pick up where you left off.</p>
           {projectError ? <p role="alert" className="mt-3 text-sm text-danger">{projectError}</p> : null}
           <div className="mt-3">
             <ProjectActions
@@ -76,7 +77,8 @@ export function HomeView({
           </div>
         </section>
 
-        <div className="mt-14">
+        <div className="mt-8 grid gap-8 lg:grid-cols-2">
+        <div className="min-w-0 rounded-2xl border border-border bg-surface p-5 sm:p-7">
           <RecentProjects
             projects={recentProjects}
             onOpen={async (path) => {
@@ -85,8 +87,9 @@ export function HomeView({
           />
         </div>
 
-        <div className="mt-14">
+        <div className="min-w-0 rounded-2xl border border-border bg-surface p-5 sm:p-7">
           <RecentTasks tasks={runHistory} />
+        </div>
         </div>
       </main>
     </div>

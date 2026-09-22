@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronDown, ChevronRight, ImagePlus, Loader2, Send, StopCircle, X } from "lucide-react";
+import { ArrowUp, ChevronDown, ChevronRight, ImagePlus, Loader2, Sparkles, StopCircle, X } from "lucide-react";
 
 import { useWorkspaceControllerContext } from "@/components/app/workspace-controller-context";
 import { Button } from "@/components/ui/button";
@@ -31,11 +31,11 @@ function TaskComposer() {
   } = useWorkspaceControllerContext();
 
   const canSend = !isChatting && !isRunning && (chatInput.trim().length > 0 || chatAttachments.length > 0);
-  const canClear = !isChatting && (chatMessages.length > 1 || chatAttachments.length > 0);
+  const canClear = !isChatting && !isRunning && (chatMessages.length > 1 || chatAttachments.length > 0);
 
   return (
-    <div className="shrink-0 border-t border-border-strong bg-background pb-[env(safe-area-inset-bottom)]">
-      <div className="mx-auto w-full max-w-3xl px-3 py-3 sm:px-6">
+    <div className="shrink-0 bg-background pb-[env(safe-area-inset-bottom)]">
+      <div className="mx-auto w-full max-w-4xl px-4 pb-5 pt-3 sm:px-8">
         <input
           ref={chatFileInputRef}
           type="file"
@@ -67,18 +67,19 @@ function TaskComposer() {
             ))}
           </div>
         ) : null}
-        <div className="rounded-xl border border-border-strong bg-surface px-3 py-2.5 transition-colors focus-within:border-accent">
+        <div className="rounded-2xl border border-border-strong bg-surface px-4 py-3 shadow-[0_6px_24px_-12px_rgba(20,50,45,0.15)] transition-colors focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/10">
           <textarea
             ref={chatInputRef}
             value={chatInput}
             onChange={(event) => setChatInput(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
+              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
                 event.preventDefault();
                 void sendChat();
               }
             }}
             rows={2}
+            aria-label="Message Cr8or"
             placeholder="Tell Cr8or what to build, fix, or understand..."
             className="block w-full resize-none bg-transparent px-0.5 py-1 text-[13px] leading-relaxed text-text-primary outline-none placeholder:text-text-muted"
           />
@@ -123,12 +124,13 @@ function TaskComposer() {
                 </Button>
               ) : null}
               <Button type="button" size="sm" onClick={() => void sendChat()} disabled={!canSend} className="gap-1.5">
-                {isChatting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+                {isChatting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowUp className="h-3.5 w-3.5" />}
                 Send
               </Button>
             </div>
           </div>
         </div>
+        <p className="mt-2 text-center text-[11px] text-text-muted">Review the results. Keep what works. Make it yours.</p>
       </div>
     </div>
   );
@@ -205,13 +207,17 @@ export function TaskThread({ onReviewChanges }: { onReviewChanges?: () => void }
   return (
     <section className="flex min-h-0 flex-1 flex-col bg-background">
       <div ref={chatScrollRef} className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
-        <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-5 sm:px-6 sm:py-7">
+        <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 py-6 sm:px-8 sm:py-10">
           {showEmptyState ? (
-            <div className="flex flex-col items-center gap-2 py-14 text-center sm:py-20">
-              <p className="text-sm text-text-secondary">Tell Cr8or what you want to build, fix, or understand.</p>
-              <p className="max-w-sm text-xs leading-relaxed text-text-muted">
-                Cr8or decides when to delegate to specialist agents.
+            <div className="flex flex-col items-center gap-3 py-12 text-center sm:py-20">
+              <span className="mb-2 flex h-14 w-14 items-center justify-center rounded-2xl border border-accent/15 bg-accent/10 text-accent"><Sparkles className="h-6 w-6" /></span>
+              <h1 className="text-3xl font-semibold tracking-tight text-text-primary">Let’s make something great.</h1>
+              <p className="max-w-md text-sm leading-relaxed text-text-secondary">
+                Describe a feature, explore your code, or tackle a bug. Your workspace is ready for the next idea.
               </p>
+              <div className="mt-5 flex flex-wrap justify-center gap-2">
+                {["Inspect the project structure", "Explain how this app works"].map((suggestion) => <button key={suggestion} type="button" onClick={() => void sendChat(suggestion)} className="rounded-xl border border-border-strong bg-surface px-4 py-3 text-xs text-text-secondary transition-colors hover:border-accent/40 hover:text-accent">{suggestion}</button>)}
+              </div>
             </div>
           ) : (
             <div className="flex flex-col gap-4">
@@ -228,6 +234,11 @@ export function TaskThread({ onReviewChanges }: { onReviewChanges?: () => void }
               {isChatting ? <p className="text-xs text-text-muted">Cr8or is thinking...</p> : null}
             </div>
           )}
+
+          {isRunning ? <div className="space-y-3 rounded-2xl border border-accent/20 bg-surface p-4">
+            <div role="status" aria-live="polite" className="flex items-center gap-2 text-sm text-accent"><Loader2 className="h-4 w-4 shrink-0 animate-spin" /><span>{statusLine || "Working on your request…"}</span></div>
+            <AgentActivity />
+          </div> : null}
 
           {pendingDelegation ? (
             <InlineApproval

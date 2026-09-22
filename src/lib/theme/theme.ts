@@ -19,4 +19,4 @@ export const THEME_INIT_SCRIPT = `(function(){try{var k=${JSON.stringify(
   THEME_STORAGE_KEY,
 )};var q=${JSON.stringify(
   THEME_MEDIA_QUERY,
-)};var t=window.localStorage.getItem(k);if(t!=="light"&&t!=="dark"){t="system";}var d=t==="dark"||(t==="system"&&window.matchMedia(q).matches);var r=document.documentElement;r.classList.toggle("dark",d);r.style.colorScheme=d?"dark":"light";}catch(e){}})();`;
+)};var t=window.localStorage.getItem(k);if(t!=="light"&&t!=="dark"&&t!=="system"){t="light";}var d=t==="dark"||(t==="system"&&window.matchMedia(q).matches);var r=document.documentElement;r.classList.toggle("dark",d);r.style.colorScheme=d?"dark":"light";}catch(e){}})();`;

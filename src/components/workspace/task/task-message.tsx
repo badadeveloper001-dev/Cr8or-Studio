@@ -7,7 +7,7 @@ import rehypeHighlight from "rehype-highlight";
 import { cn } from "@/lib/utils";
 
 const MARKDOWN_CLASS = [
-  "text-[13px] leading-relaxed text-text-secondary",
+  "text-sm leading-7 text-text-secondary break-words",
   "[&_h1]:mb-2 [&_h1]:mt-4 [&_h1]:text-lg [&_h1]:font-semibold [&_h1]:text-text-primary",
   "[&_h2]:mb-2 [&_h2]:mt-3 [&_h2]:text-base [&_h2]:font-semibold [&_h2]:text-text-primary",
   "[&_h3]:mb-1.5 [&_h3]:mt-3 [&_h3]:text-[13px] [&_h3]:font-semibold [&_h3]:text-text-primary",
@@ -35,7 +35,7 @@ export function TaskMessage({
     return (
       <div className="flex flex-col gap-1">
         <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted">You</span>
-        <div className="whitespace-pre-wrap rounded-lg border border-border-strong bg-surface-muted px-3.5 py-2.5 text-[13px] leading-relaxed text-text-primary">
+        <div className="whitespace-pre-wrap break-words rounded-2xl border border-border bg-surface px-5 py-4 text-sm leading-relaxed text-text-primary">
           {content}
         </div>
       </div>

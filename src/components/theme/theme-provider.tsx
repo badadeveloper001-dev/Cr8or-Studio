@@ -21,14 +21,14 @@ type ThemeContextValue = {
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 
 function readStoredTheme(): Theme {
-  if (typeof window === "undefined") return "system";
+  if (typeof window === "undefined") return "light";
   try {
     const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
     if (isTheme(stored)) return stored;
   } catch {
-    // storage may be unavailable; fall back to system
+    // Storage may be unavailable; keep the default light workspace.
   }
-  return "system";
+  return "light";
 }
 
 function systemPrefersDark(): boolean {

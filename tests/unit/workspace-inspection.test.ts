@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { performReadOnlyTaskLoop, performLocalReadinessCheck } from "@/lib/workspace/workspace-inspection";
-import type { WorkspaceRuntime, WorkspaceMetadata, GitStatusResult, GitDiffResult, CommandResult, ValidatedCommandRequest } from "@/lib/workspace/runtime";
+import type { WorkspaceRuntime, WorkspaceMetadata, GitStatusResult, GitDiffResult, CommandResult } from "@/lib/workspace/runtime";
 
 function createMockRuntime(files: Record<string, string>, dirs: Record<string, Array<{ name: string; type: "file" | "directory" }>>): WorkspaceRuntime {
   return {
