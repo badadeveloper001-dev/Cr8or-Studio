@@ -7,6 +7,7 @@ import {
   INTENT_REQUIRES_APPROVAL,
 } from "@/lib/intent/types";
 
+import { isImplementationRequest, isNonMutatingRequest, isPlanContinuation } from "@/lib/intent/execution-request";
 export type { IntentClass, IntentDecision, ToolMode };
 export { INTENT_TOOL_MODE, INTENT_SHOULD_DELEGATE, INTENT_REQUIRES_APPROVAL };
 
@@ -495,12 +496,24 @@ function buildDecision(
   };
 }
 
-export function classifyIntentDeterministic(message: string): IntentDecision {
+export function classifyIntentDeterministic(message: string, previousContext = ""): IntentDecision {
   const trimmed = message.trim();
   const lower = trimmed.toLowerCase();
 
   if (trimmed.length < 3) {
     return buildDecision("unclear", 30, { reason: "Message too short to classify" });
+  }
+
+  if (isNonMutatingRequest(trimmed)) {
+    return buildDecision("read_only_inspection", 95, { reason: "Requested analysis or prose, not workspace mutation" });
+  }
+  if (isImplementationRequest(trimmed, previousContext)) {
+    const positive = lower.replace(/\b(?:do not|don't|never)\b[^.!;\n]*/g, "");
+    if (matchesHighRisk(positive)) return buildDecision("high_risk_action", 95);
+    return buildDecision("direct_action", 95, { reason: "Current turn requests implementation; tool policy still applies" });
+  }
+  if (isPlanContinuation(trimmed)) {
+    return buildDecision("explanation", 95, { reason: "No recent pending implementation proposal supports this continuation" });
   }
 
   // Negation overrides: explicit "don't build/fix/etc." or "just answer/explain"

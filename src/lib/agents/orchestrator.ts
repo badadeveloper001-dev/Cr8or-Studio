@@ -1,4 +1,6 @@
 import { nanoid } from "nanoid";
+import { currentDelegationTurn, isImplementationRequest } from "@/lib/intent/execution-request";
+import { AGENT_TOOL_TIER_MAP } from "@/lib/agents/tools";
 
 import { agentCatalog } from "@/lib/agents/catalog";
 import { executeTask, buildInitialDashboard, TaskProgressCallback, ToolProgressCallback } from "@/lib/agents/executor";
@@ -95,11 +97,18 @@ function detectDomains(prompt: string): (keyof DomainAgentMap)[] {
 
 function createTasksForDomains(prompt: string, domains: (keyof DomainAgentMap)[]): AgentTask[] {
   const agentIds = new Set<AgentId>();
+  const current = currentDelegationTurn(prompt);
   
   for (const domain of domains) {
     for (const agentId of DOMAIN_AGENT_MAP[domain]) {
       agentIds.add(agentId);
     }
+  }
+
+  // Preserve domain-selected specialists and dependency linking. Add capability
+  // only when execution was requested but existing routing selected no writer.
+  if (isImplementationRequest(current.message, current.history) && ![...agentIds].some(id => AGENT_TOOL_TIER_MAP[id] === "writer")) {
+    agentIds.add(/\.(?:tsx|jsx)\b|\bfrontend\b/i.test(`${current.message}\n${current.history}`) ? "frontend" : "backend");
   }
 
   // An accepted execution request must never become an empty successful run.

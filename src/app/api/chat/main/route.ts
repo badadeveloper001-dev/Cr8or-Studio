@@ -362,7 +362,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const intentDecision = await classifyIntent(payload.message);
+    const intentDecision = await classifyIntent(payload.message, (payload.history ?? []).slice(-12).map(entry => `${entry.role}: ${entry.content}`).join("\n"));
 
     const shouldDelegate = intentDecision.shouldDelegate && intentDecision.allowedToolMode !== "none";
 

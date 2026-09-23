@@ -88,8 +88,8 @@ export async function classifyIntentWithLLM(message: string): Promise<IntentDeci
   }
 }
 
-export async function classifyIntent(message: string): Promise<IntentDecision> {
-  const deterministic = classifyIntentDeterministic(message);
+export async function classifyIntent(message: string, previousContext = ""): Promise<IntentDecision> {
+  const deterministic = classifyIntentDeterministic(message, previousContext);
 
   if (deterministic.intent !== "unclear" && deterministic.confidence >= 80) {
     return deterministic;

@@ -1,3 +1,5 @@
+import { isImplementationRequest } from "@/lib/intent/execution-request";
+
 type WorkspaceRequestType = "read_file" | "list_files" | "git_status" | "git_diff" | "inspect_project" | "check_readiness" | null;
 
 export interface WorkspaceRequest {
@@ -6,6 +8,7 @@ export interface WorkspaceRequest {
 }
 
 const READ_FILE_PATTERNS = [
+  /^inspect\s+([\w./\\-]+\.\w+)\s*$/i,
   /^(?:read|open|cat|view|display)\s+['"]?([\w./\\-]+(?:\.\w+)?)['"]?\s*(?:\s+and\s+.*)?$/i,
   /^show\s+me\s+['"]?([\w./\\-]+(?:\.\w+)?)['"]?\s*$/i,
   /^(?:what(?:'s| is) in|what does)\s+['"]?([\w./\\-]+(?:\.\w+)?)['"]?\s*$/i,
@@ -73,7 +76,7 @@ function isMutatingIntent(message: string): boolean {
 export function detectWorkspaceRequest(message: string): WorkspaceRequest {
   const trimmed = message.trim();
 
-  if (isMutatingIntent(trimmed)) {
+  if (isImplementationRequest(trimmed) || isMutatingIntent(trimmed)) {
     return { type: null };
   }
 

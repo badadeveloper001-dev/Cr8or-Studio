@@ -177,6 +177,11 @@ async function executeListFiles(params: { path?: string }, context: ToolContext)
 
 async function executeWriteFile(params: { path: string; content: string }, context: ToolContext): Promise<ToolResult<{ bytes: number }>> {
   const startedAt = new Date().toISOString();
+  const policy = await checkPolicyIfNeeded(toolMetadata.write_file, context);
+  if (!policy.allowed) {
+    await auditToolInvocation("write_file", context, "deny", policy.reason ?? "Write blocked by policy", { path: params.path });
+    return { ok: false, tool: "write_file", error: policy.reason, requiresApproval: policy.requiresApproval, workspaceChanged: false, startedAt, finishedAt: new Date().toISOString() };
+  }
   const runtime = await getRuntime(context);
 
   try {
