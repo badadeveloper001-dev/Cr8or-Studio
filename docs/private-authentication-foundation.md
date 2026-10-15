@@ -69,7 +69,7 @@ interfaces, not public endpoints:
 
 | Export | Contract |
 | --- | --- |
-| `createOwnerSession({ credentialVersion, authenticationMethod, expiresAt })` | Requires the exact credential version that the caller successfully verified. Returns `{ token, session }` after inserting the digest and metadata. It does not verify a credential itself. |
+| `createOwnerSession({ credentialVersion, authenticationMethod, expiresAt })` | Requires the exact credential version that the caller successfully verified and an expiration after database time, at most 12 hours later. Returns `{ token, session }` after inserting the digest and metadata. It does not verify a credential itself. |
 | `hashSessionToken(token)` | Validates the canonical 32-byte base64url token format and computes its lowercase SHA-256 hex digest. |
 | `resolveOwnerSession(token)` | Hashes a valid token and resolves the corresponding current session. |
 | `resolveSessionByTokenHash(tokenHash)` | Resolves a session by digest, checking owner identity, credential version, expiration, and revocation in one database query. |
@@ -82,6 +82,13 @@ are returned only to the trusted caller that will later set the browser cookie.
 Only the SHA-256 digest reaches the database. Returned session metadata excludes
 the digest. SHA-256 is appropriate for high-entropy random tokens; it must not be
 used as the access-code password hashing scheme.
+
+Sessions have an absolute maximum lifetime of 12 hours from their persisted
+authentication/creation timestamp. Creation reads PostgreSQL time after acquiring
+the owner-row lock and rejects expiration values outside that window; it does
+not silently shorten an overlong request. Session lookup never extends the
+expiration. This boundary does not depend on a browser or application-server
+clock. Invalid dates are rejected before opening a transaction.
 
 Session lookup returns `null` for malformed, unknown, expired, revoked, or
 obsolete-generation tokens. Database failures throw `SessionStoreError` with a

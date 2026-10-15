@@ -7,6 +7,7 @@ import { prisma } from "@/lib/db/prisma";
 
 const OWNER_ID = "owner";
 const TOKEN_BYTES = 32;
+const MAX_SESSION_LIFETIME_MS = 12 * 60 * 60 * 1_000;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const DIGEST_PATTERN = /^[a-f0-9]{64}$/;
 
@@ -33,7 +34,7 @@ export class SessionStoreError extends Error {
       UNAVAILABLE: "Session storage is unavailable.",
       OWNER_NOT_PROVISIONED: "The owner credential has not been provisioned.",
       CREDENTIAL_VERSION_CHANGED: "The owner credential version has changed. Authenticate again.",
-      INVALID_EXPIRATION: "Session expiration must be in the future.",
+      INVALID_EXPIRATION: "Session expiration must be in the future and within 12 hours.",
     }[code]);
     this.name = "SessionStoreError";
   }
@@ -95,7 +96,9 @@ export async function createOwnerSession(input: CreateOwnerSessionInput): Promis
     const [clock] = await tx.$queryRaw<Array<{ now: Date }>>`
       SELECT (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3) AS "now"
     `;
-    if (input.expiresAt <= clock.now) {
+    // An absolute lifetime measured from the database clock, after any owner-row wait.
+    const lifetimeMs = input.expiresAt.getTime() - clock.now.getTime();
+    if (lifetimeMs <= 0 || lifetimeMs > MAX_SESSION_LIFETIME_MS) {
       throw new SessionStoreError("INVALID_EXPIRATION");
     }
     return tx.authSession.create({

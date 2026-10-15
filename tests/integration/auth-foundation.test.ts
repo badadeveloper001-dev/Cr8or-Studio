@@ -293,6 +293,59 @@ describe.skipIf(!testUrl)("authentication foundation on isolated PostgreSQL", ()
     }
   });
 
+  it("accepts an expiration within 12 hours of the PostgreSQL authentication timestamp", async () => {
+    const [clock] = await database.$queryRaw<Array<{ now: Date }>>`
+      SELECT (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3) AS "now"
+    `;
+    // Sampling first puts this just inside the limit when creation reads its
+    // own database clock; the exact millisecond boundary is covered by unit tests.
+    const expiresAt = new Date(clock.now.getTime() + 12 * 60 * 60 * 1000);
+    const { token, session } = await sessions.createOwnerSession({
+      credentialVersion: 1,
+      authenticationMethod: "ACCESS_CODE",
+      expiresAt,
+    });
+    const stored = await database.authSession.findUniqueOrThrow({ where: { id: session.id } });
+    expect(stored.expiresAt).toEqual(expiresAt);
+    expect(stored.authenticatedAt.getTime()).toBeGreaterThanOrEqual(clock.now.getTime());
+    expect(stored.expiresAt.getTime() - stored.authenticatedAt.getTime()).toBeGreaterThan(0);
+    expect(stored.expiresAt.getTime() - stored.authenticatedAt.getTime()).toBeLessThanOrEqual(12 * 60 * 60 * 1000);
+    expect(await sessions.resolveOwnerSession(token)).toMatchObject({ id: session.id });
+  });
+
+  it("rejects a requested 13-hour session without persisting a token digest", async () => {
+    const [clock] = await database.$queryRaw<Array<{ now: Date }>>`
+      SELECT (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3) AS "now"
+    `;
+    await expect(sessions.createOwnerSession({
+      credentialVersion: 1,
+      authenticationMethod: "ACCESS_CODE",
+      expiresAt: new Date(clock.now.getTime() + 13 * 60 * 60 * 1000),
+    })).rejects.toMatchObject({ name: "SessionStoreError", code: "INVALID_EXPIRATION" });
+    expect(await database.authSession.count()).toBe(0);
+  });
+
+  it("rejects an already expired session using the PostgreSQL clock", async () => {
+    const [clock] = await database.$queryRaw<Array<{ now: Date }>>`
+      SELECT (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3) AS "now"
+    `;
+    await expect(sessions.createOwnerSession({
+      credentialVersion: 1,
+      authenticationMethod: "ACCESS_CODE",
+      expiresAt: new Date(clock.now.getTime() - 60_000),
+    })).rejects.toMatchObject({ name: "SessionStoreError", code: "INVALID_EXPIRATION" });
+    expect(await database.authSession.count()).toBe(0);
+  });
+
+  it("rejects an invalid expiration value without creating a session", async () => {
+    await expect(sessions.createOwnerSession({
+      credentialVersion: 1,
+      authenticationMethod: "ACCESS_CODE",
+      expiresAt: new Date(Number.NaN),
+    })).rejects.toBeInstanceOf(TypeError);
+    expect(await database.authSession.count()).toBe(0);
+  });
+
   it("rejects unknown, expired, revoked, and obsolete-version sessions without cached authorization", async () => {
     const { token, session } = await newSession();
     expect(await sessions.resolveOwnerSession(randomBytes(32).toString("base64url"))).toBeNull();

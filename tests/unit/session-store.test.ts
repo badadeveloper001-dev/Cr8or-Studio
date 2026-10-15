@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   query: vi.fn(), execute: vi.fn(), transaction: vi.fn(),
@@ -30,6 +30,10 @@ const session = {
 };
 
 describe("session persistence", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   beforeEach(() => {
     vi.resetAllMocks();
     mocks.transaction.mockImplementation(async (operation) => operation({
@@ -79,9 +83,25 @@ describe("session persistence", () => {
     expect(mocks.create).not.toHaveBeenCalled();
   });
 
-  it("rejects an expiration that has already passed on the database clock", async () => {
-    await expect(createOwnerSession({ ...input, expiresAt: now })).rejects.toMatchObject({ code: "INVALID_EXPIRATION" });
+  it.each([1, 43_200_000])("accepts a lifetime of %i ms from the database clock", async (lifetimeMs) => {
+    const expiresAt = new Date(now.getTime() + lifetimeMs);
+    await createOwnerSession({ ...input, expiresAt });
+    expect(mocks.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ authenticatedAt: now, createdAt: now, expiresAt }),
+    }));
+  });
+
+  it.each([-1, 0, 43_200_001])("rejects an out-of-range lifetime of %i ms without writing a session", async (lifetimeMs) => {
+    await expect(createOwnerSession({
+      ...input, expiresAt: new Date(now.getTime() + lifetimeMs),
+    })).rejects.toMatchObject({ code: "INVALID_EXPIRATION" });
     expect(mocks.create).not.toHaveBeenCalled();
+  });
+
+  it.each([-86_400_000, 86_400_000])("uses database time when the application clock is skewed by %i ms", async (offsetMs) => {
+    vi.spyOn(Date, "now").mockReturnValue(now.getTime() + offsetMs);
+    await expect(createOwnerSession(input)).resolves.toMatchObject({ session });
+    expect(mocks.create).toHaveBeenCalledOnce();
   });
 
   it("rejects invalid creation input before a transaction", async () => {
