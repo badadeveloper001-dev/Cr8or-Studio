@@ -13,6 +13,8 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(ROOT_DIR, "src"),
+      // Vitest runs server modules in Node; Next.js keeps the real client import guard.
+      "server-only": path.resolve(ROOT_DIR, "tests/helpers/server-only.ts"),
     },
   },
 });
