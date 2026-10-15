@@ -69,3 +69,63 @@ model Workspace {
   updatedAt           DateTime @updatedAt
   lastActiveAt        DateTime?
 }
+
+enum AuthMethod {
+  ACCESS_CODE
+  PASSKEY
+}
+
+enum AuthRateLimitScope {
+  SOURCE
+  GLOBAL
+}
+
+// PostgreSQL CHECK constraints in the migration enforce the singleton ID,
+// positive credential version, and the 32-byte future WebAuthn user handle.
+// All three authentication tables use RLS with no public policies. Prisma does
+// not represent RLS or grants; preserve the custom SQL in future migrations.
+model OwnerCredential {
+  id                String        @id @default("owner")
+  accessCodeHash    String
+  credentialVersion Int           @default(1)
+  webAuthnUserHandle Bytes         @unique
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  sessions          AuthSession[]
+}
+
+// tokenHash contains lowercase SHA-256 hex of a random 256-bit session token.
+// This digest is not the hashing algorithm used for the owner's access code.
+model AuthSession {
+  id                   String          @id @default(cuid())
+  ownerId              String
+  owner                OwnerCredential @relation(fields: [ownerId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  tokenHash            String          @unique @db.Char(64)
+  credentialVersion    Int
+  authenticationMethod AuthMethod
+  authenticatedAt      DateTime
+  createdAt            DateTime        @default(now())
+  expiresAt            DateTime
+  revokedAt            DateTime?
+  lastActiveAt         DateTime?
+
+  @@index([ownerId, revokedAt])
+  @@index([expiresAt])
+}
+
+// Each source/global identity has one current window. Database upserts update
+// attempts atomically; expiresAt covers both the window and any cooldown.
+model AuthRateLimit {
+  scope           AuthRateLimitScope
+  keyHash         String             @db.Char(64)
+  attempts        Int                @default(0)
+  windowStartedAt DateTime
+  windowExpiresAt DateTime
+  cooldownUntil   DateTime?
+  expiresAt       DateTime
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  @@id([scope, keyHash])
+  @@index([expiresAt])
+}

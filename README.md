@@ -1,6 +1,6 @@
 # Cr8or Studio
 
-Cr8or Studio is a modern, parallel multi-agent AI software engineering workspace.
+Cr8or Studio is a private, single-owner, parallel multi-agent AI software engineering workspace.
 
 Instead of one assistant, Cr8or Studio runs a team of specialized agents coordinated by a Master Orchestrator. The user submits one request and receives one unified output.
 
@@ -63,6 +63,20 @@ The UI includes:
 - Prisma client helper: `src/lib/db/prisma.ts`
 - Supabase helper: `src/lib/supabase/server.ts`
 
+Database migrations are an explicit release step. Run `npm run db:migrate` with
+the intended database connection in a controlled environment before deploying
+code that requires new tables. Importing the Prisma helper and running the
+application do not execute migrations. `prisma/manual-schema.sql` is an empty
+database bootstrap snapshot, not an incremental migration for an existing
+database.
+
+Task 1A-1 adds the singleton owner, revocable session, and distributed
+authentication-attempt persistence foundation. It does not provision an owner,
+activate authentication, or change the existing routes and authentication flag.
+See [the authentication foundation guide](docs/private-authentication-foundation.md)
+for the schema, session interfaces, release procedure, isolated database tests,
+and remaining activation work.
+
 ## Getting Started
 
 1. Install dependencies:
@@ -90,7 +104,9 @@ npm run dev
 1. Persist orchestration runs and memory in PostgreSQL via Prisma.
 2. Replace simulated executor with real LLM/tool adapters per agent.
 3. Add real-time streaming over Server-Sent Events or WebSockets.
-4. Add authentication and per-user multi-project isolation with Supabase Auth.
+4. Complete private single-owner access-code authentication and protected project
+   access, then add owner-enrolled passkeys. No public registration or multi-user
+   onboarding is planned.
 5. Add Git integration, deployment recipes, and autonomous long-running task mode.
 
 ## Delivery Roadmap
