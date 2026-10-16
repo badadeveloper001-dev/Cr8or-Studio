@@ -77,10 +77,11 @@ See [the authentication foundation guide](docs/private-authentication-foundation
 for the schema, session interfaces, release procedure, isolated database tests,
 and remaining activation work.
 
-Phase 1A-2 adds default-disabled private access-code services and trusted operator
-credential management. It does not activate production authentication or protect
-all workspace routes. See [the access-code services guide](docs/private-access-code-authentication.md)
-for operator procedures, API contracts, rate limits, and the later activation boundary.
+Phase 1A-2 adds private access-code services and trusted operator credential
+management. Phase 1A-3A connects those sessions to the protected API boundary;
+production activation remains disabled. See [the access-code services guide](docs/private-access-code-authentication.md)
+for operator procedures and [the authorization guide](docs/private-api-authorization.md)
+for API coverage and the later activation boundary.
 
 ## Getting Started
 
@@ -116,5 +117,7 @@ npm run dev
 
 ## Delivery Roadmap
 
+- Private backend authorization and API route matrix: [Phase 1A-3A](docs/private-api-authorization.md).
+  Production authentication remains inactive pending the reviewed final cutover.
 - Milestone program: docs/workspace-milestones.md
 - Execution tracker: docs/milestone-tracker.md

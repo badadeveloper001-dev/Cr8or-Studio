@@ -1,9 +1,13 @@
+import { withPrivateApiAuth } from "@/lib/security/private-api";
 import { NextRequest } from "next/server";
 import { z } from "zod";
 import { orchestrate, OrchestrationProgressEvent } from "@/lib/agents/orchestrator";
 import { withRouteMetrics } from "@/lib/observability/sli";
 import { authorizeRoute } from "@/lib/security/authorization";
 import { redactText } from "@/lib/security/redaction";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export const maxDuration = 300;
 
@@ -23,7 +27,7 @@ function encodeEvent(event: OrchestrationProgressEvent): string {
   return `data: ${JSON.stringify(event)}\n\n`;
 }
 
-export async function POST(request: NextRequest) {
+async function POSTHandler(request: NextRequest) {
   return withRouteMetrics("api/orchestrate/stream", async (request: NextRequest) => {
   const auth = await authorizeRoute(request, { route: "api/orchestrate/stream", minRole: "viewer" });
   if (!auth.ok) {
@@ -72,3 +76,13 @@ export async function POST(request: NextRequest) {
   });
   })(request);
 }
+
+export const POST = withPrivateApiAuth(
+  { route: "api/orchestrate/stream:post", minRole: "viewer", privateExecutionBlocked: true },
+  POSTHandler,
+);
+
+export const OPTIONS = withPrivateApiAuth(
+  { route: "api/orchestrate/stream:options", minRole: "viewer" },
+  async () => new Response(null, { status: 204, headers: { Allow: "OPTIONS, POST" } }),
+);

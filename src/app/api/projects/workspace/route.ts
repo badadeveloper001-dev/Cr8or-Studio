@@ -1,3 +1,4 @@
+import { withPrivateApiAuth } from "@/lib/security/private-api";
 import { promises as fs } from "node:fs";
 
 import { NextRequest, NextResponse } from "next/server";
@@ -22,6 +23,9 @@ import { PROJECTS_ROOT } from "@/lib/workspace/shell";
 
 import { cloudModeEnabled } from "@/lib/workspace/cloud-projects";
 import { createCloudProject, listCloudProjects, openCloudProject } from "@/lib/workspace/cloud-service";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 const bodySchema = z.discriminatedUnion("action", [
@@ -121,7 +125,7 @@ function policyDeniedResponse(
   );
 }
 
-export async function POST(request: NextRequest) {
+async function POSTHandler(request: NextRequest) {
   return withRouteMetrics("api/projects/workspace", async (request: NextRequest, { requestId }) => {
   try {
     const raw = await request.json();
@@ -354,3 +358,13 @@ export async function POST(request: NextRequest) {
   }
   })(request);
 }
+
+export const POST = withPrivateApiAuth(
+  { route: "api/projects/workspace:post", minRole: "viewer" },
+  POSTHandler,
+);
+
+export const OPTIONS = withPrivateApiAuth(
+  { route: "api/projects/workspace:options", minRole: "viewer" },
+  async () => new Response(null, { status: 204, headers: { Allow: "OPTIONS, POST" } }),
+);

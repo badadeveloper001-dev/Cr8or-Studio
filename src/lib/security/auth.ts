@@ -1,9 +1,18 @@
+import "server-only";
+
 import { randomUUID } from "node:crypto";
 
 import { NextRequest } from "next/server";
 
 import { getSupabaseClient } from "@/lib/supabase/server";
 import { appendAuditEvent } from "@/lib/security/audit";
+import { getPrivateAuthMode } from "@/lib/security/private-auth-mode";
+import { readPrivateAuthConfig, readSessionToken } from "@/lib/security/private-auth-http";
+import { resolveOwnerSession } from "@/lib/security/session-store";
+
+// A fresh context carries provenance from this resolver, never client-supplied
+// roles or IDs. The marker is not serialized, and stores no authorization cache.
+const VERIFIED_PRIVATE_OWNER = Symbol("verified-private-owner");
 
 export type WorkspaceRole = "owner" | "maintainer" | "viewer";
 
@@ -11,8 +20,9 @@ export type AuthSession = {
   userId: string;
   email?: string;
   role: WorkspaceRole;
-  provider: "supabase" | "dev-token" | "disabled";
+  provider: "supabase" | "dev-token" | "disabled" | "private-session";
   authenticated: boolean;
+  readonly [VERIFIED_PRIVATE_OWNER]?: true;
 };
 
 const ROLE_PRECEDENCE: Record<WorkspaceRole, number> = {
@@ -55,6 +65,25 @@ function getBearerToken(request: NextRequest): string | null {
 }
 
 export async function resolveAuthSession(request: NextRequest, authEnabled: boolean): Promise<AuthSession | null> {
+  // Private configuration always takes precedence over legacy feature flags and
+  // tokens. Configuration/database errors propagate; they must never fall back.
+  if (getPrivateAuthMode() === "required") {
+    const config = readPrivateAuthConfig();
+    const token = readSessionToken(request, config);
+    if (!token) return null;
+    const ownerSession = await resolveOwnerSession(token);
+    if (!ownerSession || ownerSession.ownerId !== "owner") return null;
+
+    const session: AuthSession = {
+      userId: "owner",
+      role: "owner",
+      provider: "private-session",
+      authenticated: true,
+    };
+    Object.defineProperty(session, VERIFIED_PRIVATE_OWNER, { value: true });
+    return Object.freeze(session);
+  }
+
   if (!authEnabled) {
     return {
       userId: "local-dev",
@@ -100,7 +129,16 @@ export async function resolveAuthSession(request: NextRequest, authEnabled: bool
 }
 
 export function hasMinRole(session: AuthSession, minRole: WorkspaceRole): boolean {
+  if (getPrivateAuthMode() === "required" || session.provider === "private-session") {
+    return isVerifiedPrivateOwnerSession(session) && ROLE_PRECEDENCE.owner >= ROLE_PRECEDENCE[minRole];
+  }
   return ROLE_PRECEDENCE[session.role] >= ROLE_PRECEDENCE[minRole];
+}
+
+/** Only contexts returned after this request's PostgreSQL validation qualify. */
+export function isVerifiedPrivateOwnerSession(session: AuthSession): boolean {
+  return session[VERIFIED_PRIVATE_OWNER] === true && session.provider === "private-session" &&
+    session.authenticated === true && session.userId === "owner" && session.role === "owner";
 }
 
 export function recordAccessDenied(input: {

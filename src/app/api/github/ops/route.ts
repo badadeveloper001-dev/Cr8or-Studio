@@ -1,3 +1,4 @@
+import { withPrivateApiAuth } from "@/lib/security/private-api";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -7,6 +8,9 @@ import { authorizeRoute } from "@/lib/security/authorization";
 import { evaluatePolicyGuard } from "@/lib/security/policy";
 import { runSandboxedCommand, SandboxViolationError } from "@/lib/security/sandbox";
 import { resolveWorkspacePath, sanitizeWorkspacePath, WORKSPACE_ROOT } from "@/lib/workspace/shell";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 const bodySchema = z.object({
   action: z.enum(["status", "commit-push", "diff", "stage", "unstage"]),
@@ -105,7 +109,7 @@ async function collectCommitPushReceipt(
   };
 }
 
-export async function POST(request: NextRequest) {
+async function POSTHandler(request: NextRequest) {
   return withRouteMetrics("api/github/ops", async (request: NextRequest, { requestId }) => {
   try {
     const raw = await request.json();
@@ -455,3 +459,13 @@ export async function POST(request: NextRequest) {
   }
   })(request);
 }
+
+export const POST = withPrivateApiAuth(
+  { route: "api/github/ops:post", minRole: "viewer" },
+  POSTHandler,
+);
+
+export const OPTIONS = withPrivateApiAuth(
+  { route: "api/github/ops:options", minRole: "viewer" },
+  async () => new Response(null, { status: 204, headers: { Allow: "OPTIONS, POST" } }),
+);

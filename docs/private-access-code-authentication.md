@@ -4,7 +4,9 @@ This stage implements operator credential management and private authentication
 services on the approved Phase 1A-1 tables and session store. It does **not**
 protect all workspace APIs, add a lock screen, activate production authentication,
 or implement passkeys. Backend authorization belongs to Phase 1A-3; the reviewed
-production cutover is deferred to Phase 1A-5.
+production cutover is deferred to Phase 1A-5. The subsequent
+[Phase 1A-3A authorization guide](private-api-authorization.md) describes the
+current central API boundary and temporarily blocked AI execution paths.
 
 ## Staging and configuration
 
@@ -18,20 +20,25 @@ authorization cache, and a missing or malformed value cannot produce a session.
 | `CR8OR_PRIVATE_AUTH_ORIGIN` | One exact canonical HTTPS origin, without a trailing slash, path, query, credentials, or fragment. No origin is inferred from request Host/forwarding headers. |
 | `CR8OR_PRIVATE_AUTH_RATE_LIMIT_KEY` | A canonical base64url encoding of 32 cryptographically random bytes, supplied through trusted secret configuration. Use the same stable key across instances sharing the owner database. |
 
+In Phase 1A-3A the same configuration also controls protected API enforcement.
+Only entirely absent private configuration, or a lone explicit enabled value of
+`false`, preserves inactive staging behavior. Any partial configuration, including
+an origin/key with a missing or false enabled value, fails closed for protected
+APIs. There is no separate endpoint-only activation switch.
+
 Local HTTP is accepted only for `localhost`, `127.0.0.1`, or `[::1]` with
 `NODE_ENV=development` or `test` and no Vercel deployment indicators. Production
 and Vercel preview deployments require HTTPS and secure cookies. Do not use a
 `NEXT_PUBLIC_` variable for any private-authentication configuration or secret.
 
-The existing `CR8OR_FEATURE_AUTH_GUARD` is a separate, default-disabled legacy
-bearer-token/Supabase guard. Its disabled path creates a synthetic legacy owner
-for existing workspace features. The new services never use that identity,
-Supabase, developer tokens, or role lists to authenticate. The existing middleware
-does not understand private session cookies and can block unlock when its legacy
-guard is enabled. This task leaves that guard and workspace authorization
-unchanged; do not enable it as a private-authentication cutover. Later work must
-replace the boundary coherently rather than treating either switch as securing
-the application today.
+The existing `CR8OR_FEATURE_AUTH_GUARD` remains a default-disabled legacy
+bearer-token/Supabase guard only during inactive staging. Its disabled path creates
+a synthetic legacy owner for existing workspace features. Private mode always
+takes precedence: central authorization and Node.js middleware validate the
+private cookie against PostgreSQL, regardless of the legacy flag. Neither
+synthetic identities, Supabase/developer tokens, nor client role claims qualify.
+Only the exact public authentication route/methods can reach their handlers
+without an existing session. Production activation remains deferred.
 
 Repository inspection found no frontend consumers of `/api/auth/session`.
 Its former `authEnabled`/full legacy `session` response is replaced by the minimal
@@ -224,7 +231,7 @@ The existing cleanup exports remain available for a future trusted maintenance j
 ## Validation and remaining boundaries
 
 Run `npm run test:unit` and `npm run test:auth-db`. The database command includes
-both foundation tests and the new authentication-service tests. It requires an
+foundation, authentication-service, and API-authorization tests in sequence. It requires an
 explicit `CR8OR_AUTH_TEST_DATABASE_URL` pointing only to disposable local
 PostgreSQL on port 55432/database `cr8or_auth_test`; it never falls back to the
 application connection. Each suite creates/removes its own schema and uses public
@@ -240,11 +247,12 @@ only when Next.js rejects the import at the `server-only` boundary; unrelated
 build failures and timeouts fail the check. No credential or database operation is
 invoked, and the temporary applications are removed afterward.
 
-Production activation remains pending: protect backend routes and agent project
-authorization, add frontend locking, verify origin/cookie behavior and recovery,
+Production activation remains pending: complete agent project authorization,
+add frontend locking, verify origin/cookie behavior and recovery,
 review rate limits and source trust on the deployment, schedule cleanup, verify
 database role restrictions, and protect all deployment URLs before the Phase 1A-5
-cutover. Session cookies alone do not authorize current workspace routes.
+cutover. Protected handlers now validate cookies against PostgreSQL in private
+mode; AI entrypoints remain unavailable there pending Phase 1A-3B.
 
 The [Phase 1A-1 dependency findings](reviews/phase-1a-1-dependency-review.md)
 remain separate and unresolved; no unrelated updates or removed audit gates are

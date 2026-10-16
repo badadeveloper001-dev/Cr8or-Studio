@@ -1,3 +1,4 @@
+import { withPrivateApiAuth } from "@/lib/security/private-api";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { authorizedRuntime } from "@/lib/workspace/authorized-runtime";
@@ -5,7 +6,10 @@ import { evaluatePolicyGuard } from "@/lib/security/policy";
 import { errorResponse } from "@/lib/http/api-response";
 import { redactText } from "@/lib/security/redaction";
 
-export async function GET(request: NextRequest) {
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+async function GETHandler(request: NextRequest) {
   try {
     const projectId = request.nextUrl.searchParams.get("projectId") || "cr8or-studio";
     const access = await authorizedRuntime(request, projectId);
@@ -18,7 +22,7 @@ export async function GET(request: NextRequest) {
   }
 }
 const writeSchema = z.object({ projectId: z.string().default("cr8or-studio"), path: z.string().min(1), content: z.string(), dryRun: z.boolean().optional(), approvalId: z.string().uuid().optional() });
-export async function POST(request: NextRequest) {
+async function POSTHandler(request: NextRequest) {
   try {
     const payload = writeSchema.parse(await request.json());
     const access = await authorizedRuntime(request, payload.projectId, true);
@@ -33,3 +37,18 @@ export async function POST(request: NextRequest) {
     return errorResponse({ status: 400, code: "INVALID_REQUEST", message: redactText(error instanceof Error ? error.message : "Unable to save file.") });
   }
 }
+
+export const GET = withPrivateApiAuth(
+  { route: "api/files:get", minRole: "viewer" },
+  GETHandler,
+);
+
+export const POST = withPrivateApiAuth(
+  { route: "api/files:post", minRole: "viewer" },
+  POSTHandler,
+);
+
+export const OPTIONS = withPrivateApiAuth(
+  { route: "api/files:options", minRole: "viewer" },
+  async () => new Response(null, { status: 204, headers: { Allow: "GET, HEAD, OPTIONS, POST" } }),
+);

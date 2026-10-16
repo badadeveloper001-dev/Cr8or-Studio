@@ -1,3 +1,4 @@
+import { withPrivateApiAuth } from "@/lib/security/private-api";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -6,6 +7,9 @@ import { withRouteMetrics } from "@/lib/observability/sli";
 import { authorizeRoute } from "@/lib/security/authorization";
 import { CLOUD_REPOSITORY_ROOT, shellQuote } from "@/lib/workspace/cloud-path";
 import { findCloudProject } from "@/lib/workspace/cloud-projects";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export const maxDuration = 300;
 
@@ -120,7 +124,7 @@ async function stopPreviewProcesses(sandbox: Awaited<ReturnType<typeof resolveDa
   }
 }
 
-export async function POST(
+async function POSTHandler(
   request: NextRequest,
   { params }: { params: Promise<{ projectId: string }> },
 ) {
@@ -235,3 +239,13 @@ export async function POST(
     }
   })(request);
 }
+
+export const POST = withPrivateApiAuth(
+  { route: "api/workspaces/[projectId]/preview:post", minRole: "viewer" },
+  POSTHandler,
+);
+
+export const OPTIONS = withPrivateApiAuth(
+  { route: "api/workspaces/[projectId]/preview:options", minRole: "viewer" },
+  async () => new Response(null, { status: 204, headers: { Allow: "OPTIONS, POST" } }),
+);

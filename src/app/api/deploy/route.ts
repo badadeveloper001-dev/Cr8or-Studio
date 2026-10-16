@@ -1,3 +1,4 @@
+import { withPrivateApiAuth } from "@/lib/security/private-api";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -8,6 +9,9 @@ import { evaluatePolicyGuard } from "@/lib/security/policy";
 import { runSandboxedCommand, SandboxViolationError } from "@/lib/security/sandbox";
 import { getSecret } from "@/lib/security/secrets";
 import { resolveWorkspacePath, sanitizeWorkspacePath, WORKSPACE_ROOT } from "@/lib/workspace/shell";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 const bodySchema = z.object({
   projectPath: z.string().default("."),
@@ -49,7 +53,7 @@ function extractVercelUrls(output: string): {
   };
 }
 
-export async function POST(request: NextRequest) {
+async function POSTHandler(request: NextRequest) {
   return withRouteMetrics("api/deploy", async (request: NextRequest, { requestId }) => {
   const auth = await authorizeRoute(request, {
     route: "api/deploy",
@@ -200,3 +204,13 @@ export async function POST(request: NextRequest) {
   }
   })(request);
 }
+
+export const POST = withPrivateApiAuth(
+  { route: "api/deploy:post", minRole: "viewer" },
+  POSTHandler,
+);
+
+export const OPTIONS = withPrivateApiAuth(
+  { route: "api/deploy:options", minRole: "viewer" },
+  async () => new Response(null, { status: 204, headers: { Allow: "OPTIONS, POST" } }),
+);

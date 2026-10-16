@@ -1,3 +1,4 @@
+import { withPrivateApiAuth } from "@/lib/security/private-api";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -13,6 +14,9 @@ import { classifyIntent } from "@/lib/intent";
 import { getWorkspaceConfig, getWorkspaceRuntime } from "@/lib/workspace/runtime-factory";
 import { detectWorkspaceRequest } from "@/lib/workspace/workspace-request-detector";
 import { performReadOnlyTaskLoop, performLocalReadinessCheck } from "@/lib/workspace/workspace-inspection";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 const chatBodySchema = z.object({
   message: z.string(),
@@ -332,7 +336,7 @@ async function handleDirectWorkspaceRequest(
   return null;
 }
 
-export async function POST(request: NextRequest) {
+async function POSTHandler(request: NextRequest) {
   return withRouteMetrics("api/chat/main", async (request: NextRequest, { requestId }) => {
   const auth = await authorizeRoute(request, { route: "api/chat/main", minRole: "viewer", requestId });
   if (!auth.ok) {
@@ -448,3 +452,13 @@ export async function POST(request: NextRequest) {
   }
   })(request);
 }
+
+export const POST = withPrivateApiAuth(
+  { route: "api/chat/main:post", minRole: "viewer", privateExecutionBlocked: true },
+  POSTHandler,
+);
+
+export const OPTIONS = withPrivateApiAuth(
+  { route: "api/chat/main:options", minRole: "viewer" },
+  async () => new Response(null, { status: 204, headers: { Allow: "OPTIONS, POST" } }),
+);

@@ -1,3 +1,5 @@
+import { getPrivateAuthMode } from "@/lib/security/private-auth-mode";
+
 export type FeatureFlagName =
   | "authGuard"
   | "policyEngine"
@@ -14,7 +16,7 @@ type FeatureFlagDefinition = {
 const FEATURE_FLAG_DEFINITIONS: Record<FeatureFlagName, FeatureFlagDefinition> = {
   authGuard: {
     envKey: "CR8OR_FEATURE_AUTH_GUARD",
-    description: "Enable auth/session gate checks in protected routes.",
+    description: "Legacy staged authentication guard. Private owner authentication always takes precedence.",
     defaultValue: false,
   },
   policyEngine: {
@@ -51,6 +53,7 @@ function parseBoolean(rawValue: string | undefined, fallback: boolean): boolean 
 }
 
 export function isFeatureEnabled(name: FeatureFlagName): boolean {
+  if (name === "authGuard" && getPrivateAuthMode() === "required") return true;
   const definition = FEATURE_FLAG_DEFINITIONS[name];
   return parseBoolean(process.env[definition.envKey], definition.defaultValue);
 }

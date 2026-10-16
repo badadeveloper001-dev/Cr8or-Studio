@@ -1,3 +1,4 @@
+import { withPrivateApiAuth } from "@/lib/security/private-api";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -5,6 +6,9 @@ import { orchestrate } from "@/lib/agents/orchestrator";
 import { errorResponse, internalErrorResponse } from "@/lib/http/api-response";
 import { withRouteMetrics } from "@/lib/observability/sli";
 import { authorizeRoute } from "@/lib/security/authorization";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 const bodySchema = z.object({
   prompt: z.string().min(5),
@@ -18,7 +22,7 @@ const bodySchema = z.object({
     .optional(),
 });
 
-export async function POST(request: NextRequest) {
+async function POSTHandler(request: NextRequest) {
   return withRouteMetrics("api/orchestrate", async (request: NextRequest, { requestId }) => {
   const auth = await authorizeRoute(request, { route: "api/orchestrate", minRole: "viewer", requestId });
   if (!auth.ok) {
@@ -45,3 +49,13 @@ export async function POST(request: NextRequest) {
   }
   })(request);
 }
+
+export const POST = withPrivateApiAuth(
+  { route: "api/orchestrate:post", minRole: "viewer", privateExecutionBlocked: true },
+  POSTHandler,
+);
+
+export const OPTIONS = withPrivateApiAuth(
+  { route: "api/orchestrate:options", minRole: "viewer" },
+  async () => new Response(null, { status: 204, headers: { Allow: "OPTIONS, POST" } }),
+);
