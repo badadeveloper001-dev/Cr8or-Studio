@@ -26,15 +26,16 @@ function limitExceeded(): ExecutionAuthorizationError {
 
 /**
  * The one-shot SDK API has no stdin. Base64 in argv is not confidential and
- * exceeds OS argument limits for ordinary source files. Session input needs a
- * separately reviewed protocol; pathname uploads cannot replace no-follow I/O.
+ * exceeds OS argument limits for ordinary source files. The separate staged
+ * writer lives in private-cloud-write-session; this read/list transport must
+ * never become a write fallback. Pathname uploads cannot replace no-follow I/O.
  * Reject before encoding, provider access, or any change to an existing file.
  */
 export function rejectPrivateCloudWrite(content: string | undefined): never {
   if (typeof content !== "string") throw unavailable();
   if (content.length > PRIVATE_CLOUD_FILE_LIMITS.writeBytes ||
       Buffer.byteLength(content, "utf8") > PRIVATE_CLOUD_FILE_LIMITS.writeBytes) throw limitExceeded();
-  throw new ExecutionAuthorizationError(503, "Private cloud writes are unavailable pending a secure content transport.");
+  throw new ExecutionAuthorizationError(503, "Private cloud writes require the verified session transport.");
 }
 
 /** Fixed read-only program: arguments contain only bounded operation/path metadata. */
