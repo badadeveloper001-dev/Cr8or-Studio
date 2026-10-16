@@ -138,9 +138,9 @@ export const toolMetadata: Record<ToolName, ToolMetadata> = {
   run_command: {
     name: "run_command",
     description: "Run a validated command from the server-owned catalog",
-    risk: ToolRiskLevel.medium,
-    mutating: false,
-    policyAction: "files.write",
+    risk: ToolRiskLevel.high,
+    mutating: true,
+    policyAction: "commands.execute",
     requiresWorkspace: true,
   },
 };

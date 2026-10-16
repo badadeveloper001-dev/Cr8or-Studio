@@ -2,8 +2,9 @@ import "server-only";
 
 import { randomUUID } from "node:crypto";
 
-import { evaluatePolicyGuard, RiskAction } from "@/lib/security/policy";
-import { SandboxCommandRule } from "@/lib/security/sandbox";
+import { evaluatePolicyGuard } from "@/lib/security/policy";
+import { COMMAND_CATALOGUE, DEVELOPMENT_COMMAND_TIMEOUT_MS, findDevelopmentCommand } from "@/lib/security/command-catalogue";
+import { authorizeDevelopmentCommand, type CommandAuthorization } from "@/lib/security/command-authorization";
 import { appendAuditEvent } from "@/lib/security/audit";
 import { ToolName, ToolContext, ToolResult, ToolMetadata, toolMetadata, toolParameterSchemas, getToolPresetForActor } from "@/lib/agents/tools";
 import { ExecutionAuthorizationError, revalidateExecutionAuthorization } from "@/lib/security/execution-context";
@@ -74,50 +75,6 @@ async function checkPolicyIfNeeded(
     requiresApproval: policy.approvalRequired,
     approvalConsumed: policy.approvalConsumed,
   };
-}
-
-type CommandCatalogEntry = {
-  rules: SandboxCommandRule[];
-  policyAction?: RiskAction;
-  workspaceChanged: boolean;
-  description: string;
-};
-
-const COMMAND_CATALOG: Record<string, CommandCatalogEntry> = {
-  "npm run typecheck": {
-    rules: [{ kind: "exact", value: "npm run typecheck" }],
-    workspaceChanged: false,
-    description: "Run TypeScript type checking",
-  },
-  "npm run lint": {
-    rules: [{ kind: "exact", value: "npm run lint" }],
-    workspaceChanged: false,
-    description: "Run ESLint",
-  },
-  "npm test": {
-    rules: [{ kind: "exact", value: "npm test" }],
-    workspaceChanged: false,
-    description: "Run all tests",
-  },
-  "npm run test:unit": {
-    rules: [{ kind: "exact", value: "npm run test:unit" }],
-    workspaceChanged: false,
-    description: "Run unit tests",
-  },
-  "npm run test:integration": {
-    rules: [{ kind: "exact", value: "npm run test:integration" }],
-    workspaceChanged: false,
-    description: "Run integration tests",
-  },
-};
-
-function findCommandCatalogEntry(command: string): { key: string; entry: CommandCatalogEntry } | null {
-  for (const [key, entry] of Object.entries(COMMAND_CATALOG)) {
-    if (command === key) {
-      return { key, entry };
-    }
-  }
-  return null;
 }
 
 async function executeReadFile(params: { path: string }, context: ToolContext): Promise<ToolResult<{ content: string }>> {
@@ -277,23 +234,26 @@ async function executeGitDiff(params: { path?: string; staged?: boolean }, conte
 
 async function executeRunCommand(params: { command: string }, context: ToolContext): Promise<ToolResult<{ stdout: string; stderr: string; exitCode: number }>> {
   const startedAt = new Date().toISOString();
-  const catalogEntry = findCommandCatalogEntry(params.command);
+  const entry = findDevelopmentCommand(params.command);
 
-  if (!catalogEntry) {
-    await auditToolInvocation("run_command", context, "deny", "Command not in allowed catalog", { command: params.command });
+  if (!entry) {
+    await auditToolInvocation("run_command", context, "deny", "Command not in allowed catalog");
     return {
       ok: false,
       tool: "run_command",
-      error: `Command not permitted. Allowed: ${Object.keys(COMMAND_CATALOG).join(", ")}`,
+      error: `Command not permitted. Allowed: ${Object.keys(COMMAND_CATALOGUE).join(", ")}`,
       workspaceChanged: false,
       startedAt,
       finishedAt: new Date().toISOString(),
     };
   }
 
-  const { key, entry } = catalogEntry;
+  const { key } = entry;
 
-  const policy = await checkPolicyIfNeeded(toolMetadata.run_command, context);
+  let commandAuthorization: CommandAuthorization | undefined;
+  const policy = context.authorization
+    ? await authorizeDevelopmentCommand(context, key)
+    : await checkPolicyIfNeeded(toolMetadata.run_command, context);
   if (!policy.allowed) {
     await auditToolInvocation("run_command", context, "deny", policy.reason!, { command: key, requiresApproval: policy.requiresApproval });
     return {
@@ -306,19 +266,21 @@ async function executeRunCommand(params: { command: string }, context: ToolConte
       finishedAt: new Date().toISOString(),
     };
   }
+  if ("authorization" in policy) commandAuthorization = policy.authorization;
 
   try {
     const validatedRequest = {
       command: key,
       commandKey: key,
       rules: entry.rules,
-      timeoutMs: 120000,
+      timeoutMs: DEVELOPMENT_COMMAND_TIMEOUT_MS,
+      ...(commandAuthorization ? { commandAuthorization } : {}),
     } as const;
 
     const runtime = await getRuntime(context);
     const result = await runtime.runCommand(validatedRequest);
     const exitCode = result.exitCode;
-    await auditToolInvocation("run_command", context, "allow", "command executed", {
+    await auditToolInvocation("run_command", context, exitCode === 0 ? "allow" : "error", "command completed", {
       command: key,
       exitCode,
       stdoutBytes: result.stdout.length,
@@ -326,8 +288,9 @@ async function executeRunCommand(params: { command: string }, context: ToolConte
     });
 
     return {
-      ok: true,
+      ok: exitCode === 0,
       tool: "run_command",
+      ...(exitCode !== 0 ? { error: `Command exited with status ${exitCode}.` } : {}),
       data: {
         stdout: result.stdout,
         stderr: result.stderr,
@@ -339,7 +302,7 @@ async function executeRunCommand(params: { command: string }, context: ToolConte
     };
   } catch (err) {
     if (err instanceof ExecutionAuthorizationError) throw err;
-    const message = err instanceof Error ? err.message : "Command execution failed";
+    const message = "Command execution failed.";
     await auditToolInvocation("run_command", context, "error", message, { command: key });
     return {
       ok: false,
@@ -396,12 +359,12 @@ export async function executeTool(
 }
 
 export function getAvailableCommands(): Array<{ command: string; description: string }> {
-  return Object.entries(COMMAND_CATALOG).map(([command, entry]) => ({
+  return Object.entries(COMMAND_CATALOGUE).map(([command, entry]) => ({
     command,
     description: entry.description,
   }));
 }
 
-export function getCommandCatalog(): typeof COMMAND_CATALOG {
-  return COMMAND_CATALOG;
+export function getCommandCatalog(): typeof COMMAND_CATALOGUE {
+  return COMMAND_CATALOGUE;
 }

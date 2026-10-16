@@ -2,6 +2,7 @@ import "server-only";
 
 import { constants, promises as fs } from "node:fs";
 import path from "node:path";
+import { validateCommandRequest } from "@/lib/security/command-catalogue";
 
 import { sanitizeWorkspacePath, resolveProjectPath, getActiveProjectRoot } from "@/lib/workspace/shell";
 import { runSandboxedCommand } from "@/lib/security/sandbox";
@@ -271,6 +272,7 @@ export class LocalWorkspaceRuntime implements WorkspaceRuntime {
 
   async runCommand(request: ValidatedCommandRequest): Promise<CommandResult> {
     await this.rejectUnsafeHostCommand();
+    validateCommandRequest(request);
     const { command, rules, timeoutMs } = request;
     const resolvedCommand = resolveCommandForPlatform(command);
     

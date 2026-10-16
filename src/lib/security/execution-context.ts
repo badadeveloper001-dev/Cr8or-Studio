@@ -1,5 +1,7 @@
 import "server-only";
 
+import { randomUUID } from "node:crypto";
+
 import { prisma } from "@/lib/db/prisma";
 import { revalidatePrivateOwnerSession, type AuthSession } from "@/lib/security/auth";
 import { getPrivateAuthMode } from "@/lib/security/private-auth-mode";
@@ -21,6 +23,8 @@ export type ExecutionWorkspace = Readonly<{
 /** Private fields retain provenance, not an authorization cache. */
 class ExecutionCapability {
   readonly ownerId = "owner" as const;
+  /** Correlation only; never session identity or proof of authorization. */
+  readonly executionId = randomUUID();
   readonly projectId: string;
   readonly workspace: ExecutionWorkspace;
   readonly permissions: readonly ExecutionOperation[];

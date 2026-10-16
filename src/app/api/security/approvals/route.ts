@@ -12,7 +12,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const requestSchema = z.object({
-  action: z.enum(["files.write", "git.commit-push", "github.write", "deploy.vercel", "project.create", "project.clone"]),
+  action: z.enum(["files.write", "commands.execute", "git.commit-push", "github.write", "deploy.vercel", "project.create", "project.clone"]),
   title: z.string().min(3).max(180),
   preview: z.string().min(3).max(6000),
 });
