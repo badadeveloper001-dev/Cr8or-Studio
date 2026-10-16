@@ -1,4 +1,7 @@
-import { AuthSession } from "@/lib/security/auth";
+import "server-only";
+
+import { AuthSession, isVerifiedPrivateOwnerSession } from "@/lib/security/auth";
+import { getPrivateAuthMode } from "@/lib/security/private-auth-mode";
 
 type WorkspaceOwnerMap = Record<string, string[]>;
 
@@ -31,6 +34,12 @@ export function getWorkspaceOwnerMap(): WorkspaceOwnerMap {
 }
 
 export function isWorkspaceOwner(session: AuthSession, workspaceId: string): boolean {
+  // This workspace has one owner. Keep all existing workspace IDs and legacy
+  // mappings, but only a server-validated owner may use them in private mode.
+  if (getPrivateAuthMode() === "required" || session.provider === "private-session") {
+    return isVerifiedPrivateOwnerSession(session);
+  }
+
   if (session.role === "owner") {
     return true;
   }

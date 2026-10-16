@@ -1,3 +1,4 @@
+import { withPrivateApiAuth } from "@/lib/security/private-api";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -6,12 +7,15 @@ import { withRouteMetrics } from "@/lib/observability/sli";
 import { authorizeRoute } from "@/lib/security/authorization";
 import { cancelSandboxOperation, getSandboxRuntimeSnapshot } from "@/lib/security/sandbox";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 const bodySchema = z.object({
   intent: z.literal("cancel"),
   operationId: z.string().uuid(),
 });
 
-export async function GET(request: NextRequest) {
+async function GETHandler(request: NextRequest) {
   return withRouteMetrics("api/security/sandbox:get", async (request: NextRequest, { requestId }) => {
     const auth = await authorizeRoute(request, {
       route: "api/security/sandbox:get",
@@ -31,7 +35,7 @@ export async function GET(request: NextRequest) {
   })(request);
 }
 
-export async function POST(request: NextRequest) {
+async function POSTHandler(request: NextRequest) {
   return withRouteMetrics("api/security/sandbox:post", async (request: NextRequest, { requestId }) => {
     const auth = await authorizeRoute(request, {
       route: "api/security/sandbox:post",
@@ -68,3 +72,18 @@ export async function POST(request: NextRequest) {
     }
   })(request);
 }
+
+export const GET = withPrivateApiAuth(
+  { route: "api/security/sandbox:get", minRole: "viewer" },
+  GETHandler,
+);
+
+export const POST = withPrivateApiAuth(
+  { route: "api/security/sandbox:post", minRole: "viewer" },
+  POSTHandler,
+);
+
+export const OPTIONS = withPrivateApiAuth(
+  { route: "api/security/sandbox:options", minRole: "viewer" },
+  async () => new Response(null, { status: 204, headers: { Allow: "GET, HEAD, OPTIONS, POST" } }),
+);

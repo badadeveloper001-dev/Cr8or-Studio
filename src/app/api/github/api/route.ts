@@ -1,3 +1,4 @@
+import { withPrivateApiAuth } from "@/lib/security/private-api";
 import { Buffer } from "node:buffer";
 
 import { NextRequest, NextResponse } from "next/server";
@@ -8,6 +9,9 @@ import { isTransientHttpStatus, withRetry } from "@/lib/reliability/retry";
 import { authorizeRoute } from "@/lib/security/authorization";
 import { evaluatePolicyGuard } from "@/lib/security/policy";
 import { getSecretWithFallback } from "@/lib/security/secrets";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 const bodySchema = z.object({
   action: z.enum([
@@ -82,7 +86,7 @@ function requireRepo(payload: z.infer<typeof bodySchema>) {
   }
 }
 
-export async function POST(request: NextRequest) {
+async function POSTHandler(request: NextRequest) {
   return withRouteMetrics("api/github/api", async (request: NextRequest, { requestId }) => {
   try {
     const token = getSecretWithFallback(["GITHUB_TOKEN", "GH_TOKEN"], requestId).value;
@@ -431,3 +435,13 @@ export async function POST(request: NextRequest) {
   }
   })(request);
 }
+
+export const POST = withPrivateApiAuth(
+  { route: "api/github/api:post", minRole: "viewer" },
+  POSTHandler,
+);
+
+export const OPTIONS = withPrivateApiAuth(
+  { route: "api/github/api:options", minRole: "viewer" },
+  async () => new Response(null, { status: 204, headers: { Allow: "OPTIONS, POST" } }),
+);

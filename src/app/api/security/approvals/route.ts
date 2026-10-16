@@ -1,3 +1,4 @@
+import { withPrivateApiAuth } from "@/lib/security/private-api";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -6,6 +7,9 @@ import { withRouteMetrics } from "@/lib/observability/sli";
 import { decideApproval, listApprovals, requestApproval } from "@/lib/security/approvals";
 import { authorizeRoute } from "@/lib/security/authorization";
 import { RiskAction } from "@/lib/security/policy";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 const requestSchema = z.object({
   action: z.enum(["files.write", "git.commit-push", "github.write", "deploy.vercel", "project.create", "project.clone"]),
@@ -24,7 +28,7 @@ const bodySchema = z.discriminatedUnion("intent", [
   z.object({ intent: z.literal("decide"), payload: decideSchema }),
 ]);
 
-export async function GET(request: NextRequest) {
+async function GETHandler(request: NextRequest) {
   return withRouteMetrics("api/security/approvals:get", async (request: NextRequest, { requestId }) => {
     const auth = await authorizeRoute(request, {
       route: "api/security/approvals:get",
@@ -47,7 +51,7 @@ export async function GET(request: NextRequest) {
   })(request);
 }
 
-export async function POST(request: NextRequest) {
+async function POSTHandler(request: NextRequest) {
   return withRouteMetrics("api/security/approvals:post", async (request: NextRequest, { requestId }) => {
     try {
       const raw = await request.json();
@@ -113,3 +117,18 @@ export async function POST(request: NextRequest) {
     }
   })(request);
 }
+
+export const GET = withPrivateApiAuth(
+  { route: "api/security/approvals:get", minRole: "viewer" },
+  GETHandler,
+);
+
+export const POST = withPrivateApiAuth(
+  { route: "api/security/approvals:post", minRole: "viewer" },
+  POSTHandler,
+);
+
+export const OPTIONS = withPrivateApiAuth(
+  { route: "api/security/approvals:options", minRole: "viewer" },
+  async () => new Response(null, { status: 204, headers: { Allow: "GET, HEAD, OPTIONS, POST" } }),
+);
