@@ -298,15 +298,15 @@ describe("private route behavior with verified owner sessions", () => {
     { path: "/api/chat/main", handler: chat.POST },
     { path: "/api/orchestrate", handler: orchestrate.POST },
     { path: "/api/orchestrate/stream", handler: orchestrateStream.POST },
-  ])("blocks incomplete agent execution even for the owner: $path", async ({ path, handler }) => {
+  ])("requires a project before starting authenticated execution: $path", async ({ path, handler }) => {
     const req = request(path, "POST", {
       cookie: COOKIE, origin: ORIGIN, "x-cr8or-auth": "1", "content-type": "application/json",
     }, '{"prompt":"Run agent tools","message":"Run agent tools"}');
     const parse = vi.spyOn(req, "json");
     const response = await handler(req);
-    expect(response.status).toBe(503);
+    expect(response.status).toBe(400);
     expect(response.headers.get("cache-control")).toBe("no-store");
-    expect(parse).not.toHaveBeenCalled();
+    expect(parse).toHaveBeenCalledOnce();
     expectNoSensitiveWork();
   });
 });

@@ -1,13 +1,16 @@
+import "server-only";
+
 import { randomUUID } from "node:crypto";
 
 import { evaluatePolicyGuard, RiskAction } from "@/lib/security/policy";
 import { SandboxCommandRule } from "@/lib/security/sandbox";
 import { appendAuditEvent } from "@/lib/security/audit";
-import { ToolName, ToolContext, ToolResult, ToolMetadata, toolMetadata } from "@/lib/agents/tools";
+import { ToolName, ToolContext, ToolResult, ToolMetadata, toolMetadata, toolParameterSchemas, getToolPresetForActor } from "@/lib/agents/tools";
+import { ExecutionAuthorizationError, revalidateExecutionAuthorization } from "@/lib/security/execution-context";
 import { getWorkspaceRuntime } from "@/lib/workspace/runtime-factory";
 
 async function getRuntime(context: ToolContext) {
-  return getWorkspaceRuntime(context.projectId);
+  return getWorkspaceRuntime(context.projectId, context.authorization);
 }
 
 function createAuditMetadata(tool: ToolName, context: ToolContext, extra: Record<string, unknown> = {}): Record<string, unknown> {
@@ -133,6 +136,7 @@ async function executeReadFile(params: { path: string }, context: ToolContext): 
       finishedAt: new Date().toISOString(),
     };
   } catch (err) {
+    if (err instanceof ExecutionAuthorizationError) throw err;
     const message = err instanceof Error ? err.message : "Failed to read file";
     await auditToolInvocation("read_file", context, "error", message, { path: params.path });
     return {
@@ -162,6 +166,7 @@ async function executeListFiles(params: { path?: string }, context: ToolContext)
       finishedAt: new Date().toISOString(),
     };
   } catch (err) {
+    if (err instanceof ExecutionAuthorizationError) throw err;
     const message = err instanceof Error ? err.message : "Failed to list directory";
     await auditToolInvocation("list_files", context, "error", message, { path: params.path ?? "." });
     return {
@@ -196,6 +201,7 @@ async function executeWriteFile(params: { path: string; content: string }, conte
       finishedAt: new Date().toISOString(),
     };
   } catch (err) {
+    if (err instanceof ExecutionAuthorizationError) throw err;
     const message = err instanceof Error ? err.message : "Failed to write file";
     await auditToolInvocation("write_file", context, "error", message, { path: params.path });
     return {
@@ -225,6 +231,7 @@ async function executeGitStatus(params: Record<string, never>, context: ToolCont
       finishedAt: new Date().toISOString(),
     };
   } catch (err) {
+    if (err instanceof ExecutionAuthorizationError) throw err;
     const message = err instanceof Error ? err.message : "Failed to get git status";
     await auditToolInvocation("git_status", context, "error", message, {});
     return {
@@ -254,6 +261,7 @@ async function executeGitDiff(params: { path?: string; staged?: boolean }, conte
       finishedAt: new Date().toISOString(),
     };
   } catch (err) {
+    if (err instanceof ExecutionAuthorizationError) throw err;
     const message = err instanceof Error ? err.message : "Failed to get git diff";
     await auditToolInvocation("git_diff", context, "error", message, {});
     return {
@@ -269,7 +277,6 @@ async function executeGitDiff(params: { path?: string; staged?: boolean }, conte
 
 async function executeRunCommand(params: { command: string }, context: ToolContext): Promise<ToolResult<{ stdout: string; stderr: string; exitCode: number }>> {
   const startedAt = new Date().toISOString();
-  const runtime = await getRuntime(context);
   const catalogEntry = findCommandCatalogEntry(params.command);
 
   if (!catalogEntry) {
@@ -308,6 +315,7 @@ async function executeRunCommand(params: { command: string }, context: ToolConte
       timeoutMs: 120000,
     } as const;
 
+    const runtime = await getRuntime(context);
     const result = await runtime.runCommand(validatedRequest);
     const exitCode = result.exitCode;
     await auditToolInvocation("run_command", context, "allow", "command executed", {
@@ -330,6 +338,7 @@ async function executeRunCommand(params: { command: string }, context: ToolConte
       finishedAt: new Date().toISOString(),
     };
   } catch (err) {
+    if (err instanceof ExecutionAuthorizationError) throw err;
     const message = err instanceof Error ? err.message : "Command execution failed";
     await auditToolInvocation("run_command", context, "error", message, { command: key });
     return {
@@ -359,6 +368,10 @@ export async function executeTool(
   params: unknown,
   context: ToolContext
 ): Promise<ToolResult<unknown>> {
+  await revalidateExecutionAuthorization(context?.authorization, context?.projectId, toolName === "write_file" ? "write" : toolName === "run_command" ? "command" : "read");
+  if (!getToolPresetForActor(context.actorId).includes(toolName)) {
+    throw new ExecutionAuthorizationError(403, "Tool is not permitted for this agent.");
+  }
   const executor = toolExecutors[toolName];
   if (!executor) {
     const startedAt = new Date().toISOString();
@@ -372,7 +385,14 @@ export async function executeTool(
     };
   }
 
-  return executor(params, context);
+  const parsed = toolParameterSchemas[toolName].safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, tool: toolName, error: "Invalid tool parameters.", workspaceChanged: false, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString() };
+  }
+  const result = await executor(parsed.data, context);
+  // Never deliver a tool result to the model after the initiating session ends.
+  await revalidateExecutionAuthorization(context.authorization, context.projectId, "read");
+  return result;
 }
 
 export function getAvailableCommands(): Array<{ command: string; description: string }> {

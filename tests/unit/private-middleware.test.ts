@@ -152,11 +152,10 @@ describe("private middleware boundary", () => {
   });
 
   it.each(["/api/chat/main", "/api/orchestrate", "/api/orchestrate/stream"])(
-    "blocks deferred execution at %s even for a verified owner", async (path) => {
+    "passes authenticated execution at %s to its project authorization boundary", async (path) => {
       const response = await middleware(request(path, "POST", true));
-      expect(response.status).toBe(503);
       expect(response.headers.get("cache-control")).toBe("no-store");
-      expect(response.headers.has("x-middleware-next")).toBe(false);
+      expect(response.headers.get("x-middleware-next")).toBe("1");
     },
   );
 

@@ -1,4 +1,8 @@
+import "server-only";
+
 import { prisma } from "@/lib/db/prisma";
+import { getPrivateAuthMode } from "@/lib/security/private-auth-mode";
+import { ExecutionAuthorizationError, revalidateExecutionAuthorization, type ExecutionAuthorizationContext } from "@/lib/security/execution-context";
 
 function normalizeProjectId(projectId: string): string {
   if (!projectId || projectId === "cr8or-studio" || projectId === "workspace-root") {
@@ -29,7 +33,38 @@ async function getProjectWorkspaceConfig(projectId: string) {
   };
 }
 
-export async function getWorkspaceRuntime(projectId: string) {
+export async function getWorkspaceRuntime(projectId: string, authorization?: ExecutionAuthorizationContext) {
+  if (authorization || getPrivateAuthMode() === "required") {
+    await revalidateExecutionAuthorization(authorization, projectId, "read");
+    if (!authorization) throw new ExecutionAuthorizationError(401);
+    const workspace = authorization.workspace;
+    if (workspace.runtimeType === "cloud") {
+      if (workspace.provider !== "daytona" || !workspace.providerWorkspaceId) {
+        throw new ExecutionAuthorizationError(503, "The registered workspace is unavailable.");
+      }
+      const apiKey = process.env.DAYTONA_API_KEY;
+      if (!apiKey) throw new ExecutionAuthorizationError(503, "The registered workspace is unavailable.");
+      const { DaytonaProvider } = await import("@/lib/workspace/providers/daytona");
+      const { CloudWorkspaceRuntime } = await import("@/lib/workspace/runtime-cloud");
+      const runtime = new CloudWorkspaceRuntime({
+        id: `cloud-${projectId}`,
+        projectId,
+        provider: new DaytonaProvider({ apiKey, apiUrl: process.env.DAYTONA_API_URL }),
+        providerWorkspaceId: workspace.providerWorkspaceId,
+        repositoryUrl: workspace.repositoryUrl ?? undefined,
+        branch: workspace.branch ?? undefined,
+        createdAt: new Date(),
+        authorization,
+      });
+      await runtime.initialize();
+      return runtime;
+    }
+    if (process.env.VERCEL_ENV || process.env.CR8OR_WORKSPACE_MODE === "cloud") {
+      throw new ExecutionAuthorizationError(503, "The registered workspace is unavailable.");
+    }
+    const { LocalWorkspaceRuntime } = await import("@/lib/workspace/runtime-local");
+    return new LocalWorkspaceRuntime(projectId, authorization);
+  }
   const config = await getProjectWorkspaceConfig(projectId);
 
   if (config.type === "cloud" && config.cloudConfig) {
@@ -66,6 +101,7 @@ export async function setProjectToCloud(
   repositoryUrl?: string,
   branch?: string
 ): Promise<void> {
+  if (getPrivateAuthMode() === "required") throw new ExecutionAuthorizationError(503, "Workspace reassignment is unavailable.");
   await prisma.workspace.upsert({
     where: { projectId: normalizeProjectId(projectId) },
     update: {
@@ -91,6 +127,7 @@ export async function setProjectToCloud(
 }
 
 export async function setProjectToLocal(projectId: string): Promise<void> {
+  if (getPrivateAuthMode() === "required") throw new ExecutionAuthorizationError(503, "Workspace reassignment is unavailable.");
   await prisma.workspace.upsert({
     where: { projectId: normalizeProjectId(projectId) },
     update: {

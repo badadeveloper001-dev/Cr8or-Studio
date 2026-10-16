@@ -17,6 +17,8 @@ import {
   toProjectRef,
 } from "@/lib/projects/workspace";
 import { authorizeRoute } from "@/lib/security/authorization";
+import { getPrivateAuthMode } from "@/lib/security/private-auth-mode";
+import { authError } from "@/lib/security/private-auth-http";
 import { evaluatePolicyGuard } from "@/lib/security/policy";
 import { runSandboxedCommand, SandboxViolationError } from "@/lib/security/sandbox";
 import { PROJECTS_ROOT } from "@/lib/workspace/shell";
@@ -138,6 +140,10 @@ async function POSTHandler(request: NextRequest) {
         ? { repositoryUrl: body.repositoryUrl, approvalId: body.approvalId }
         : { projectName: body.name, approvalId: body.approvalId });
     }
+
+    // The legacy directory browser/clone flow can select unregistered paths.
+    // Registered local file operations use authorizedRuntime through /api/files.
+    if (getPrivateAuthMode() === "required") return authError(503, "Local workspace management is unavailable.");
 
     if (body.action === "recent") {
       const auth = await authorizeRoute(request, {

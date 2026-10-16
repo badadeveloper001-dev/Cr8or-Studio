@@ -4,17 +4,34 @@ import { z } from "zod";
 import { PrismaClientKnownRequestError, PrismaClientInitializationError, PrismaClientUnknownRequestError, PrismaClientRustPanicError } from "@prisma/client/runtime/library";
 import { prisma } from "@/lib/db/prisma";
 import { authorizeRoute } from "@/lib/security/authorization";
+import { revalidatePrivateOwnerSession } from "@/lib/security/auth";
+import { getPrivateAuthMode } from "@/lib/security/private-auth-mode";
+import { authError } from "@/lib/security/private-auth-http";
 import { evaluatePolicyGuard } from "@/lib/security/policy";
 import { errorResponse, internalErrorResponse } from "@/lib/http/api-response";
 import { createDaytonaProvider } from "@/lib/workspace/providers/daytona";
 import { CLOUD_REPOSITORY_ROOT } from "@/lib/workspace/cloud-path";
-import { cloudModeEnabled, cloudOwnerDescription, cloudProjectId, cloudProjectRef, findCloudProject, parseRepository } from "@/lib/workspace/cloud-projects";
+import { AmbiguousCloudProjectError, cloudModeEnabled, cloudOwnerDescription, cloudProjectId, cloudProjectRef, findCloudProject, findReusableCloudProject, parseRepository } from "@/lib/workspace/cloud-projects";
 import { getWorkspaceRuntime } from "@/lib/workspace/runtime-factory";
+import { authorizedRuntime } from "@/lib/workspace/authorized-runtime";
 
 const createSchema = z.object({
   repositoryUrl: z.string().optional(), projectName: z.string().trim().min(1).max(120).optional(),
   branch: z.string().trim().min(1).max(200).optional(), approvalId: z.string().uuid().optional(),
 });
+
+async function openRegisteredRuntime(request: NextRequest, projectId: string): Promise<Response | undefined> {
+  if (getPrivateAuthMode() === "required") {
+    const access = await authorizedRuntime(request, projectId);
+    if (!access.ok) return access.response;
+  } else {
+    await getWorkspaceRuntime(projectId);
+  }
+}
+
+function ambiguousProjectResponse() {
+  return errorResponse({ status: 409, code: "CONFLICT", message: "Multiple workspaces match this repository. Open the registered project by its ID." });
+}
 
 function isConnectionError(error: unknown): boolean {
   const msg = error instanceof Error ? error.message : "";
@@ -66,8 +83,10 @@ export async function listCloudProjects(request: NextRequest) {
       where: { runtimeType: "cloud", ...(auth.session.role === "owner" ? {} : { project: { description: cloudOwnerDescription(auth.session.userId) } }) },
       orderBy: { updatedAt: "desc" }, take: 20,
     });
+    if (getPrivateAuthMode() === "required" && !await revalidatePrivateOwnerSession(auth.session)) return authError(401);
     return NextResponse.json({ ok: true, mode: "cloud", projects: workspaces.map(cloudProjectRef) });
   } catch (error) {
+    if (getPrivateAuthMode() === "required") return authError(503);
     logDbError(requestId, "listCloudProjects", error);
     return internalErrorResponse(classifyDbError(error), requestId);
   }
@@ -87,12 +106,17 @@ export async function openCloudProject(request: NextRequest, value: string) {
   }
   try {
     const workspace = parsedUrl
-      ? await prisma.workspace.findFirst({ where: { repositoryUrl: parsedUrl, runtimeType: "cloud", ...(auth.session.role === "owner" ? {} : { project: { description: cloudOwnerDescription(auth.session.userId) } }) }, orderBy: { updatedAt: "desc" } })
+      ? getPrivateAuthMode() === "required"
+        ? await findReusableCloudProject(parsedUrl, undefined, auth.session.userId, auth.session.role)
+        : await prisma.workspace.findFirst({ where: { repositoryUrl: parsedUrl, runtimeType: "cloud", ...(auth.session.role === "owner" ? {} : { project: { description: cloudOwnerDescription(auth.session.userId) } }) }, orderBy: { updatedAt: "desc" } })
       : await findCloudProject(value, auth.session.userId, auth.session.role);
     if (!workspace) return errorResponse({ status: 404, code: "NOT_FOUND", message: "Project not found. Clone the repository first, or choose a recent project." });
-    await getWorkspaceRuntime(workspace.projectId);
+    const failure = await openRegisteredRuntime(request, workspace.projectId);
+    if (failure) return failure;
     return NextResponse.json({ ok: true, project: cloudProjectRef(workspace) });
   } catch (error) {
+    if (error instanceof AmbiguousCloudProjectError) return ambiguousProjectResponse();
+    if (getPrivateAuthMode() === "required") return authError(503);
     const isDbError = error instanceof PrismaClientKnownRequestError || error instanceof PrismaClientInitializationError || error instanceof PrismaClientUnknownRequestError || error instanceof PrismaClientRustPanicError;
     if (isDbError) {
       logDbError(requestId, "openCloudProject", error);
@@ -132,12 +156,17 @@ export async function createCloudProject(request: NextRequest, raw: unknown) {
   const projectId = repo ? cloudProjectId(auth.session.userId, repo.url, body.branch) : `cloud-${randomUUID()}`;
 
   try {
-    const existing = await findCloudProject(projectId, auth.session.userId, auth.session.role);
+    const existing = getPrivateAuthMode() === "required" && repo
+      ? await findReusableCloudProject(repo.url, body.branch, auth.session.userId, auth.session.role)
+      : await findCloudProject(projectId, auth.session.userId, auth.session.role);
     if (existing) {
-      await getWorkspaceRuntime(projectId);
+      const failure = await openRegisteredRuntime(request, existing.projectId);
+      if (failure) return failure;
       return NextResponse.json({ ok: true, project: cloudProjectRef(existing) });
     }
   } catch (error) {
+    if (error instanceof AmbiguousCloudProjectError) return ambiguousProjectResponse();
+    if (getPrivateAuthMode() === "required") return authError(503);
     const isDbError = error instanceof PrismaClientKnownRequestError || error instanceof PrismaClientInitializationError || error instanceof PrismaClientUnknownRequestError || error instanceof PrismaClientRustPanicError;
     if (isDbError) {
       logDbError(requestId, "createCloudProject.findExisting", error);
@@ -146,6 +175,11 @@ export async function createCloudProject(request: NextRequest, raw: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error";
     return internalErrorResponse(`Cloud workspace error: ${message}`, requestId);
   }
+
+  // Provisioning an unregistered provider workspace needs a separate, atomic
+  // lifecycle. Do not resume the legacy provider-before-registration path in
+  // private mode; opening registered workspaces above preserves their IDs.
+  if (getPrivateAuthMode() === "required") return authError(503, "Workspace provisioning is unavailable.");
 
   const name = body.projectName || repo!.repo;
   const provider = createDaytonaProvider({ apiKey: process.env.DAYTONA_API_KEY, apiUrl: process.env.DAYTONA_API_URL });

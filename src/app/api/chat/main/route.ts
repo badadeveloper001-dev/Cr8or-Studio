@@ -9,6 +9,15 @@ import { AgentTask } from "@/lib/agents/types";
 import { errorResponse, internalErrorResponse } from "@/lib/http/api-response";
 import { withRouteMetrics } from "@/lib/observability/sli";
 import { authorizeRoute } from "@/lib/security/authorization";
+import { authError } from "@/lib/security/private-auth-http";
+import {
+  cancelExecutionAuthorization,
+  createExecutionAuthorization,
+  ExecutionAuthorizationError,
+  revalidateExecutionAuthorization,
+  type ExecutionAuthorizationContext,
+} from "@/lib/security/execution-context";
+import { getPrivateAuthMode } from "@/lib/security/private-auth-mode";
 import { getSecretReadiness } from "@/lib/security/secrets";
 import { classifyIntent } from "@/lib/intent";
 import { getWorkspaceConfig, getWorkspaceRuntime } from "@/lib/workspace/runtime-factory";
@@ -78,19 +87,21 @@ Suggestions:
 - <suggestion 3>
 `.trim();
 
-async function buildCapabilityContext(projectId?: string) {
+async function buildCapabilityContext(projectId?: string, authorization?: ExecutionAuthorizationContext) {
   const readiness = getSecretReadiness();
 
   let workspaceLine: string;
   if (projectId) {
     try {
-      const config = await getWorkspaceConfig(projectId);
-      if (config.type === "cloud") {
+      await revalidateExecutionAuthorization(authorization, projectId, "read");
+      const runtimeType = authorization?.workspace.runtimeType ?? (await getWorkspaceConfig(projectId)).type;
+      if (runtimeType === "cloud") {
         workspaceLine = "- Workspace file access: available (cloud runtime). Repository files can be read with workspace tools. GitHub integration is secondary for files already cloned.";
       } else {
         workspaceLine = "- Workspace file access: available (local runtime). Repository files can be read and edited directly.";
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof ExecutionAuthorizationError) throw error;
       workspaceLine = "- Workspace file access: unavailable (workspace lookup failed). Use GitHub integration for repository access.";
     }
   } else {
@@ -216,14 +227,16 @@ function buildDelegationAcknowledgement(message: string): { reply: string; sugge
 async function handleDirectWorkspaceRequest(
   projectId: string,
   message: string,
+  authorization?: ExecutionAuthorizationContext,
 ): Promise<{ reply: string; suggestions: string[] } | null> {
   const request = detectWorkspaceRequest(message);
   if (!request.type) return null;
 
   let runtime;
   try {
-    runtime = await getWorkspaceRuntime(projectId);
+    runtime = await getWorkspaceRuntime(projectId, authorization);
   } catch (err) {
+    if (err instanceof ExecutionAuthorizationError) throw err;
     const reason = err instanceof Error ? err.message : "Workspace unavailable";
     return {
       reply: `The selected workspace could not be opened: ${reason}`,
@@ -326,6 +339,7 @@ async function handleDirectWorkspaceRequest(
       }
     }
   } catch (err) {
+    if (err instanceof ExecutionAuthorizationError) throw err;
     const reason = err instanceof Error ? err.message : "Unknown error";
     return {
       reply: `Workspace operation failed: ${reason}`,
@@ -343,14 +357,25 @@ async function POSTHandler(request: NextRequest) {
     return auth.response;
   }
 
+  let authorization: ExecutionAuthorizationContext | undefined;
   try {
     const raw = await request.json();
     const payload = chatBodySchema.parse(raw);
-
-    // Direct workspace actions bypass intent classification and delegation
+    if (!payload.projectId && getPrivateAuthMode() === "required") {
+      return errorResponse({ status: 400, code: "INVALID_REQUEST", message: "Select a registered project before starting a conversation.", requestId });
+    }
     if (payload.projectId) {
-      const directResult = await handleDirectWorkspaceRequest(payload.projectId, payload.message);
+      authorization = await createExecutionAuthorization(auth.session, payload.projectId, {
+        permissions: ["read", "model"],
+        signal: request.signal,
+      });
+    }
+
+    // Direct inspection uses the same scoped runtime as agent tools.
+    if (payload.projectId) {
+      const directResult = await handleDirectWorkspaceRequest(payload.projectId, payload.message, authorization);
       if (directResult) {
+        await revalidateExecutionAuthorization(authorization, payload.projectId, "read");
         return NextResponse.json(
           {
             reply: directResult.reply,
@@ -366,7 +391,10 @@ async function POSTHandler(request: NextRequest) {
       }
     }
 
-    const intentDecision = await classifyIntent(payload.message, (payload.history ?? []).slice(-12).map(entry => `${entry.role}: ${entry.content}`).join("\n"));
+    const execution = { authorization, projectId: payload.projectId };
+    if (payload.projectId) await revalidateExecutionAuthorization(authorization, payload.projectId, "model");
+    const intentDecision = await classifyIntent(payload.message, (payload.history ?? []).slice(-12).map(entry => `${entry.role}: ${entry.content}`).join("\n"), execution);
+    if (payload.projectId) await revalidateExecutionAuthorization(authorization, payload.projectId, "model");
 
     const shouldDelegate = intentDecision.shouldDelegate && intentDecision.allowedToolMode !== "none";
 
@@ -387,7 +415,7 @@ async function POSTHandler(request: NextRequest) {
     }
 
     const prompt = buildChatPrompt(payload.history, payload.message, payload.attachments);
-    const capabilityContext = await buildCapabilityContext(payload.projectId);
+    const capabilityContext = await buildCapabilityContext(payload.projectId, authorization);
 
     let rawReply: string;
 
@@ -401,13 +429,14 @@ async function POSTHandler(request: NextRequest) {
         dependsOn: [],
         status: "pending",
       };
-      const context: ToolContext = {
+      const context: ToolContext = Object.freeze({
         projectId: payload.projectId,
         workspaceRoot: process.cwd(),
         requestId,
         actorId: "main-chat",
         actorRole: "assistant",
-      };
+        authorization,
+      });
       const result = await runAgentWithTools({
         systemPrompt: `${MAIN_AGENT_SYSTEM_PROMPT}\n\n${capabilityContext}`,
         userMessage: prompt,
@@ -418,9 +447,10 @@ async function POSTHandler(request: NextRequest) {
       });
       rawReply = result.output;
     } else {
-      rawReply = await runAgentLLM(`${MAIN_AGENT_SYSTEM_PROMPT}\n\n${capabilityContext}`, prompt, undefined, payload.attachments ?? []);
+      rawReply = await runAgentLLM(`${MAIN_AGENT_SYSTEM_PROMPT}\n\n${capabilityContext}`, prompt, undefined, payload.attachments ?? [], execution);
     }
 
+    if (payload.projectId) await revalidateExecutionAuthorization(authorization, payload.projectId, "model");
     const parsed = parseReply(rawReply);
     const reply = stripDelegationClaims(parsed.response);
 
@@ -437,6 +467,15 @@ async function POSTHandler(request: NextRequest) {
       { status: 200 },
     );
   } catch (error) {
+    if (error instanceof ExecutionAuthorizationError) {
+      if (error.status === 401 || error.status === 503) return authError(error.status, error.message);
+      return errorResponse({
+        status: error.status,
+        code: error.status === 404 ? "NOT_FOUND" : error.status === 409 ? "CONFLICT" : "FORBIDDEN",
+        message: error.message,
+        requestId,
+      });
+    }
     if (error instanceof z.ZodError) {
       return errorResponse({
         status: 400,
@@ -447,14 +486,15 @@ async function POSTHandler(request: NextRequest) {
       });
     }
 
-    const message = error instanceof Error ? error.message : "Unknown error";
-    return internalErrorResponse(`Failed to generate main agent reply: ${message}`, requestId);
+    return internalErrorResponse("Failed to generate main agent reply.", requestId);
+  } finally {
+    cancelExecutionAuthorization(authorization);
   }
   })(request);
 }
 
 export const POST = withPrivateApiAuth(
-  { route: "api/chat/main:post", minRole: "viewer", privateExecutionBlocked: true },
+  { route: "api/chat/main:post", minRole: "viewer" },
   POSTHandler,
 );
 

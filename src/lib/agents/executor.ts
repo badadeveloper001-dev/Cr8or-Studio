@@ -1,3 +1,6 @@
+import "server-only";
+
+import { ExecutionAuthorizationContext, ExecutionAuthorizationError, revalidateExecutionAuthorization } from "@/lib/security/execution-context";
 import { agentCatalog } from "@/lib/agents/catalog";
 import { runAgentLLM } from "@/lib/agents/llm";
 import { runAgentWithTools, getAgentToolPreset } from "@/lib/agents/tool-loop";
@@ -7,8 +10,8 @@ import { AgentExecutionState, AgentTask, ToolCallRecord, ToolProgressEvent } fro
 import { ToolContext } from "@/lib/agents/tools";
 import { redactText } from "@/lib/security/redaction";
 
-export type TaskProgressCallback = (state: AgentExecutionState) => void;
-export type ToolProgressCallback = (event: ToolProgressEvent) => void;
+export type TaskProgressCallback = (state: AgentExecutionState) => void | Promise<void>;
+export type ToolProgressCallback = (event: ToolProgressEvent) => void | Promise<void>;
 
 export function buildInitialDashboard(): AgentExecutionState[] {
   return agentCatalog.map((agent) => ({
@@ -29,7 +32,9 @@ export async function executeTask(
   dashboard: AgentExecutionState[],
   onProgress?: TaskProgressCallback,
   onToolProgress?: ToolProgressCallback,
+  authorization?: ExecutionAuthorizationContext,
 ): Promise<AgentTask> {
+  await revalidateExecutionAuthorization(authorization, projectId, "memory");
   const agent = agentCatalog.find((item) => item.id === task.agentId);
   if (!agent) {
     throw new Error(`Agent ${task.agentId} not found.`);
@@ -37,14 +42,16 @@ export async function executeTask(
 
   const dashboardEntry = dashboard.find((entry) => entry.agentId === task.agentId);
 
-  function updateState(patch: Partial<AgentExecutionState>) {
+  async function updateState(patch: Partial<AgentExecutionState>) {
+    await revalidateExecutionAuthorization(authorization, projectId, "read");
     if (!dashboardEntry) return;
     Object.assign(dashboardEntry, patch);
-    onProgress?.({ ...dashboardEntry });
+    await onProgress?.({ ...dashboardEntry });
   }
 
-  function emitToolProgress(event: ToolProgressEvent) {
-    onToolProgress?.(event);
+  async function emitToolProgress(event: ToolProgressEvent) {
+    await revalidateExecutionAuthorization(authorization, projectId, "read");
+    await onToolProgress?.(event);
   }
 
   const globalMemory = getGlobalMemory(projectId);
@@ -63,7 +70,7 @@ export async function executeTask(
 
   const userMessage = `${task.input}\n\n---\nProject context:\n${context}`;
 
-  updateState({
+  await updateState({
     status: "running",
     currentTask: task.title,
     progress: 20,
@@ -72,7 +79,7 @@ export async function executeTask(
 
   const systemPrompt = agentSystemPrompts[task.agentId];
 
-  updateState({ progress: 40, thinking: `${agent.role} is analyzing requirements.` });
+  await updateState({ progress: 40, thinking: `${agent.role} is analyzing requirements.` });
 
   const startedAt = new Date().toISOString();
   let output: string;
@@ -83,7 +90,7 @@ export async function executeTask(
 
   try {
     const requestId = `${task.agentId}-${startedAt}`;
-    const toolContext = buildToolContext(projectId, task, requestId);
+    const toolContext = buildToolContext(projectId, task, requestId, authorization);
     const toolNames = getAgentToolPreset(task.agentId);
 
     if (toolNames.length > 0) {
@@ -102,11 +109,13 @@ export async function executeTask(
       requiresApproval = result.requiresApproval;
       failed = result.failed ?? false;
     } else {
-      output = await runAgentLLM(systemPrompt, userMessage);
+      output = await runAgentLLM(systemPrompt, userMessage, undefined, [], { authorization, projectId });
     }
   } catch (err) {
+    if (err instanceof ExecutionAuthorizationError) throw err;
+    await revalidateExecutionAuthorization(authorization, projectId, "read");
     const errorMessage = redactText(err instanceof Error ? err.message : "Unknown error");
-    updateState({
+    await updateState({
       status: "failed",
       progress: 0,
       thinking: errorMessage,
@@ -120,6 +129,7 @@ export async function executeTask(
     };
   }
 
+  await revalidateExecutionAuthorization(authorization, projectId, "memory");
   writeLocalNote(projectId, task.agentId, {
     note: `${failed ? "Failed" : requiresApproval ? "Blocked" : "Completed"} '${task.title}'. Output length: ${output.length} chars. Tool calls: ${toolRecords.length}.`,
   });
@@ -132,7 +142,7 @@ export async function executeTask(
     ? "Work paused - approval required for tool action."
     : "Work package completed and shared with Orchestrator.";
 
-  updateState({
+  await updateState({
     status: finalStatus,
     progress: finalProgress,
     thinking: finalThinking,
@@ -150,12 +160,13 @@ export async function executeTask(
   };
 }
 
-function buildToolContext(projectId: string, task: AgentTask, requestId: string): ToolContext {
-  return {
+function buildToolContext(projectId: string, task: AgentTask, requestId: string, authorization?: ExecutionAuthorizationContext): ToolContext {
+  return Object.freeze({
     projectId,
     workspaceRoot: process.cwd(),
     requestId,
     actorId: task.agentId,
     actorRole: "agent",
-  };
+    authorization,
+  });
 }

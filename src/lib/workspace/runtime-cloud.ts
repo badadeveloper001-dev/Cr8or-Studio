@@ -1,7 +1,12 @@
+import "server-only";
+
 import path from "node:path";
 import { cloudPath, CLOUD_REPOSITORY_ROOT, shellQuote } from "@/lib/workspace/cloud-path";
 import { Sandbox } from "@daytona/sdk";
 import { DaytonaProvider } from "@/lib/workspace/providers/daytona";
+import { getPrivateAuthMode } from "@/lib/security/private-auth-mode";
+import { ExecutionAuthorizationError, revalidateExecutionAuthorization, type ExecutionAuthorizationContext, type ExecutionOperation } from "@/lib/security/execution-context";
+import { privateCloudFileOperation, rejectPrivateCloudWrite } from "@/lib/workspace/private-cloud-files";
 import {
   WorkspaceMetadata,
   GitStatusResult,
@@ -18,6 +23,7 @@ interface CloudWorkspaceConfig {
   repositoryUrl?: string;
   branch?: string;
   createdAt: Date;
+  authorization?: ExecutionAuthorizationContext;
 }
 
 async function updateWorkspaceMapping(projectId: string, providerWorkspaceId: string): Promise<void> {
@@ -78,7 +84,35 @@ export class CloudWorkspaceRuntime {
     this.createdAt = config.createdAt || new Date();
   }
 
+  private isPrivate(): boolean {
+    return Boolean(this.config.authorization) || getPrivateAuthMode() === "required";
+  }
+
+  private async authorize(operation: ExecutionOperation): Promise<void> {
+    const authorization = this.config.authorization;
+    await revalidateExecutionAuthorization(authorization, this.projectId, operation);
+    if (authorization && (authorization.workspace.runtimeType !== "cloud" ||
+      authorization.workspace.provider !== "daytona" ||
+      authorization.workspace.providerWorkspaceId !== this.config.providerWorkspaceId ||
+      (this.sandbox && this.sandbox.id !== authorization.workspace.providerWorkspaceId))) {
+      throw new ExecutionAuthorizationError(403, "Workspace runtime does not match the authorized project.");
+    }
+  }
+
   async initialize(): Promise<void> {
+    await this.authorize("read");
+    if (this.isPrivate()) {
+      // A read must never start, recreate, reclone, or remap a cloud workspace.
+      // Only the registered provider identifier can select the sandbox.
+      if (!this.config.providerWorkspaceId) throw new ExecutionAuthorizationError(503, "The registered workspace is unavailable.");
+      const sandbox = await this.provider.getSandbox(this.config.providerWorkspaceId);
+      await this.authorize("read");
+      if (!sandbox || sandbox.id !== this.config.providerWorkspaceId || sandbox.state !== "started") {
+        throw new ExecutionAuthorizationError(503, "The registered workspace must already be running.");
+      }
+      this.sandbox = sandbox;
+      return;
+    }
     if (!this.provider) return;
 
     // A. Try persisted providerWorkspaceId first
@@ -150,28 +184,53 @@ export class CloudWorkspaceRuntime {
     return this.provider.getSandboxProcess(this.sandbox);
   }
 
+  private rejectUnsafeCommand(): void {
+    if (this.isPrivate()) throw new ExecutionAuthorizationError(503, "Workspace commands require a contained execution environment.");
+  }
+
   async readFile(relPath: string): Promise<{ content: string; bytes: number }> {
+    await this.authorize("read");
+    if (this.isPrivate()) {
+      const result = await privateCloudFileOperation(this.getProcess(), "read", relPath);
+      await this.authorize("read");
+      return result;
+    }
     const absolutePath = cloudPath(relPath);
     const fs = this.getFileSystem();
     const buffer = await fs.downloadFile(absolutePath);
+    await this.authorize("read");
     const content = buffer.toString("utf8");
     return { content, bytes: buffer.length };
   }
 
   async writeFile(relPath: string, content: string): Promise<{ bytes: number }> {
+    await this.authorize("write");
+    if (this.isPrivate()) {
+      // Authorization still precedes the staging restriction. Never pass file
+      // contents to command arguments or a pathname-only upload fallback.
+      rejectPrivateCloudWrite(content);
+    }
     const absolutePath = cloudPath(relPath);
     const fs = this.getFileSystem();
     await fs.createFolder(path.posix.dirname(absolutePath), "755");
     const buffer = Buffer.from(content, "utf8");
     await fs.uploadFile(buffer, absolutePath);
+    await this.authorize("write");
     return { bytes: buffer.length };
   }
 
   async listFiles(relPath?: string): Promise<Array<{ name: string; type: "file" | "directory" }>> {
+    await this.authorize("read");
     const targetPath = relPath ?? ".";
+    if (this.isPrivate()) {
+      const result = await privateCloudFileOperation(this.getProcess(), "list", targetPath);
+      await this.authorize("read");
+      return result;
+    }
     const absolutePath = cloudPath(targetPath);
     const fs = this.getFileSystem();
     const files = await fs.listFiles(absolutePath);
+    await this.authorize("read");
     return files
       .filter((entry) => !entry.name.startsWith("."))
       .slice(0, 200)
@@ -182,11 +241,14 @@ export class CloudWorkspaceRuntime {
   }
 
   async gitStatus(): Promise<GitStatusResult> {
+    await this.authorize("read");
+    this.rejectUnsafeCommand();
     if (!this.sandbox) {
       throw new Error("Sandbox not initialized");
     }
     const git = this.provider.getSandboxGit(this.sandbox);
     const status = await git.status(CLOUD_REPOSITORY_ROOT);
+    await this.authorize("read");
     const changedFiles = status.fileStatus.map((fs) => ({
       path: fs.name,
       status: `${fs.staging}${fs.worktree}`.trim() || "??",
@@ -200,13 +262,13 @@ export class CloudWorkspaceRuntime {
   }
 
   async gitDiff(relPath?: string, staged?: boolean): Promise<GitDiffResult> {
+    await this.authorize("read");
+    this.rejectUnsafeCommand();
     const stagedFlag = staged ? "--staged " : "";
     const fileArg = relPath ? ` -- ${shellQuote(cloudPath(relPath))}` : "";
 
-    const [diffResult, stagedDiffResult] = await Promise.all([
-      this.executeCommandInSandbox(`git diff ${stagedFlag}${fileArg}`),
-      this.executeCommandInSandbox(`git diff --staged${fileArg}`),
-    ]);
+    const diffResult = await this.executeCommandInSandbox(`git diff ${stagedFlag}${fileArg}`, "read");
+    const stagedDiffResult = await this.executeCommandInSandbox(`git diff --staged${fileArg}`, "read");
 
     return {
       diff: diffResult.stdout,
@@ -214,12 +276,15 @@ export class CloudWorkspaceRuntime {
     };
   }
 
-  private async executeCommandInSandbox(command: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  private async executeCommandInSandbox(command: string, operation: "read" | "command" = "command"): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    await this.authorize(operation);
+    this.rejectUnsafeCommand();
     if (!this.sandbox) {
       throw new Error("Sandbox not initialized");
     }
     const proc = this.provider.getSandboxProcess(this.sandbox);
     const result = await proc.executeCommand(command, CLOUD_REPOSITORY_ROOT);
+    await this.authorize(operation);
     return {
       stdout: result.artifacts?.stdout ?? result.result,
       stderr: "",
@@ -237,6 +302,7 @@ export class CloudWorkspaceRuntime {
   }
 
   async getMetadata(): Promise<WorkspaceMetadata> {
+    await this.authorize("read");
     return {
       id: this.id,
       type: this.type,

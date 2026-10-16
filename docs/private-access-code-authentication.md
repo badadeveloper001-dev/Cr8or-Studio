@@ -5,8 +5,9 @@ services on the approved Phase 1A-1 tables and session store. It does **not**
 protect all workspace APIs, add a lock screen, activate production authentication,
 or implement passkeys. Backend authorization belongs to Phase 1A-3; the reviewed
 production cutover is deferred to Phase 1A-5. The subsequent
-[Phase 1A-3A authorization guide](private-api-authorization.md) describes the
-current central API boundary and temporarily blocked AI execution paths.
+[authorization guide](private-api-authorization.md) describes the current central
+API boundary. [Phase 1A-3B](trusted-workspace-authorization.md) adds trusted agent
+execution and documents the remaining operation-specific restrictions.
 
 ## Staging and configuration
 
@@ -242,17 +243,18 @@ path without provisioning a production owner.
 
 Run `npm run test:auth-boundary` after installing dependencies and generating
 Prisma. It builds temporary Next.js applications that attempt to import the actual
-credential and owner-management modules into Client Components. A probe passes
+credential, owner-management, and execution-context modules into Client Components. A probe passes
 only when Next.js rejects the import at the `server-only` boundary; unrelated
 build failures and timeouts fail the check. No credential or database operation is
 invoked, and the temporary applications are removed afterward.
 
-Production activation remains pending: complete agent project authorization,
+Production activation remains pending: review trusted agent project authorization,
 add frontend locking, verify origin/cookie behavior and recovery,
 review rate limits and source trust on the deployment, schedule cleanup, verify
 database role restrictions, and protect all deployment URLs before the Phase 1A-5
 cutover. Protected handlers now validate cookies against PostgreSQL in private
-mode; AI entrypoints remain unavailable there pending Phase 1A-3B.
+mode; AI entrypoints now require the Phase 1A-3B execution context. Unsupported
+runtime commands, previews, and provisioning remain unavailable in private mode.
 
 The [Phase 1A-1 dependency findings](reviews/phase-1a-1-dependency-review.md)
 remain separate and unresolved; no unrelated updates or removed audit gates are

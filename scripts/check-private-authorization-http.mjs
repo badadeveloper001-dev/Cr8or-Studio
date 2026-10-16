@@ -189,7 +189,11 @@ async function checkActiveServer(server, database) {
   for (const path of ["/api/chat/main", "/api/orchestrate", "/api/orchestrate/stream"]) {
     expectResponse(await request(path, {
       method: "POST", headers: { ...mutationHeaders, cookie }, body: "{}",
-    }), 503, "deferred execution");
+    }), 400, "execution requires a registered project");
+    expectResponse(await request(path, {
+      method: "POST", headers: { ...mutationHeaders, cookie },
+      body: JSON.stringify({ projectId: "unknown-project", prompt: "Synthetic execution request", message: "Read package.json" }),
+    }), 404, "unknown execution project");
   }
   // This failure is confined to the disposable schema, never a production table.
   await database.$executeRawUnsafe('ALTER TABLE "AuthSession" RENAME TO "AuthSessionUnavailable"');
@@ -202,7 +206,7 @@ async function checkActiveServer(server, database) {
     method: "POST", headers: { ...mutationHeaders, cookie },
   }), 204, "lock");
   expectResponse(await request("/api/projects", { headers: { cookie } }), 401, "revoked session");
-  console.log("PASS: Origin failures, deferred execution, database failures, and revoked sessions fail closed.");
+  console.log("PASS: Origin failures, missing or unknown execution projects, database failures, and revoked sessions fail closed.");
 }
 
 async function main() {

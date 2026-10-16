@@ -1,9 +1,14 @@
-import { promises as fs } from "node:fs";
+import "server-only";
+
+import { constants, promises as fs } from "node:fs";
 import path from "node:path";
 
 import { sanitizeWorkspacePath, resolveProjectPath, getActiveProjectRoot } from "@/lib/workspace/shell";
 import { runSandboxedCommand } from "@/lib/security/sandbox";
 import { WorkspaceRuntime, WorkspaceMetadata, WorkspaceCapabilities, GitStatusResult, GitDiffResult, CommandResult, ValidatedCommandRequest } from "@/lib/workspace/runtime";
+import { getPrivateAuthMode } from "@/lib/security/private-auth-mode";
+import { ExecutionAuthorizationError, revalidateExecutionAuthorization, type ExecutionAuthorizationContext, type ExecutionOperation } from "@/lib/security/execution-context";
+import { privateLocalPath } from "@/lib/workspace/private-runtime-path";
 
 const SECRET_SENSITIVE_PATHS = [
   ".env",
@@ -85,14 +90,49 @@ export class LocalWorkspaceRuntime implements WorkspaceRuntime {
   private projectRoot: string;
   private createdAt: Date;
 
-  constructor(projectId: string) {
+  constructor(projectId: string, private readonly authorization?: ExecutionAuthorizationContext) {
     this.projectId = projectId;
     this.id = `local-${projectId}`;
     this.projectRoot = getActiveProjectRoot(projectId);
     this.createdAt = new Date();
   }
 
+  private isPrivate(): boolean {
+    return Boolean(this.authorization) || getPrivateAuthMode() === "required";
+  }
+
+  private async authorize(operation: ExecutionOperation): Promise<void> {
+    await revalidateExecutionAuthorization(this.authorization, this.projectId, operation);
+    if (this.authorization && this.authorization.workspace.runtimeType !== "local") {
+      throw new ExecutionAuthorizationError(403, "Workspace runtime does not match the authorized project.");
+    }
+  }
+
+  private async rejectUnsafeHostCommand(): Promise<void> {
+    await this.authorize("command");
+    if (this.isPrivate()) {
+      // cwd and a command allowlist are not a filesystem or environment sandbox.
+      throw new ExecutionAuthorizationError(503, "Local command execution requires an isolated workspace.");
+    }
+  }
+
   async readFile(relPath: string): Promise<{ content: string; bytes: number }> {
+    await this.authorize("read");
+    if (this.isPrivate()) {
+      const absolutePath = await privateLocalPath(this.projectId, relPath);
+      await this.authorize("read");
+      const file = await fs.open(absolutePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      try {
+        const info = await file.stat();
+        if (!info.isFile() || info.nlink !== 1) throw new Error("Only unlinked regular files are authorized.");
+        await this.authorize("read");
+        const content = await file.readFile("utf8");
+        await this.authorize("read");
+        return { content, bytes: Buffer.byteLength(content, "utf8") };
+      } finally {
+        await file.close();
+      }
+    }
     const validation = validatePath(this.projectId, relPath);
     if (!validation.ok) {
       throw new Error(validation.error);
@@ -103,6 +143,28 @@ export class LocalWorkspaceRuntime implements WorkspaceRuntime {
   }
 
   async writeFile(relPath: string, content: string): Promise<{ bytes: number }> {
+    await this.authorize("write");
+    if (this.isPrivate()) {
+      const absolutePath = await privateLocalPath(this.projectId, relPath, true);
+      await this.authorize("write");
+      await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+      await privateLocalPath(this.projectId, relPath, true);
+      await this.authorize("write");
+      // Do not truncate until authorization is revalidated after opening.
+      const file = await fs.open(absolutePath, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+      try {
+        const info = await file.stat();
+        if (!info.isFile() || info.nlink !== 1) throw new Error("Only unlinked regular files are authorized.");
+        await this.authorize("write");
+        await file.truncate(0);
+        await this.authorize("write");
+        await file.writeFile(content, "utf8");
+        await this.authorize("write");
+        return { bytes: Buffer.byteLength(content, "utf8") };
+      } finally {
+        await file.close();
+      }
+    }
     const validation = validatePath(this.projectId, relPath);
     if (!validation.ok) {
       throw new Error(validation.error);
@@ -114,6 +176,15 @@ export class LocalWorkspaceRuntime implements WorkspaceRuntime {
   }
 
   async listFiles(relPath?: string): Promise<Array<{ name: string; type: "file" | "directory" }>> {
+    await this.authorize("read");
+    if (this.isPrivate()) {
+      const absolutePath = await privateLocalPath(this.projectId, relPath ?? ".");
+      await this.authorize("read");
+      const entries = await fs.readdir(absolutePath, { withFileTypes: true });
+      await this.authorize("read");
+      return entries.filter((entry) => !entry.name.startsWith(".") && !entry.isSymbolicLink())
+        .slice(0, 200).map((entry) => ({ name: entry.name, type: entry.isDirectory() ? "directory" as const : "file" as const }));
+    }
     const targetPath = relPath ?? ".";
     const validation = validatePath(this.projectId, targetPath);
     if (!validation.ok) {
@@ -131,6 +202,7 @@ export class LocalWorkspaceRuntime implements WorkspaceRuntime {
   }
 
   async gitStatus(): Promise<GitStatusResult> {
+    await this.rejectUnsafeHostCommand();
     const result = await runSandboxedCommand({
       command: "git status --short",
       cwd: this.projectRoot,
@@ -165,6 +237,7 @@ export class LocalWorkspaceRuntime implements WorkspaceRuntime {
   }
 
   async gitDiff(relPath?: string, staged?: boolean): Promise<GitDiffResult> {
+    await this.rejectUnsafeHostCommand();
     const fileArg = relPath ? ` -- ${relPath}` : "";
     const stagedFlag = staged ? "--staged " : "";
 
@@ -197,6 +270,7 @@ export class LocalWorkspaceRuntime implements WorkspaceRuntime {
   }
 
   async runCommand(request: ValidatedCommandRequest): Promise<CommandResult> {
+    await this.rejectUnsafeHostCommand();
     const { command, rules, timeoutMs } = request;
     const resolvedCommand = resolveCommandForPlatform(command);
     
@@ -235,6 +309,7 @@ export class LocalWorkspaceRuntime implements WorkspaceRuntime {
   }
 
   async getMetadata(): Promise<WorkspaceMetadata> {
+    await this.authorize("read");
     return {
       id: this.id,
       type: this.type,

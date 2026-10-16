@@ -10,11 +10,22 @@ const sourceFiles = [
   "src/lib/security/access-code.ts",
   "src/lib/security/owner-management.ts",
   "src/lib/security/session-store.ts",
+  "src/lib/security/execution-context.ts",
+  "src/lib/security/auth.ts",
+  "src/lib/security/private-auth-mode.ts",
+  "src/lib/security/private-auth-http.ts",
+  "src/lib/security/audit.ts",
+  "src/lib/security/secrets.ts",
+  "src/lib/security/redaction.ts",
+  "src/lib/config/feature-flags.ts",
+  "src/lib/supabase/server.ts",
+  "src/lib/workspace/shell.ts",
   "src/lib/db/prisma.ts",
 ];
 const probes = [
   { module: "access-code", exportedFunction: "hashAccessCode" },
   { module: "owner-management", exportedFunction: "provisionOwner" },
+  { module: "execution-context", exportedFunction: "cancelExecutionAuthorization" },
 ];
 
 async function checkProbe(temporaryRoot, probe) {
@@ -49,7 +60,7 @@ import { ${probe.exportedFunction} } from "@/lib/security/${probe.module}";
 
 export default function BoundaryProbe() {
   // Keep the import live without invoking credential or database operations during a build.
-  return <button onClick={() => { void ${probe.exportedFunction}("public-synthetic-boundary-probe-code"); }}>
+  return <button onClick={() => { void ${probe.exportedFunction}(${probe.module === "execution-context" ? "undefined" : '"public-synthetic-boundary-probe-code"'}); }}>
     Boundary probe
   </button>;
 }

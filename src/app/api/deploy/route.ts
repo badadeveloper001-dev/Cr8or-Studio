@@ -206,7 +206,8 @@ async function POSTHandler(request: NextRequest) {
 }
 
 export const POST = withPrivateApiAuth(
-  { route: "api/deploy:post", minRole: "viewer" },
+  // Build scripts and deployment subprocesses require an isolated runtime.
+  { route: "api/deploy:post", minRole: "viewer", privateExecutionBlocked: true },
   POSTHandler,
 );
 

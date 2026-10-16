@@ -44,3 +44,26 @@ export async function findCloudProject(projectId: string, actorId: string, role:
     where: { projectId, runtimeType: "cloud", ...(role === "owner" ? {} : { project: { description: cloudOwnerDescription(actorId) } }) },
   });
 }
+
+export class AmbiguousCloudProjectError extends Error {
+  constructor() {
+    super("More than one workspace matches this repository. Open the registered project by its ID.");
+    this.name = "AmbiguousCloudProjectError";
+  }
+}
+
+/** Reuse persisted identities when the singleton owner replaces a legacy actor. */
+export async function findReusableCloudProject(repositoryUrl: string, branch: string | undefined, actorId: string, role: string) {
+  const matches = await prisma.workspace.findMany({
+    where: {
+      runtimeType: "cloud",
+      repositoryUrl: { equals: repositoryUrl, mode: "insensitive" },
+      ...(branch === undefined ? {} : { branch }),
+      ...(role === "owner" ? {} : { project: { description: cloudOwnerDescription(actorId) } }),
+    },
+    take: 2,
+  });
+  // A default-branch request must not silently choose another registered branch.
+  if (matches.length > 1) throw new AmbiguousCloudProjectError();
+  return matches[0] ?? null;
+}

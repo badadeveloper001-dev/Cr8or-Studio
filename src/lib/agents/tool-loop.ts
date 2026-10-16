@@ -1,8 +1,11 @@
+import "server-only";
+
+import { ExecutionAuthorizationError, revalidateExecutionAuthorization } from "@/lib/security/execution-context";
 import { randomUUID } from "node:crypto";
 import { generateText, dynamicTool, zodSchema } from "ai";
 import { z } from "zod";
 
-import { ToolName, ToolContext, toolMetadata, toolParameterSchemas, createToolSet, AGENT_TOOL_TIER_MAP, AGENT_TOOL_PRESETS, ToolPermissionTier } from "@/lib/agents/tools";
+import { ToolName, ToolContext, toolMetadata, toolParameterSchemas, createToolSet, AGENT_TOOL_TIER_MAP, AGENT_TOOL_PRESETS, ToolPermissionTier, getToolPresetForActor } from "@/lib/agents/tools";
 import { executeTool } from "@/lib/agents/tool-executor";
 import { AgentTask, ToolCallRecord, ToolProgressEvent } from "@/lib/agents/types";
 import { getDefaultLLMConfig, getModelForTools } from "@/lib/agents/llm";
@@ -10,7 +13,7 @@ import { redactText } from "@/lib/security/redaction";
 
 const MAX_TOOL_TURNS = 5;
 
-export type ToolProgressCallback = (event: ToolProgressEvent) => void;
+export type ToolProgressCallback = (event: ToolProgressEvent) => void | Promise<void>;
 
 function formatToolsForPrompt(toolNames: ToolName[]): string {
   const lines = ["Available tools:"];
@@ -115,6 +118,14 @@ export interface ToolLoopResult {
 export async function runAgentWithTools(input: ToolLoopInput): Promise<ToolLoopResult> {
   const { systemPrompt, userMessage, agentId, toolNames, context, onToolProgress } = input;
 
+  const revalidate = (operation: "model" | "read" = "read") =>
+    revalidateExecutionAuthorization(context.authorization, context.projectId, operation);
+  await revalidate("model");
+  const allowedTools = getToolPresetForActor(agentId);
+  if (context.actorId !== agentId || toolNames.some((tool) => !allowedTools.includes(tool))) {
+    throw new ExecutionAuthorizationError(403, "Tool is not permitted for this agent.");
+  }
+
   let model: ReturnType<typeof getModelForTools>;
   try {
     model = getModelForTools(getDefaultLLMConfig());
@@ -129,6 +140,7 @@ export async function runAgentWithTools(input: ToolLoopInput): Promise<ToolLoopR
   let turnCount = 0;
 
   while (turnCount < MAX_TOOL_TURNS) {
+    await revalidate("model");
     turnCount++;
 
     const toolsPrompt = formatToolsForPrompt(toolNames);
@@ -147,10 +159,16 @@ export async function runAgentWithTools(input: ToolLoopInput): Promise<ToolLoopR
         prompt: currentUserMessage,
         tools: toolsForModel,
         temperature: 0.2,
+        abortSignal: context.authorization?.signal,
+        // Each new provider attempt must pass the authorization boundary.
+        maxRetries: 0,
       });
+      await revalidate();
       text = result.text;
       toolCalls = result.toolCalls as Array<{ toolName: string; args?: unknown; input?: unknown }> | undefined;
     } catch (err) {
+      if (err instanceof ExecutionAuthorizationError) throw err;
+      await revalidate();
       const reason = err instanceof Error ? err.message : "Unknown model error";
       return { output: redactText(`The AI provider could not complete the response. ${reason}`), failed: true, toolRecords, workspaceChanged, requiresApproval: false };
     }
@@ -162,12 +180,13 @@ export async function runAgentWithTools(input: ToolLoopInput): Promise<ToolLoopR
         if (!toolNames.includes(toolName)) {
           throw new Error(`Tool ${toolName} is not allowed for this task.`);
         }
+        await revalidate();
         const startedAt = new Date().toISOString();
 
         const args = (toolCall as { args?: unknown; input?: unknown }).args ?? (toolCall as { args?: unknown; input?: unknown }).input ?? {};
 
         // Emit tool start event
-        onToolProgress?.({
+        await onToolProgress?.({
           agentId,
           tool: toolName,
           label: formatToolLabel(toolName, JSON.stringify(args).slice(0, 200)),
@@ -178,6 +197,7 @@ export async function runAgentWithTools(input: ToolLoopInput): Promise<ToolLoopR
         });
 
         const result = await executeTool(toolName, args, context);
+        await revalidate();
         const finishedAt = new Date().toISOString();
 
         const paramsSummary = JSON.stringify(args).slice(0, 200);
@@ -196,7 +216,7 @@ export async function runAgentWithTools(input: ToolLoopInput): Promise<ToolLoopR
         toolRecords.push(record);
 
         // Emit tool completion event
-        onToolProgress?.({
+        await onToolProgress?.({
           agentId,
           tool: toolName,
           label: formatToolLabel(toolName, paramsSummary),
@@ -255,14 +275,20 @@ export async function runAgentWithTools(input: ToolLoopInput): Promise<ToolLoopR
 
   let finalText: string;
   try {
+    await revalidate("model");
     const final = await generateText({
-    model,
-    system: `${systemPrompt}\nThe tool budget is exhausted. Give the user a final answer using only the verified evidence below. Explicitly identify incomplete work and failures. Do not promise further execution or claim unverified success.`,
-    prompt: currentUserMessage + buildToolReceiptsMessage(toolRecords),
-    temperature: 0.2,
+      model,
+      system: `${systemPrompt}\nThe tool budget is exhausted. Give the user a final answer using only the verified evidence below. Explicitly identify incomplete work and failures. Do not promise further execution or claim unverified success.`,
+      prompt: currentUserMessage + buildToolReceiptsMessage(toolRecords),
+      temperature: 0.2,
+      abortSignal: context.authorization?.signal,
+      maxRetries: 0,
     });
+    await revalidate();
     finalText = final.text.trim();
   } catch (error) {
+    if (error instanceof ExecutionAuthorizationError) throw error;
+    await revalidate();
     const reason = error instanceof Error ? error.message : "Unknown provider error";
     return { output: redactText(`The tools finished, but the final answer could not be generated. ${reason}`), failed: true, toolRecords, workspaceChanged, requiresApproval: false };
   }
@@ -285,6 +311,6 @@ export function getDefaultToolPreset(): ToolName[] {
 
 export function getAgentToolPreset(agentId: string): ToolName[] {
   const tier = AGENT_TOOL_TIER_MAP[agentId as keyof typeof AGENT_TOOL_TIER_MAP] as ToolPermissionTier | undefined;
-  const preset = AGENT_TOOL_PRESETS[(tier as keyof typeof AGENT_TOOL_PRESETS) ?? "none"] ?? AGENT_TOOL_PRESETS.none;
+  const preset = AGENT_TOOL_PRESETS[tier === "read-only" ? "read_only" : (tier ?? "none")] ?? AGENT_TOOL_PRESETS.none;
   return preset;
 }
