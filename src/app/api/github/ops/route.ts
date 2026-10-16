@@ -1,4 +1,6 @@
 import { withPrivateApiAuth } from "@/lib/security/private-api";
+import { getPrivateAuthMode } from "@/lib/security/private-auth-mode";
+import { handlePrivateGitOperation } from "@/lib/security/private-git-http";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -111,6 +113,7 @@ async function collectCommitPushReceipt(
 
 async function POSTHandler(request: NextRequest) {
   return withRouteMetrics("api/github/ops", async (request: NextRequest, { requestId }) => {
+  if (getPrivateAuthMode() !== "inactive") return handlePrivateGitOperation(request, requestId, "daytona");
   try {
     const raw = await request.json();
     const payload = bodySchema.parse(raw);
@@ -461,8 +464,7 @@ async function POSTHandler(request: NextRequest) {
 }
 
 export const POST = withPrivateApiAuth(
-  // Legacy local shell operations do not provide an isolated project boundary.
-  { route: "api/github/ops:post", minRole: "viewer", privateExecutionBlocked: true },
+  { route: "api/github/ops:post", minRole: "viewer" },
   POSTHandler,
 );
 

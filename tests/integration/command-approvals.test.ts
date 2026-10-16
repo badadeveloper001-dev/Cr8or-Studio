@@ -145,7 +145,7 @@ describe.skipIf(!testUrl)("durable command approvals on isolated PostgreSQL", ()
     vi.resetModules();
     database = (await import("@/lib/db/prisma")).prisma;
     for (const migration of ["0_init", "20250101000000_add_workspace_table", "20261015000000_authentication_foundation",
-      "20261016000000_command_operations", "20261016010000_command_approvals"]) await applyMigration(migration);
+      "20261016000000_command_operations", "20261016010000_command_approvals", "20261016020000_git_operations"]) await applyMigration(migration);
     auth = await import("@/lib/security/auth");
     sessions = await import("@/lib/security/session-store");
     owners = await import("@/lib/security/owner-management");

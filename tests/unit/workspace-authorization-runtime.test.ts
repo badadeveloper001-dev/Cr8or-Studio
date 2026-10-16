@@ -17,6 +17,10 @@ vi.mock("@/lib/security/execution-context", () => ({
   },
 }));
 vi.mock("@/lib/security/sandbox", () => ({ runSandboxedCommand: mocks.sandboxed }));
+vi.mock("@/lib/security/git-authorization", () => ({
+  validateGitRepositoryContext: async (context: ExecutionAuthorizationContext) => mocks.revalidate(context, context.projectId, "read"),
+  authorizeRuntimeGitRead: vi.fn(),
+}));
 vi.mock("@/lib/db/prisma", () => ({ prisma: { workspace: { findUnique: mocks.workspace } } }));
 vi.mock("@/lib/workspace/providers/daytona", () => ({ DaytonaProvider: class {
   getSandbox = mocks.sandbox;
@@ -251,7 +255,8 @@ describe("private cloud runtime boundary", () => {
     await runtime.initialize();
     await expect(runtime.runCommand({ command: "npm test", commandKey: "npm test", rules: [] })).rejects.toMatchObject({ status: 503 });
     await expect(runtime.gitStatus()).rejects.toMatchObject({ status: 503 });
-    await expect(runtime.gitDiff()).rejects.toMatchObject({ status: 503 });
+    await expect(runtime.gitDiff("file.txt")).rejects.toMatchObject({ status: 503 });
+    await expect(runtime.gitDiff()).rejects.toMatchObject({ status: 403 });
     expect(process.executeCommand).not.toHaveBeenCalled();
   });
 });

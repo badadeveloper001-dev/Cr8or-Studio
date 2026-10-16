@@ -10,6 +10,10 @@ const sourceFiles = [
   "src/lib/security/access-code.ts",
   "src/lib/security/command-authorization.ts",
   "src/lib/security/command-approvals.ts",
+  "src/lib/security/git-approvals.ts",
+  "src/lib/security/git-authorization.ts",
+  "src/lib/security/git-operation-catalogue.ts",
+  "src/lib/security/git-operation-store.ts",
   "src/lib/security/command-catalogue.ts",
   "src/lib/security/command-operation-store.ts",
   "src/lib/security/policy.ts",
@@ -32,6 +36,9 @@ const sourceFiles = [
   "src/lib/db/prisma.ts",
 ];
 const probes = [
+  { module: "git-approvals", exportedFunction: "createPrivateGitApproval" },
+  { module: "git-authorization", exportedFunction: "authorizeOwnerGitOperation" },
+  { module: "git-operation-store", exportedFunction: "readGitOperation" },
   { module: "command-approvals", exportedFunction: "createPrivateCommandApproval" },
   { module: "command-authorization", exportedFunction: "authorizeDevelopmentCommand" },
   { module: "command-operation-store", exportedFunction: "readCommandOperation" },

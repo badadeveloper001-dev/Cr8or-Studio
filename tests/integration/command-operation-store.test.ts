@@ -77,6 +77,8 @@ describe.skipIf(!testUrl)("command coordination on isolated PostgreSQL", () => {
     } });
     legacySnapshot = await snapshotLegacy();
     await applyMigration("20261016000000_command_operations");
+    await applyMigration("20261016010000_command_approvals");
+    await applyMigration("20261016020000_git_operations");
 
     // Two independent Prisma pools and independently imported stores simulate
     // separate application instances. The database provides coordination.

@@ -61,10 +61,10 @@ class ExecutionCapability {
     }
   }
 
-  static async approvalBinding(context: ExecutionAuthorizationContext): Promise<PrivateOwnerSessionBinding> {
+  static async approvalBinding(context: ExecutionAuthorizationContext, operation: ExecutionOperation): Promise<PrivateOwnerSessionBinding> {
     // Validate provenance before reading any purported scope or private field.
     if (!context || typeof context !== "object" || !(#session in context)) throw new ExecutionAuthorizationError(401);
-    await ExecutionCapability.validate(context, context.projectId, "command");
+    await ExecutionCapability.validate(context, context.projectId, operation);
     try {
       const binding = await resolvePrivateOwnerBinding(context.#session);
       if (!binding || context.signal.aborted) throw new ExecutionAuthorizationError(401);
@@ -204,6 +204,6 @@ export function cancelExecutionAuthorization(context: ExecutionAuthorizationCont
 
 /** Internal approval persistence uses the initiating session, never a model or
  * client's session identifier. Do not serialize this binding into a tool DTO. */
-export async function resolveExecutionSessionBinding(context: ExecutionAuthorizationContext): Promise<PrivateOwnerSessionBinding> {
-  return ExecutionCapability.approvalBinding(context);
+export async function resolveExecutionSessionBinding(context: ExecutionAuthorizationContext, operation: ExecutionOperation = "command"): Promise<PrivateOwnerSessionBinding> {
+  return ExecutionCapability.approvalBinding(context, operation);
 }

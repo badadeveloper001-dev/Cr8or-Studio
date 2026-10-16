@@ -9,6 +9,9 @@ import { appendAuditEvent } from "@/lib/security/audit";
 import { ToolName, ToolContext, ToolResult, ToolMetadata, toolMetadata, toolParameterSchemas, getToolPresetForActor } from "@/lib/agents/tools";
 import { ExecutionAuthorizationError, revalidateExecutionAuthorization } from "@/lib/security/execution-context";
 import { getWorkspaceRuntime } from "@/lib/workspace/runtime-factory";
+import { authorizeAgentGitOperation } from "@/lib/security/git-authorization";
+import { parseGitOperation } from "@/lib/security/git-operation-catalogue";
+import { assertPrivateGitAvailable } from "@/lib/workspace/private-git-availability";
 
 async function getRuntime(context: ToolContext) {
   return getWorkspaceRuntime(context.projectId, context.authorization);
@@ -174,6 +177,10 @@ async function executeWriteFile(params: { path: string; content: string }, conte
 
 async function executeGitStatus(params: Record<string, never>, context: ToolContext): Promise<ToolResult<{ branch: string; changes: string; changedFiles: Array<{ path: string; status: string }>; changedCount: number }>> {
   const startedAt = new Date().toISOString();
+  if (context.authorization) {
+    await authorizeAgentGitOperation(context.authorization, parseGitOperation({ operation: "status" }), context);
+    assertPrivateGitAvailable();
+  }
   const runtime = await getRuntime(context);
 
   try {
@@ -204,6 +211,10 @@ async function executeGitStatus(params: Record<string, never>, context: ToolCont
 
 async function executeGitDiff(params: { path?: string; staged?: boolean }, context: ToolContext): Promise<ToolResult<{ diff: string; stagedDiff: string }>> {
   const startedAt = new Date().toISOString();
+  if (context.authorization) {
+    await authorizeAgentGitOperation(context.authorization, parseGitOperation({ operation: "diff", paths: params.path ? [params.path] : [], staged: params.staged }), context);
+    assertPrivateGitAvailable();
+  }
   const runtime = await getRuntime(context);
 
   try {

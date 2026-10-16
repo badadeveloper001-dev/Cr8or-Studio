@@ -1,4 +1,6 @@
 import { withPrivateApiAuth } from "@/lib/security/private-api";
+import { getPrivateAuthMode } from "@/lib/security/private-auth-mode";
+import { handlePrivateGitOperation } from "@/lib/security/private-git-http";
 import { Buffer } from "node:buffer";
 
 import { NextRequest, NextResponse } from "next/server";
@@ -88,6 +90,7 @@ function requireRepo(payload: z.infer<typeof bodySchema>) {
 
 async function POSTHandler(request: NextRequest) {
   return withRouteMetrics("api/github/api", async (request: NextRequest, { requestId }) => {
+  if (getPrivateAuthMode() !== "inactive") return handlePrivateGitOperation(request, requestId, "github");
   try {
     const token = getSecretWithFallback(["GITHUB_TOKEN", "GH_TOKEN"], requestId).value;
     if (!token) {

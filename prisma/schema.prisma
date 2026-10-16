@@ -198,3 +198,57 @@ model CommandApproval {
   @@index([sessionId, createdAt])
   @@index([expiresAt])
 }
+
+// Operation-specific Git approvals use the same lifecycle and session-generation
+// binding as command approvals. Scope is a canonical server-resolved snapshot;
+// the digest binds the exact operation fields without retaining file contents.
+model GitApproval {
+  id                  String                @id @db.Uuid
+  ownerId             String                @default("owner")
+  sessionId           String                @db.VarChar(128)
+  credentialVersion   Int
+  projectId           String                @db.VarChar(256)
+  workspaceRecordId   String                @db.VarChar(256)
+  providerWorkspaceId String                @db.VarChar(256)
+  repositoryKey       String                @db.VarChar(256)
+  operationKey        String                @db.VarChar(64)
+  scope               Json
+  scopeDigest         String                @db.Char(64)
+  status              CommandApprovalStatus @default(PENDING)
+  createdAt           DateTime              @default(now())
+  expiresAt           DateTime
+  decidedAt           DateTime?
+  revokedAt           DateTime?
+  consumedAt          DateTime?
+  consumedOperationId String?               @unique @db.Uuid
+  consumedActorId     String?               @db.VarChar(64)
+
+  @@index([sessionId, createdAt])
+  @@index([expiresAt])
+}
+
+// Audit snapshots do not grant authority. SQL partial unique indexes retain one
+// unresolved operation per repository AND provider workspace. UNKNOWN is never
+// automatically retried or reclaimed; operator reconciliation is required.
+model GitOperation {
+  id                    String                 @id @db.Uuid
+  projectId             String                 @db.VarChar(256)
+  workspaceId           String                 @db.VarChar(256)
+  repositoryKey         String                 @db.VarChar(256)
+  operationKey          String                 @db.VarChar(64)
+  scopeDigest           String                 @db.Char(64)
+  actorId               String                 @db.VarChar(64)
+  executionId           String                 @db.Uuid
+  status                CommandOperationStatus @default(RESERVED)
+  createdAt             DateTime               @default(now())
+  startedAt             DateTime?
+  completedAt           DateTime?
+  updatedAt             DateTime               @updatedAt
+  exitCode              Int?
+  cancellationConfirmed Boolean                @default(false)
+  cleanupConfirmed      Boolean                @default(false)
+
+  @@index([repositoryKey, createdAt])
+  @@index([workspaceId, createdAt])
+  @@index([completedAt])
+}
