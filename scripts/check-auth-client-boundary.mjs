@@ -8,6 +8,15 @@ const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
 const nextCli = fileURLToPath(import.meta.resolve("next/dist/bin/next"));
 const sourceFiles = [
   "src/lib/security/access-code.ts",
+  "src/lib/security/command-authorization.ts",
+  "src/lib/security/command-approvals.ts",
+  "src/lib/security/command-catalogue.ts",
+  "src/lib/security/command-operation-store.ts",
+  "src/lib/security/policy.ts",
+  "src/lib/security/approvals.ts",
+  "src/lib/agents/tools.ts",
+  "src/lib/agents/types.ts",
+  "src/lib/workspace/runtime.ts",
   "src/lib/security/owner-management.ts",
   "src/lib/security/session-store.ts",
   "src/lib/security/execution-context.ts",
@@ -23,6 +32,9 @@ const sourceFiles = [
   "src/lib/db/prisma.ts",
 ];
 const probes = [
+  { module: "command-approvals", exportedFunction: "createPrivateCommandApproval" },
+  { module: "command-authorization", exportedFunction: "authorizeDevelopmentCommand" },
+  { module: "command-operation-store", exportedFunction: "readCommandOperation" },
   { module: "access-code", exportedFunction: "hashAccessCode" },
   { module: "owner-management", exportedFunction: "provisionOwner" },
   { module: "execution-context", exportedFunction: "cancelExecutionAuthorization" },

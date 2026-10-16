@@ -8,6 +8,7 @@ export type RiskLevel = "low" | "medium" | "high";
 
 export type RiskAction =
   | "files.write"
+  | "commands.execute"
   | "git.commit-push"
   | "github.write"
   | "deploy.vercel"
@@ -24,6 +25,7 @@ declare global {
 
 const ACTION_RISK: Record<RiskAction, RiskLevel> = {
   "files.write": "medium",
+  "commands.execute": "high",
   "git.commit-push": "high",
   "github.write": "high",
   "deploy.vercel": "high",

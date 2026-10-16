@@ -129,3 +129,72 @@ model AuthRateLimit {
   @@id([scope, keyHash])
   @@index([expiresAt])
 }
+
+enum CommandOperationStatus {
+  RESERVED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  TIMED_OUT
+  CANCELLED
+  UNKNOWN
+}
+
+// Server-internal coordination and audit metadata only. The migration adds RLS,
+// lifecycle constraints, and a partial unique index allowing one unresolved
+// operation per exact provider workspace. UNKNOWN deliberately holds that slot
+// until trusted operator reconciliation. No session token or output is stored.
+// Historical project/workspace identifiers are snapshots, not authorization.
+model CommandOperation {
+  id                    String                 @id @db.Uuid
+  projectId             String                 @db.VarChar(256)
+  workspaceId           String                 @db.VarChar(256)
+  commandKey            String                 @db.VarChar(64)
+  actorId               String                 @db.VarChar(64)
+  executionId           String                 @db.Uuid
+  status                CommandOperationStatus @default(RESERVED)
+  createdAt             DateTime               @default(now())
+  startedAt             DateTime?
+  completedAt           DateTime?
+  updatedAt             DateTime               @updatedAt
+  exitCode              Int?
+  cancellationConfirmed Boolean                @default(false)
+  cleanupConfirmed      Boolean                @default(false)
+
+  @@index([workspaceId, createdAt])
+  @@index([completedAt])
+}
+
+
+enum CommandApprovalStatus {
+  PENDING
+  APPROVED
+  DENIED
+  REVOKED
+}
+
+// Durable, one-use command approvals. Identity fields are immutable snapshots,
+// deliberately without cascading foreign keys so session/project cleanup does
+// not erase the approval audit trail. Every use revalidates live records.
+// SQL adds RLS, bounded lifetime, catalogue and lifecycle CHECK constraints.
+model CommandApproval {
+  id                      String                @id @db.Uuid
+  ownerId                 String                @default("owner")
+  sessionId               String                @db.VarChar(128)
+  credentialVersion       Int
+  projectId               String                @db.VarChar(256)
+  workspaceRecordId       String                @db.VarChar(256)
+  providerWorkspaceId     String                @db.VarChar(256)
+  commandKey              String                @db.VarChar(64)
+  status                  CommandApprovalStatus @default(PENDING)
+  createdAt               DateTime              @default(now())
+  expiresAt               DateTime
+  decidedAt               DateTime?
+  revokedAt               DateTime?
+  consumedAt              DateTime?
+  consumedOperationId     String?               @unique @db.Uuid
+  consumedActorId         String?               @db.VarChar(64)
+
+  @@index([sessionId, createdAt])
+  @@index([expiresAt])
+}

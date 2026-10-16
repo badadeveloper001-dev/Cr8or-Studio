@@ -173,6 +173,30 @@ export class DaytonaProvider {
     }
   }
 
+  /** Read-only admission checks. These metadata checks are necessary but cannot
+   * attest sandbox contents, peer processes, or immutable isolation; the command
+   * release restriction remains closed. Never create/recover/reconfigure here. */
+  async getPrivateCommandSessionProcess(providerWorkspaceId: string): Promise<Process> {
+    const unavailable = () => new ExecutionAuthorizationError(503, "The registered command environment is unavailable.");
+    if (typeof providerWorkspaceId !== "string" || !providerWorkspaceId.trim() ||
+        Buffer.byteLength(providerWorkspaceId, "utf8") > 256 || providerWorkspaceId.includes("\0")) throw unavailable();
+    try {
+      this.privateFileClient ??= new Daytona({ apiKey: this.config.apiKey, apiUrl: this.config.apiUrl,
+        requestTimeoutMs: 5_000, useDeprecatedPolling: true });
+      const sandbox = await this.privateFileClient.get(providerWorkspaceId);
+      if (sandbox.id !== providerWorkspaceId || sandbox.state !== "started" || sandbox.user !== "daytona" ||
+          sandbox.public !== false || sandbox.networkBlockAll !== true || sandbox.linkedSandboxId ||
+          sandbox.networkAllowList || sandbox.domainAllowList || sandbox.outboundProxyUrl ||
+          !Array.isArray(sandbox.volumes) || sandbox.volumes.length !== 0 ||
+          !sandbox.env || typeof sandbox.env !== "object" || Array.isArray(sandbox.env) || Object.keys(sandbox.env).length !== 0 ||
+          sandbox.gpu !== 0 ||
+          !Number.isFinite(sandbox.cpu) || sandbox.cpu <= 0 || sandbox.cpu > 2 ||
+          !Number.isFinite(sandbox.memory) || sandbox.memory <= 0 || sandbox.memory > 4 ||
+          !Number.isFinite(sandbox.disk) || sandbox.disk <= 0 || sandbox.disk > 10) throw unavailable();
+      return sandbox.process;
+    } catch { throw unavailable(); }
+  }
+
   getSandboxGit(sandbox: Sandbox): Git {
     return sandbox.git;
   }

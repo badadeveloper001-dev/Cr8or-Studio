@@ -1,6 +1,10 @@
 import "server-only";
 
 import path from "node:path";
+import { validateCommandRequest } from "@/lib/security/command-catalogue";
+import { validateCommandAuthorization } from "@/lib/security/command-authorization";
+import { assertPrivateCloudCommandAvailable } from "@/lib/workspace/private-cloud-command-availability";
+import { privateCloudCommandSession } from "@/lib/workspace/private-cloud-command-session";
 import { cloudPath, CLOUD_REPOSITORY_ROOT, shellQuote } from "@/lib/workspace/cloud-path";
 import { Sandbox } from "@daytona/sdk";
 import { DaytonaProvider } from "@/lib/workspace/providers/daytona";
@@ -300,6 +304,18 @@ export class CloudWorkspaceRuntime {
   }
 
   async runCommand(request: ValidatedCommandRequest): Promise<CommandResult> {
+    await this.authorize("command");
+    if (this.isPrivate()) {
+      // Independent of flags, requests, model arguments and the cloud-write gate.
+      assertPrivateCloudCommandAvailable();
+      validateCommandRequest(request);
+      await validateCommandAuthorization(request.commandAuthorization, this.config.authorization, request);
+      const process = await this.provider.getPrivateCommandSessionProcess(this.config.providerWorkspaceId);
+      await this.authorize("command");
+      return privateCloudCommandSession(process, this.projectId, this.config.providerWorkspaceId,
+        request, this.config.authorization);
+    }
+    validateCommandRequest(request);
     const result = await this.executeCommandInSandbox(request.command);
     return {
       stdout: result.stdout,

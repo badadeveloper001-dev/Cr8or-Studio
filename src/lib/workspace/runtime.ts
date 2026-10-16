@@ -1,4 +1,5 @@
 import type { SandboxCommandRule } from "@/lib/security/sandbox";
+import type { CommandAuthorization } from "@/lib/security/command-authorization";
 
 export type WorkspaceRuntimeType = "local" | "cloud";
 
@@ -36,6 +37,9 @@ export interface CommandResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+  operationId?: string;
+  status?: string;
+  cancellationConfirmed?: boolean;
 }
 
 export interface ValidatedCommandRequest {
@@ -43,6 +47,8 @@ export interface ValidatedCommandRequest {
   commandKey: string;
   rules: readonly SandboxCommandRule[];
   timeoutMs?: number;
+  /** Opaque server-only policy grant. Caller rules never establish authority. */
+  commandAuthorization?: CommandAuthorization;
 }
 
 export interface WorkspaceRuntime {

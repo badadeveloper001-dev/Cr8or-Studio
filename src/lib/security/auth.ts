@@ -30,13 +30,27 @@ class PrivateOwnerProof {
   static matches(proof: PrivateOwnerProof | undefined, candidate: AuthSession): proof is PrivateOwnerProof {
     return !!proof && typeof proof === "object" && #session in proof && proof.#session === candidate;
   }
-  static async validate(proof: PrivateOwnerProof | undefined, candidate: AuthSession): Promise<boolean> {
-    if (!PrivateOwnerProof.matches(proof, candidate)) return false;
+  static async binding(proof: PrivateOwnerProof | undefined, candidate: AuthSession): Promise<PrivateOwnerSessionBinding | null> {
+    if (!PrivateOwnerProof.matches(proof, candidate)) return null;
     readPrivateAuthConfig();
     const current = await resolveSessionById(proof.#id);
-    return current !== null && current.ownerId === "owner" && current.credentialVersion === proof.#version;
+    if (!current || current.ownerId !== "owner" || current.credentialVersion !== proof.#version) return null;
+    return Object.freeze({ ownerId: "owner" as const, sessionId: current.id,
+      credentialVersion: current.credentialVersion, expiresAt: current.expiresAt });
+  }
+  static async validate(proof: PrivateOwnerProof | undefined, candidate: AuthSession): Promise<boolean> {
+    return await PrivateOwnerProof.binding(proof, candidate) !== null;
   }
 }
+
+/** Server-internal persistence binding, never a browser/model/audit DTO. An ID
+ * alone proves nothing: only this resolver can extract it from the private proof. */
+export type PrivateOwnerSessionBinding = Readonly<{
+  ownerId: "owner";
+  sessionId: string;
+  credentialVersion: number;
+  expiresAt: Date;
+}>;
 
 export type WorkspaceRole = "owner" | "maintainer" | "viewer";
 
@@ -178,6 +192,12 @@ export function isVerifiedPrivateOwnerSession(session: AuthSession): boolean {
 export async function revalidatePrivateOwnerSession(session: AuthSession): Promise<boolean> {
   if (!isVerifiedPrivateOwnerSession(session)) return false;
   return PrivateOwnerProof.validate(session[REVALIDATE_PRIVATE_OWNER], session);
+}
+
+/** Revalidates before revealing the internal reference to trusted persistence. */
+export async function resolvePrivateOwnerBinding(session: AuthSession): Promise<PrivateOwnerSessionBinding | null> {
+  if (!isVerifiedPrivateOwnerSession(session)) return null;
+  return PrivateOwnerProof.binding(session[REVALIDATE_PRIVATE_OWNER], session);
 }
 
 export function recordAccessDenied(input: {

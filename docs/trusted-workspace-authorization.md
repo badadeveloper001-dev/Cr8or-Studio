@@ -148,3 +148,13 @@ not investigated or bypassed by this stage.
 Production authentication remains unactivated. This change requires no database
 migration, production settings update, real credential provisioning, merge, or
 manual deployment. Review this boundary independently before further stages.
+
+## Development command implementation (Phase 1A-3E)
+
+The fixed command catalogue now feeds an opaque policy-bound command grant,
+PostgreSQL operation coordination and a bounded Daytona session supervisor.
+Private commands remain behind a hardcoded release restriction; cloud-write,
+Git and deployment restrictions remain unchanged. See
+[the command execution review](reviews/phase-1a-3e-command-execution.md) for the
+protocol, additive migration, limits, cancellation evidence and required provider
+isolation verification. This implementation does not activate authentication.
