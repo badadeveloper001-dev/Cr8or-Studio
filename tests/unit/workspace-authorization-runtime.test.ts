@@ -198,6 +198,44 @@ describe("private cloud runtime boundary", () => {
     expect(process.executeCommand).not.toHaveBeenCalled();
   });
 
+  it("blocks authorized private writes without transporting raw or encoded content", async () => {
+    const { runtime, files, process } = setup();
+    await runtime.initialize();
+    const content = "private source 🌍\r\n\0$(touch injected)";
+    await expect(runtime.writeFile("file.txt", content)).rejects.toMatchObject({ status: 503 });
+    expect(mocks.revalidate).toHaveBeenCalledWith(context, projectId, "write");
+    expect(files.uploadFile).not.toHaveBeenCalled();
+    expect(files.createFolder).not.toHaveBeenCalled();
+    expect(process.executeCommand).not.toHaveBeenCalled();
+  });
+
+  it("rejects writes with read-only authorization before contacting the filesystem transport", async () => {
+    const { runtime, files, process } = setup();
+    await runtime.initialize();
+    mocks.revalidate.mockImplementation(async (candidate, id, permission) => {
+      if (candidate !== context || id !== projectId || permission !== "read") throw new Error("Write not authorized");
+    });
+    await expect(runtime.writeFile("file.txt", "no")).rejects.toThrow("Write not authorized");
+    expect(files.uploadFile).not.toHaveBeenCalled();
+    expect(files.createFolder).not.toHaveBeenCalled();
+    expect(process.executeCommand).not.toHaveBeenCalled();
+  });
+
+  it("preserves exact UTF-8 contents for the supported inactive-stage SDK write path", async () => {
+    const { provider, files, process } = setup();
+    vi.stubEnv("CR8OR_PRIVATE_AUTH_ENABLED", "false");
+    vi.stubEnv("CR8OR_PRIVATE_AUTH_ORIGIN", undefined);
+    vi.stubEnv("CR8OR_PRIVATE_AUTH_RATE_LIMIT_KEY", undefined);
+    mocks.revalidate.mockResolvedValue(undefined);
+    const runtime = new CloudWorkspaceRuntime({ id: `cloud-${projectId}`, projectId,
+      provider: provider as unknown as DaytonaProvider, providerWorkspaceId: "historical-sandbox", createdAt: new Date() });
+    await runtime.initialize();
+    const content = "exact source 🌍\r\n\t\0e\u0301\n'\"$(touch injected)";
+    await expect(runtime.writeFile("nested/file.txt", content)).resolves.toEqual({ bytes: Buffer.byteLength(content, "utf8") });
+    expect(files.uploadFile).toHaveBeenCalledExactlyOnceWith(Buffer.from(content, "utf8"), "repo/nested/file.txt");
+    expect(process.executeCommand).not.toHaveBeenCalled();
+  });
+
   it("suppresses results when the session is revoked during an external operation", async () => {
     const { runtime, process } = setup();
     await runtime.initialize();

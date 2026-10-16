@@ -128,7 +128,7 @@ handling on routes with GET passes through the protected GET boundary.
 | `/api/projects/workspace` | POST: recent/open/create/clone | Cloud listing/open/reuse is guarded; local directory management and new cloud provisioning remain unavailable in private mode. |
 | `/api/workspaces` | GET: list cloud projects; POST: create/clone cloud project | Protected listing and existing repository reuse; new provisioning returns `503` in private mode. |
 | `/api/workspaces/[projectId]/preview` | POST: start/refresh/stop preview | Returns `503` in private mode pending process/URL lifecycle authorization. |
-| `/api/files` | GET: list/read; POST: write | Verified registered project/runtime binding, per-operation session revalidation, path containment, and existing write policy. |
+| `/api/files` | GET: list/read; POST: write | Verified registered project/runtime binding, per-operation session revalidation, path containment, and existing write policy. Private cloud writes are unavailable; private POST bodies are bounded. |
 | `/api/github/api` | POST: list/read repositories, branches, files and checks; upsert file/create branch/create PR | Protected external read/write; authentication precedes secret access, and existing write-role/ownership/policy checks remain. |
 | `/api/github/ops` | POST: status/diff/stage/unstage/commit-push | Returns `503` in private mode until local commands have an isolation boundary. |
 | `/api/deploy` | POST: build/deploy | Returns `503` in private mode until local command/deployment lifecycle authorization is complete. |

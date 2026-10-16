@@ -6,7 +6,7 @@ import { Sandbox } from "@daytona/sdk";
 import { DaytonaProvider } from "@/lib/workspace/providers/daytona";
 import { getPrivateAuthMode } from "@/lib/security/private-auth-mode";
 import { ExecutionAuthorizationError, revalidateExecutionAuthorization, type ExecutionAuthorizationContext, type ExecutionOperation } from "@/lib/security/execution-context";
-import { privateCloudFileOperation } from "@/lib/workspace/private-cloud-files";
+import { privateCloudFileOperation, rejectPrivateCloudWrite } from "@/lib/workspace/private-cloud-files";
 import {
   WorkspaceMetadata,
   GitStatusResult,
@@ -206,9 +206,9 @@ export class CloudWorkspaceRuntime {
   async writeFile(relPath: string, content: string): Promise<{ bytes: number }> {
     await this.authorize("write");
     if (this.isPrivate()) {
-      const result = await privateCloudFileOperation(this.getProcess(), "write", relPath, content);
-      await this.authorize("write");
-      return result;
+      // Authorization still precedes the staging restriction. Never pass file
+      // contents to command arguments or a pathname-only upload fallback.
+      rejectPrivateCloudWrite(content);
     }
     const absolutePath = cloudPath(relPath);
     const fs = this.getFileSystem();

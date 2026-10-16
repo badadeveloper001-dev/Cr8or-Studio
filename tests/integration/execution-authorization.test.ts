@@ -9,6 +9,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import type { AuthSession } from "@/lib/security/auth";
 import type { ExecutionAuthorizationContext } from "@/lib/security/execution-context";
 import type { ToolContext } from "@/lib/agents/tools";
+import type { DaytonaProvider } from "@/lib/workspace/providers/daytona";
 
 vi.mock("server-only", () => ({}));
 const model = vi.hoisted(() => ({ generate: vi.fn() }));
@@ -61,6 +62,7 @@ describe.skipIf(!testUrl)("trusted execution authorization on isolated PostgreSQ
   let owners: typeof import("@/lib/security/owner-management");
   let execution: typeof import("@/lib/security/execution-context");
   let runtimes: typeof import("@/lib/workspace/runtime-factory");
+  let cloudRuntime: typeof import("@/lib/workspace/runtime-cloud");
   let tools: typeof import("@/lib/agents/tool-executor");
   let policy: typeof import("@/lib/security/policy");
   let chat: typeof import("@/app/api/chat/main/route");
@@ -102,6 +104,25 @@ describe.skipIf(!testUrl)("trusted execution authorization on isolated PostgreSQ
       requestId: "synthetic-execution-request", actorId, actorRole: "agent" };
   }
 
+  function privateCloudRuntime(authorization?: ExecutionAuthorizationContext, providerWorkspaceId = "historical-provider-id") {
+    const content = "synthetic cloud source\nconst label = 'café 🚀';\n";
+    const remoteProcess = { executeCommand: vi.fn().mockResolvedValue({ exitCode: 0,
+      result: JSON.stringify({ ok: true, data: { content, bytes: Buffer.byteLength(content, "utf8") } }) }) };
+    const files = { uploadFile: vi.fn(), downloadFile: vi.fn(), createFolder: vi.fn(), listFiles: vi.fn() };
+    const provider = {
+      getSandbox: vi.fn().mockResolvedValue({ id: "historical-provider-id", state: "started" }),
+      getSandboxProcess: vi.fn().mockReturnValue(remoteProcess),
+      getSandboxFileSystem: vi.fn().mockReturnValue(files),
+      createSandbox: vi.fn(), ensureSandbox: vi.fn(), findSandboxByName: vi.fn(),
+    };
+    const runtime = new cloudRuntime.CloudWorkspaceRuntime({
+      id: authorization?.workspace.id ?? "untrusted-runtime", projectId: CLOUD_PROJECT_ID,
+      provider: provider as unknown as DaytonaProvider, providerWorkspaceId,
+      createdAt: new Date(), authorization,
+    });
+    return { runtime, remoteProcess, files, provider, content };
+  }
+
   async function applyMigration(directory: string) {
     const sql = await fs.readFile(path.join(process.cwd(), "prisma/migrations", directory, "migration.sql"), "utf8");
     const statements = sql.replace(/^\s*--.*$/gm, "").split(";").map((value) => value.trim())
@@ -136,6 +157,7 @@ describe.skipIf(!testUrl)("trusted execution authorization on isolated PostgreSQ
     owners = await import("@/lib/security/owner-management");
     execution = await import("@/lib/security/execution-context");
     runtimes = await import("@/lib/workspace/runtime-factory");
+    cloudRuntime = await import("@/lib/workspace/runtime-cloud");
     tools = await import("@/lib/agents/tool-executor");
     policy = await import("@/lib/security/policy");
     chat = await import("@/app/api/chat/main/route");
@@ -291,6 +313,122 @@ describe.skipIf(!testUrl)("trusted execution authorization on isolated PostgreSQ
     } });
     await expect(runtimes.getWorkspaceRuntime(CLOUD_PROJECT_ID, authorization)).rejects.toMatchObject({ status: 409 });
     expect(authorization.signal.aborted).toBe(true);
+  });
+
+  it("blocks private cloud writes for a valid owner before command or file-transfer dispatch", async () => {
+    const { authorization } = await capability(CLOUD_PROJECT_ID);
+    const { runtime, remoteProcess, files, provider } = privateCloudRuntime(authorization);
+    await runtime.initialize();
+    await expect(runtime.writeFile("source.ts", "private content must never enter command arguments"))
+      .rejects.toMatchObject({ status: 503 });
+    expect(remoteProcess.executeCommand).not.toHaveBeenCalled();
+    expect(provider.getSandboxFileSystem).not.toHaveBeenCalled();
+    expect(files.uploadFile).not.toHaveBeenCalled();
+    expect(files.createFolder).not.toHaveBeenCalled();
+    expect(provider.createSandbox).not.toHaveBeenCalled();
+    expect(provider.ensureSandbox).not.toHaveBeenCalled();
+  });
+
+  it("preserves bounded private cloud reads and listings through the registered provider binding", async () => {
+    const { authorization } = await capability(CLOUD_PROJECT_ID);
+    const { runtime, remoteProcess, files, provider, content } = privateCloudRuntime(authorization);
+    await runtime.initialize();
+    await expect(runtime.readFile("source.ts")).resolves.toEqual({ content, bytes: Buffer.byteLength(content, "utf8") });
+    const entries = [{ name: "source.ts", type: "file" }, { name: "src", type: "directory" }];
+    remoteProcess.executeCommand.mockResolvedValueOnce({ exitCode: 0, result: JSON.stringify({ ok: true, data: entries }) });
+    await expect(runtime.listFiles()).resolves.toEqual(entries);
+    expect(provider.getSandbox).toHaveBeenCalledExactlyOnceWith("historical-provider-id");
+    expect(remoteProcess.executeCommand).toHaveBeenCalledTimes(2);
+    expect(files.downloadFile).not.toHaveBeenCalled();
+    expect(files.listFiles).not.toHaveBeenCalled();
+    expect(provider.createSandbox).not.toHaveBeenCalled();
+    expect(provider.ensureSandbox).not.toHaveBeenCalled();
+    expect(provider.findSandboxByName).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing", "fabricated"] as const)("rejects %s cloud execution capabilities before provider access", async (kind) => {
+    const { authorization } = await capability(CLOUD_PROJECT_ID);
+    const untrusted = kind === "missing" ? undefined : { ...authorization };
+    const { runtime, provider, remoteProcess, files } = privateCloudRuntime(untrusted as ExecutionAuthorizationContext | undefined);
+    await expect(runtime.initialize()).rejects.toMatchObject({ status: 401 });
+    await expect(runtime.writeFile("source.ts", "unauthorized")).rejects.toMatchObject({ status: 401 });
+    expect(provider.getSandbox).not.toHaveBeenCalled();
+    expect(remoteProcess.executeCommand).not.toHaveBeenCalled();
+    expect(files.uploadFile).not.toHaveBeenCalled();
+  });
+
+  it("rejects cloud writes outside the initiating execution permissions before transport", async () => {
+    const { authorization } = await capability(CLOUD_PROJECT_ID, ["read"]);
+    const { runtime, remoteProcess, files } = privateCloudRuntime(authorization);
+    await runtime.initialize();
+    await expect(runtime.writeFile("source.ts", "unauthorized")).rejects.toMatchObject({ status: 403 });
+    expect(remoteProcess.executeCommand).not.toHaveBeenCalled();
+    expect(files.uploadFile).not.toHaveBeenCalled();
+  });
+
+  it.each(["revoked", "expired", "obsolete", "rotated"] as const)("rejects a cloud write after its session becomes %s without contacting the provider", async (state) => {
+    const { authorization, session } = await capability(CLOUD_PROJECT_ID);
+    const { runtime, remoteProcess, files, content } = privateCloudRuntime(authorization);
+    await runtime.initialize();
+    await expect(runtime.readFile("source.ts")).resolves.toMatchObject({ content });
+    remoteProcess.executeCommand.mockClear();
+    if (state === "revoked") await sessions.revokeSession(session.id);
+    if (state === "expired") await database.authSession.update({ where: { id: session.id }, data: {
+      authenticatedAt: new Date(Date.now() - 120_000), createdAt: new Date(Date.now() - 120_000), expiresAt: new Date(Date.now() - 60_000),
+    } });
+    if (state === "obsolete") await database.ownerCredential.update({ where: { id: "owner" }, data: { credentialVersion: { increment: 1 } } });
+    if (state === "rotated") await owners.rotateOwnerAccessCode("7");
+    await expect(runtime.writeFile("source.ts", "unauthorized")).rejects.toMatchObject({ status: 401 });
+    expect(authorization.signal.aborted).toBe(true);
+    expect(remoteProcess.executeCommand).not.toHaveBeenCalled();
+    expect(files.uploadFile).not.toHaveBeenCalled();
+  });
+
+  it("rejects cloud runtime identifier substitution before provider access", async () => {
+    const { authorization } = await capability(CLOUD_PROJECT_ID);
+    const { runtime, provider, remoteProcess, files } = privateCloudRuntime(authorization, "unrelated-provider-id");
+    await expect(runtime.initialize()).rejects.toMatchObject({ status: 403 });
+    await expect(runtime.writeFile("source.ts", "unauthorized")).rejects.toMatchObject({ status: 403 });
+    expect(provider.getSandbox).not.toHaveBeenCalled();
+    expect(remoteProcess.executeCommand).not.toHaveBeenCalled();
+    expect(files.uploadFile).not.toHaveBeenCalled();
+  });
+
+  it("rejects cloud writes when the persisted workspace binding changes after initialization", async () => {
+    const { authorization } = await capability(CLOUD_PROJECT_ID);
+    const { runtime, remoteProcess, files } = privateCloudRuntime(authorization);
+    await runtime.initialize();
+    await database.workspace.update({ where: { projectId: CLOUD_PROJECT_ID }, data: { providerWorkspaceId: "unrelated-provider-id" } });
+    await expect(runtime.writeFile("source.ts", "unauthorized")).rejects.toMatchObject({ status: 409 });
+    expect(remoteProcess.executeCommand).not.toHaveBeenCalled();
+    expect(files.uploadFile).not.toHaveBeenCalled();
+  });
+
+  it("withholds cloud read results and prevents subsequent writes after revocation during transport", async () => {
+    const { authorization, session } = await capability(CLOUD_PROJECT_ID);
+    const { runtime, remoteProcess, files, content } = privateCloudRuntime(authorization);
+    await runtime.initialize();
+    remoteProcess.executeCommand.mockImplementationOnce(async () => {
+      await sessions.revokeSession(session.id);
+      return { exitCode: 0, result: JSON.stringify({ ok: true, data: { content, bytes: Buffer.byteLength(content, "utf8") } }) };
+    });
+    await expect(runtime.readFile("source.ts")).rejects.toMatchObject({ status: 401 });
+    await expect(runtime.writeFile("source.ts", "unauthorized")).rejects.toMatchObject({ status: 401 });
+    expect(authorization.signal.aborted).toBe(true);
+    expect(remoteProcess.executeCommand).toHaveBeenCalledOnce();
+    expect(files.uploadFile).not.toHaveBeenCalled();
+  });
+
+  it("rejects cloud path traversal without dispatching a filesystem command", async () => {
+    const { authorization } = await capability(CLOUD_PROJECT_ID);
+    const { runtime, remoteProcess, files } = privateCloudRuntime(authorization);
+    await runtime.initialize();
+    for (const target of ["../outside.txt", "/etc/passwd", "nested/../../outside.txt"]) {
+      await expect(runtime.readFile(target)).rejects.toThrow();
+      await expect(runtime.writeFile(target, "unauthorized")).rejects.toThrow();
+    }
+    expect(remoteProcess.executeCommand).not.toHaveBeenCalled();
+    expect(files.uploadFile).not.toHaveBeenCalled();
   });
 
   it("rejects a project removed during execution", async () => {

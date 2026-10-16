@@ -4,6 +4,10 @@ Base: PR #4, `cr8or-005-authorization-improvements`, reviewed HEAD
 `1489719686c1a708a545ea3d8885bc2ab379d2a5`.
 Implementation branch: `cr8or-006-workspace-authorization`.
 
+The subsequent [cloud transport correction](phase-1a-3b-cloud-transport-review.md)
+removes the original private cloud write transport and records its own validation.
+The results below describe the initial CR8OR-006 implementation.
+
 ## Result
 
 Agent, chat, and orchestration execution now carry a server-created immutable

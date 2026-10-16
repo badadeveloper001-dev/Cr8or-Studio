@@ -6,6 +6,8 @@ import { evaluatePolicyGuard } from "@/lib/security/policy";
 import { errorResponse } from "@/lib/http/api-response";
 import { redactText } from "@/lib/security/redaction";
 import { ExecutionAuthorizationError } from "@/lib/security/execution-context";
+import { getPrivateAuthMode } from "@/lib/security/private-auth-mode";
+import { PrivateFileWriteBodyError, readPrivateFileWriteBody } from "@/lib/security/private-file-write-body";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -33,8 +35,9 @@ async function GETHandler(request: NextRequest) {
 }
 const writeSchema = z.object({ projectId: z.string().default("cr8or-studio"), path: z.string().min(1), content: z.string(), dryRun: z.boolean().optional(), approvalId: z.string().uuid().optional() });
 async function POSTHandler(request: NextRequest) {
+  const privateMode = getPrivateAuthMode() === "required";
   try {
-    const payload = writeSchema.parse(await request.json());
+    const payload = writeSchema.parse(await (privateMode ? readPrivateFileWriteBody(request) : request.json()));
     const access = await authorizedRuntime(request, payload.projectId, true);
     if (!access.ok) return access.response;
     const preview = { action: "files.write", path: payload.path, bytes: Buffer.byteLength(payload.content) };
@@ -45,6 +48,8 @@ async function POSTHandler(request: NextRequest) {
     return NextResponse.json({ path: payload.path, saved: true });
   } catch (error) {
     if (error instanceof ExecutionAuthorizationError) return executionFailure(error);
+    if (error instanceof PrivateFileWriteBodyError) return errorResponse({ status: error.status, code: "INVALID_REQUEST", message: error.message });
+    if (privateMode) return errorResponse({ status: 400, code: "INVALID_REQUEST", message: "Unable to save file." });
     return errorResponse({ status: 400, code: "INVALID_REQUEST", message: redactText(error instanceof Error ? error.message : "Unable to save file.") });
   }
 }

@@ -60,14 +60,14 @@ missing files and continuing. Model output cannot replace the authorized scope.
 | `POST /api/chat/main` | Enabled behind the session/project boundary; no-project requests are rejected before model work. |
 | `POST /api/orchestrate` | Enabled behind the session/project boundary and guarded agent pipeline. |
 | `POST /api/orchestrate/stream` | Enabled with guarded, awaited progress emission and cancellation on disconnect. |
-| `GET/POST /api/files` | Registered-project reads/writes through the guarded runtime and existing write policy. |
+| `GET/POST /api/files` | Registered-project reads and local writes through the guarded runtime and existing write policy. Private cloud writes are blocked before content transport. |
 | Existing cloud open/clone selection | Reuses the exact registered project and provider workspace; no read-triggered provisioning, recovery, restart, or remapping. The sandbox must already be running. |
 | New cloud create/clone | Returns `503` until a separately reviewed provisioning lifecycle can bind and revalidate each side effect. |
 | Local directory recent/open/create/clone | Returns `503`; legacy directory selection is not a registered-project authorization boundary. |
 | `POST /api/github/ops`, `POST /api/deploy` | Returns `503`; these legacy local command paths are not an isolated execution boundary. |
 | `POST /api/workspaces/[projectId]/preview` | Returns `503`; persistent processes and signed URLs need a reviewed lifecycle beyond request admission. |
 | Runtime Git/commands | Unavailable in both local and cloud private runtimes: an allowed command and working directory do not constrain scripts or Git helpers to the authorized repository. |
-| Cloud file tools | Operate only on the bound existing Daytona sandbox using a fixed Python 3 filesystem helper, with revalidation before dispatch and after completion. Missing helper support fails closed; there is no unsafe SDK fallback. |
+| Cloud file tools | Bounded reads/lists use a fixed Python 3 helper on the bound existing Daytona sandbox, with revalidation before dispatch and after completion. Private writes return `503` without sending content. There is no unsafe SDK fallback. |
 
 These restrictions apply only when private authentication is selected. Existing
 inactive-stage behavior is preserved. Public authentication exceptions remain
@@ -78,10 +78,11 @@ cookie settings, or 12-hour session lifetime are weakened.
 
 Private local file access rejects traversal, absolute paths, sensitive paths,
 symbolic roots/descendants, and linked files. File opens use no-follow semantics
-and operation boundaries are revalidated. Cloud file operations use a fixed Python helper with directory descriptors,
+and operation boundaries are revalidated. Cloud read/list operations use a fixed Python helper with directory descriptors,
 no-follow opens, and regular-file/link checks inside the repository root. Python
-runs in isolated mode; payloads contain operation, relative path, and file content
-only. This helper never receives authentication data. The local host and Daytona
+runs in isolated mode; command payloads contain only bounded operation/path
+metadata. Private cloud write content is never sent. This helper never receives
+authentication data. The local host and Daytona
 control plane remain trusted infrastructure; path checks are not an OS sandbox.
 
 Historical cloud repository reuse searches the existing canonical repository
@@ -89,6 +90,15 @@ and requested branch before deriving any identity from the new singleton owner.
 Ambiguous matches fail closed. Existing project IDs, Workspace row IDs, Daytona
 IDs, GitHub references, histories, and relationships are not rewritten. No
 schema migration or ownership table is introduced.
+
+The [final cloud transport correction](reviews/phase-1a-3b-cloud-transport-review.md)
+explains why Base64-in-argv writes were removed, the installed SDK transport
+limitations, resource limits, and the requirements for a future safe write path.
+Reads are limited to 256 KiB without truncation; helper output is limited to 2 MiB,
+paths to 4 KiB, directory scans to 4,096 entries and returned listings to 200.
+The remote operation is limited to 30 seconds, with a 35-second local deadline.
+Private file-write HTTP bodies are bounded to 2 MiB and ten seconds before JSON
+parsing; bounded requests still require all existing authorization checks.
 
 ## Revocation and cancellation limits
 
