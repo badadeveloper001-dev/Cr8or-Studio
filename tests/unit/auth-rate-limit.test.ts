@@ -32,6 +32,8 @@ function state(overrides: Partial<AuthRateLimitState> = {}): AuthRateLimitState 
     updatedAt: observedWindow,
     windowExpired: false,
     coolingDown: false,
+    windowRemainingSeconds: 900,
+    cooldownRemainingSeconds: 0,
     ...overrides,
   };
 }
@@ -107,6 +109,14 @@ describe("authentication attempt persistence results", () => {
     await expect(applyAuthCooldown({ ...identity, windowStartedAt: observedWindow, durationMs: 1_000 }))
       .resolves.toEqual(expected);
     expect(database.$queryRaw.mock.calls[0].slice(1)).toContain(observedWindow);
+  });
+
+  it("supports a fixed-window cooldown without an application-clock deadline", async () => {
+    const expected = state({ cooldownUntil: new Date("2026-10-15T12:15:00Z"), coolingDown: true });
+    database.$queryRaw.mockResolvedValue([expected]);
+    await expect(applyAuthCooldown({ ...identity, windowStartedAt: observedWindow, untilWindowEnd: true }))
+      .resolves.toEqual(expected);
+    expect(database.$queryRaw.mock.calls[0].slice(1)).toContain(true);
   });
 
   it("reports the database cleanup count", async () => {

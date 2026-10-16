@@ -14,6 +14,8 @@ export type AuthRateLimitIdentity = {
 export type AuthRateLimitState = AuthRateLimit & {
   windowExpired: boolean;
   coolingDown: boolean;
+  windowRemainingSeconds: number;
+  cooldownRemainingSeconds: number;
 };
 
 export class AuthRateLimitStoreError extends Error {
@@ -92,7 +94,11 @@ export async function recordAuthAttempt({
       )
       SELECT recorded.*,
         recorded."windowExpiresAt" <= clock.at AS "windowExpired",
-        COALESCE(recorded."cooldownUntil" > clock.at, false) AS "coolingDown"
+        COALESCE(recorded."cooldownUntil" > clock.at, false) AS "coolingDown",
+        GREATEST(0, CEIL(EXTRACT(EPOCH FROM (recorded."windowExpiresAt" - clock.at))))::integer
+          AS "windowRemainingSeconds",
+        GREATEST(0, COALESCE(CEIL(EXTRACT(EPOCH FROM (recorded."cooldownUntil" - clock.at))), 0))::integer
+          AS "cooldownRemainingSeconds"
       FROM recorded CROSS JOIN clock
     `;
     if (rows.length !== 1) throw new AuthRateLimitStoreError();
@@ -117,7 +123,11 @@ export async function getAuthRateLimit({
       )
       SELECT limits.*,
         limits."windowExpiresAt" <= clock.at AS "windowExpired",
-        COALESCE(limits."cooldownUntil" > clock.at, false) AS "coolingDown"
+        COALESCE(limits."cooldownUntil" > clock.at, false) AS "coolingDown",
+        GREATEST(0, CEIL(EXTRACT(EPOCH FROM (limits."windowExpiresAt" - clock.at))))::integer
+          AS "windowRemainingSeconds",
+        GREATEST(0, COALESCE(CEIL(EXTRACT(EPOCH FROM (limits."cooldownUntil" - clock.at))), 0))::integer
+          AS "cooldownRemainingSeconds"
       FROM "AuthRateLimit" AS limits CROSS JOIN clock
       WHERE limits."scope" = ${scope}::"AuthRateLimitScope"
         AND limits."keyHash" = ${keyHash}
@@ -131,16 +141,17 @@ export async function getAuthRateLimit({
 /**
  * Applies a bounded cooldown only to the still-live window the caller observed.
  * A stale decision returns null; a concurrent longer cooldown is never shortened.
+ * untilWindowEnd gives fixed-window policies a deadline that traffic cannot extend.
  */
-export async function applyAuthCooldown({
-  scope,
-  keyHash,
-  windowStartedAt,
-  durationMs,
-}: AuthRateLimitIdentity & {
+export async function applyAuthCooldown(options: AuthRateLimitIdentity & {
   windowStartedAt: Date;
-  durationMs: number;
-}): Promise<AuthRateLimitState | null> {
+} & (
+  | { durationMs: number; untilWindowEnd?: false }
+  | { durationMs?: never; untilWindowEnd: true }
+)): Promise<AuthRateLimitState | null> {
+  const { scope, keyHash, windowStartedAt } = options;
+  const untilWindowEnd = options.untilWindowEnd === true;
+  const durationMs = untilWindowEnd ? 1 : options.durationMs;
   validateIdentity({ scope, keyHash });
   validateDuration(durationMs);
   if (!(windowStartedAt instanceof Date) || !Number.isFinite(windowStartedAt.getTime())) {
@@ -154,11 +165,14 @@ export async function applyAuthCooldown({
       ), updated AS (
         UPDATE "AuthRateLimit" AS limits SET
           "cooldownUntil" = GREATEST(
-            limits."cooldownUntil", clock.at + ${durationMs} * INTERVAL '1 millisecond'
+            limits."cooldownUntil",
+            CASE WHEN ${untilWindowEnd} THEN limits."windowExpiresAt"
+              ELSE clock.at + ${durationMs} * INTERVAL '1 millisecond' END
           ),
           "expiresAt" = GREATEST(
             limits."windowExpiresAt", limits."cooldownUntil",
-            clock.at + ${durationMs} * INTERVAL '1 millisecond'
+            CASE WHEN ${untilWindowEnd} THEN limits."windowExpiresAt"
+              ELSE clock.at + ${durationMs} * INTERVAL '1 millisecond' END
           ),
           "updatedAt" = GREATEST(limits."updatedAt", clock.at)
         FROM clock
@@ -170,7 +184,11 @@ export async function applyAuthCooldown({
       )
       SELECT updated.*,
         updated."windowExpiresAt" <= clock.at AS "windowExpired",
-        COALESCE(updated."cooldownUntil" > clock.at, false) AS "coolingDown"
+        COALESCE(updated."cooldownUntil" > clock.at, false) AS "coolingDown",
+        GREATEST(0, CEIL(EXTRACT(EPOCH FROM (updated."windowExpiresAt" - clock.at))))::integer
+          AS "windowRemainingSeconds",
+        GREATEST(0, COALESCE(CEIL(EXTRACT(EPOCH FROM (updated."cooldownUntil" - clock.at))), 0))::integer
+          AS "cooldownRemainingSeconds"
       FROM updated CROSS JOIN clock
     `;
     return rows[0] ?? null;
