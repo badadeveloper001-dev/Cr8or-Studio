@@ -100,6 +100,15 @@ The remote operation is limited to 30 seconds, with a 35-second local deadline.
 Private file-write HTTP bodies are bounded to 2 MiB and ten seconds before JSON
 parsing; bounded requests still require all existing authorization checks.
 
+The subsequent [staged cloud writer](reviews/phase-1a-3d-cloud-file-operations.md)
+implements a bounded session-input protocol, descriptor-relative temporary files,
+and atomic replacement after a fresh PostgreSQL authorization check. Direct file
+requests and agent writes use the same runtime path. Its fixed release restriction
+remains before provider access until separately authorized isolated Daytona
+compatibility verification is complete; there is no environment override. Actual
+temporary-filesystem/PTY tests and controlled SDK adapters do not prove live
+provider compatibility. The one-shot read/list transport still rejects writes.
+
 ## Revocation and cancellation limits
 
 Locking revokes the initiating session in PostgreSQL. Rotation invalidates its

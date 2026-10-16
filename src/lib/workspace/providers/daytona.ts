@@ -1,5 +1,6 @@
 import { Daytona, Sandbox, FileSystem, Process, Git, CreateSandboxFromSnapshotParams } from "@daytona/sdk";
 import type { SandboxState } from "@daytona/api-client";
+import { ExecutionAuthorizationError } from "@/lib/security/execution-context";
 import { WorkspaceMetadata } from "@/lib/workspace/runtime";
 
 interface DaytonaProviderConfig {
@@ -31,6 +32,7 @@ const DEFAULT_SANDBOX_CONFIG: CreateSandboxFromSnapshotParams = {
 
 export class DaytonaProvider {
   private client: Daytona;
+  private privateFileClient: Daytona | undefined;
   private config: DaytonaProviderConfig;
 
   constructor(config: DaytonaProviderConfig) {
@@ -141,6 +143,34 @@ export class DaytonaProvider {
 
   getSandboxProcess(sandbox: Sandbox): Process {
     return sandbox.process;
+  }
+
+  /**
+   * A separate client bounds private file-session HTTP calls without changing
+   * existing runtime behavior. Callers must authorize before retrieval and
+   * again before input/commit; this transport client caches no authorization.
+   */
+  async getPrivateFileSessionProcess(providerWorkspaceId: string): Promise<Process> {
+    const unavailable = () => new ExecutionAuthorizationError(503, "The registered workspace is unavailable.");
+    if (typeof providerWorkspaceId !== "string" || !providerWorkspaceId.trim() ||
+        providerWorkspaceId.length > 256 || Buffer.byteLength(providerWorkspaceId, "utf8") > 256 ||
+        providerWorkspaceId.includes("\0")) throw unavailable();
+    try {
+      this.privateFileClient ??= new Daytona({
+        apiKey: this.config.apiKey,
+        apiUrl: this.config.apiUrl,
+        requestTimeoutMs: 5_000,
+        // Session operations need no lifecycle event subscription. Avoid an
+        // additional persistent event WebSocket for this scoped client.
+        useDeprecatedPolling: true,
+      });
+      const sandbox = await this.privateFileClient.get(providerWorkspaceId);
+      if (sandbox.id !== providerWorkspaceId || sandbox.state !== "started") throw unavailable();
+      return sandbox.process;
+    } catch {
+      // Provider errors can contain request or execution details.
+      throw unavailable();
+    }
   }
 
   getSandboxGit(sandbox: Sandbox): Git {
