@@ -1,26 +1,34 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 
-import { isFeatureEnabled } from "@/lib/config/feature-flags";
-import { internalErrorResponse } from "@/lib/http/api-response";
-import { withRouteMetrics } from "@/lib/observability/sli";
-import { resolveAuthSession } from "@/lib/security/auth";
+import { authError, authJson, readPrivateAuthConfig, readSessionToken } from "@/lib/security/private-auth-http";
+import { resolveOwnerSession } from "@/lib/security/session-store";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+function methodNotAllowed() {
+  const response = authError(405);
+  response.headers.set("Allow", "GET");
+  return response;
+}
 
 export async function GET(request: NextRequest) {
-  return withRouteMetrics("api/auth/session", async (request: NextRequest, { requestId }) => {
-    try {
-      const authEnabled = isFeatureEnabled("authGuard");
-      const session = await resolveAuthSession(request, authEnabled);
-      return NextResponse.json(
-        {
-          ok: true,
-          authEnabled,
-          authenticated: Boolean(session?.authenticated),
-          session,
-        },
-        { status: 200 },
-      );
-    } catch {
-      return internalErrorResponse("Failed to resolve auth session.", requestId);
-    }
-  })(request);
+  if (request.method !== "GET") return methodNotAllowed();
+  try {
+    const config = readPrivateAuthConfig();
+    const token = readSessionToken(request, config);
+    const session = token ? await resolveOwnerSession(token) : null;
+    return authJson(session
+      ? { ok: true, authenticated: true, expiresAt: session.expiresAt.toISOString() }
+      : { ok: true, authenticated: false });
+  } catch {
+    return authError(503);
+  }
 }
+
+export const POST = methodNotAllowed;
+export const HEAD = methodNotAllowed;
+export const PUT = methodNotAllowed;
+export const PATCH = methodNotAllowed;
+export const DELETE = methodNotAllowed;
+export const OPTIONS = methodNotAllowed;

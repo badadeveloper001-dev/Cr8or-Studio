@@ -77,6 +77,11 @@ See [the authentication foundation guide](docs/private-authentication-foundation
 for the schema, session interfaces, release procedure, isolated database tests,
 and remaining activation work.
 
+Phase 1A-2 adds default-disabled private access-code services and trusted operator
+credential management. It does not activate production authentication or protect
+all workspace routes. See [the access-code services guide](docs/private-access-code-authentication.md)
+for operator procedures, API contracts, rate limits, and the later activation boundary.
+
 ## Getting Started
 
 1. Install dependencies:

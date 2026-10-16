@@ -1,5 +1,10 @@
 # Private authentication foundation — Task 1A-1
 
+This document records the foundation stage. The subsequent
+[Phase 1A-2 access-code services](private-access-code-authentication.md) reuse these
+tables and operations; they remain default-disabled and do not activate workspace
+authorization.
+
 Cr8or Studio has one owner and may have several authorized owner devices. This
 stage adds PostgreSQL persistence and server-only operations for later
 authentication work. It does not activate authentication or change existing

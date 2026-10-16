@@ -12,7 +12,10 @@
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration",
-    "test:auth-db": "vitest run tests/integration/auth-foundation.test.ts"
+    "test:auth-db": "vitest run tests/integration/auth-foundation.test.ts tests/integration/private-authentication.test.ts",
+    "test:auth-boundary": "node scripts/check-auth-client-boundary.mjs",
+    "owner:manage": "node --conditions=react-server scripts/manage-owner.mjs",
+    "auth:benchmark": "node --conditions=react-server scripts/benchmark-access-code.mjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.27",
@@ -46,6 +49,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "^15.5.22",
+    "jiti": "2.7.0",
     "prisma": "^6.19.3",
     "tailwindcss": "^4",
     "typescript": "^5",
