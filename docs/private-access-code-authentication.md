@@ -53,10 +53,19 @@ noncanonical encodings before derivation. Equal-length derived values are compar
 with `crypto.timingSafeEqual`. SHA-256 remains exclusively the random session-token
 digest algorithm, not the access-code KDF.
 
-Provisioning and rotation require at least 16 Unicode code points and at most
-1024 UTF-8 bytes, without composition rules. Choose a unique long passphrase or
-a sufficiently long cryptographically random code, not a short numeric PIN or
-predictable repeated characters. Input is never trimmed or normalized. Invalid
+Provisioning, rotation, and authentication accept any nonempty access code up to
+1024 UTF-8 bytes, without a mandatory minimum length or composition rules. A single
+character, short numerical PINs such as `1234` or `123456`, mixed alphanumeric
+codes such as `Studio2026`, and long passphrases are all permitted. This policy is
+the same for hidden-terminal and protected-stdin provisioning. Empty, oversized,
+and malformed inputs remain invalid; whitespace is preserved and counts as input.
+
+Short PINs have lower guessing resistance, including against offline guessing if
+a stored hash is compromised. A unique long passphrase or sufficiently long random
+code is recommended, but choosing a shorter code is never blocked. Scrypt and the
+existing source/global attempt limits remain unchanged; they do not make short
+PINs equivalent in strength to longer unpredictable codes. No extra authentication
+step or complexity requirement is imposed. Input is never trimmed or normalized. Invalid
 UTF-8 request bytes and unpaired UTF-16 surrogate escapes are rejected, preventing
 distinct malformed inputs from collapsing to a replacement character. Verification
 also bounds nonempty input before expensive work.

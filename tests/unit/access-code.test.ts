@@ -12,7 +12,7 @@ vi.mock("node:crypto", async (importOriginal) => {
 
 import {
   AccessCodeFormatError,
-  assertStrongAccessCode,
+  assertAccessCodeInput,
   DUMMY_ACCESS_CODE_HASH,
   hashAccessCode,
   isAccessCodeInput,
@@ -84,7 +84,7 @@ describe("access-code input bounds", () => {
   it.each([undefined, null, 16, {}, [], "", "a".repeat(1_025), "\u00e9".repeat(513), "\u{1f511}".repeat(257)])(
     "rejects invalid or oversized input before the KDF (case %#)", async (input) => {
       expect(isAccessCodeInput(input)).toBe(false);
-      expect(() => assertStrongAccessCode(input as string)).toThrow(TypeError);
+      expect(() => assertAccessCodeInput(input as string)).toThrow(TypeError);
       await expect(hashAccessCode(input as string)).rejects.toThrow(TypeError);
       await expect(verifyAccessCode(input as string, encoded)).resolves.toBe(false);
       expect(scrypt).not.toHaveBeenCalled();
@@ -92,12 +92,15 @@ describe("access-code input bounds", () => {
     },
   );
 
-  it.each(["a".repeat(15), "\u{1f511}".repeat(15)])(
-    "requires 16 Unicode code points for provisioning (case %#)", async (input) => {
+  it.each(["x", "1234", "123456", "12345678", "Studio2026", "a long synthetic owner-selected passphrase", " ", "\u{1f511}"])(
+    "hashes and verifies any nonempty owner-selected code (case %#)", async (input) => {
       expect(isAccessCodeInput(input)).toBe(true);
-      expect(() => assertStrongAccessCode(input)).toThrow(TypeError);
-      await expect(hashAccessCode(input)).rejects.toThrow(TypeError);
-      expect(scrypt).not.toHaveBeenCalled();
+      expect(() => assertAccessCodeInput(input)).not.toThrow();
+      const hash = await hashAccessCode(input);
+      await expect(verifyAccessCode(input, hash)).resolves.toBe(true);
+      await expect(verifyAccessCode(`${input}x`, hash)).resolves.toBe(false);
+      expect(scrypt).toHaveBeenCalledTimes(3);
+      expect(timingSafeEqual).toHaveBeenCalledTimes(2);
     },
   );
 
@@ -105,7 +108,7 @@ describe("access-code input bounds", () => {
     "rejects unpaired UTF-16 surrogates before hashing or verification (case %#)", async (suffix) => {
       const malformed = `${code}${suffix}`;
       expect(isAccessCodeInput(malformed)).toBe(false);
-      expect(() => assertStrongAccessCode(malformed)).toThrow(TypeError);
+      expect(() => assertAccessCodeInput(malformed)).toThrow(TypeError);
       await expect(hashAccessCode(malformed)).rejects.toThrow(TypeError);
       await expect(verifyAccessCode(malformed, encoded)).resolves.toBe(false);
       expect(scrypt).not.toHaveBeenCalled();
@@ -113,10 +116,10 @@ describe("access-code input bounds", () => {
     },
   );
 
-  it.each(["a".repeat(16), "\u{1f511}".repeat(16), " ".repeat(16), "a".repeat(1_024), "\u00e9".repeat(512), "\u{1f511}".repeat(256)])(
-    "accepts exact character and UTF-8 byte boundaries without trimming (case %#)", (input) => {
+  it.each(["a", "\u{1f511}", " ", "a".repeat(1_024), "\u00e9".repeat(512), "\u{1f511}".repeat(256)])(
+    "accepts nonempty input and exact UTF-8 byte boundaries without trimming (case %#)", (input) => {
       expect(isAccessCodeInput(input)).toBe(true);
-      expect(() => assertStrongAccessCode(input)).not.toThrow();
+      expect(() => assertAccessCodeInput(input)).not.toThrow();
     },
   );
 

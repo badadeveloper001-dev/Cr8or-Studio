@@ -75,8 +75,8 @@ describe("owner management", () => {
   it("rejects invalid access codes before database access", async () => {
     const policyError = new TypeError("Access code does not meet the policy.");
     mocks.hash.mockRejectedValue(policyError);
-    await expect(provisionOwner("short")).rejects.toBe(policyError);
-    await expect(rotateOwnerAccessCode("short")).rejects.toBe(policyError);
+    await expect(provisionOwner("")).rejects.toBe(policyError);
+    await expect(rotateOwnerAccessCode("")).rejects.toBe(policyError);
     expect(mocks.query).not.toHaveBeenCalled();
     expect(mocks.transaction).not.toHaveBeenCalled();
   });

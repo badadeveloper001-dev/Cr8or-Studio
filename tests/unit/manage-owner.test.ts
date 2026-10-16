@@ -38,7 +38,47 @@ class FakeTerminal extends PassThrough {
   setRawMode = vi.fn((enabled: boolean) => { this.isRaw = enabled; return this; });
 }
 
+function terminalHarness(operation: string, value: string | Buffer) {
+  const h = harness([operation]);
+  const terminal = new FakeTerminal();
+  let stderr = "";
+  h.options.input = terminal as unknown as typeof process.stdin;
+  h.options.errorOutput = new Writable({
+    write(chunk, _encoding, done) {
+      const text = chunk.toString();
+      stderr += text;
+      if (text.includes("Access code") || text.includes("Confirm")) {
+        queueMicrotask(() => terminal.write(Buffer.concat([Buffer.from(value), Buffer.from("\r")])));
+      }
+      done();
+    },
+  }) as typeof process.stderr;
+  return { ...h, terminal, stderr: () => stderr };
+}
+
 describe("owner operator CLI", () => {
+  const acceptedCodes = ["x", "1234", "123456", "12345678", "Studio2026", accessCode, " ", "😀", "x".repeat(1_024)];
+  const cases = ["provision", "rotate"].flatMap((operation) =>
+    acceptedCodes.map((value, index) => ({ operation, value, index })),
+  );
+
+  it.each(cases)("accepts protected-stdin $operation without a minimum length (case $index)", async ({ operation, value }) => {
+    const h = harness([operation, "--stdin"], JSON.stringify({ accessCode: value }));
+    expect(await main(h.options)).toBe(0);
+    expect(operation === "provision" ? h.services.provisionOwner : h.services.rotateOwnerAccessCode).toHaveBeenCalledWith(value);
+    expect(JSON.parse(h.stdout())).toMatchObject({ ok: true, operation });
+    expect(h.stderr()).toBe("");
+  });
+
+  it.each(cases)("accepts hidden-terminal $operation without a minimum length (case $index)", async ({ operation, value }) => {
+    const h = terminalHarness(operation, value);
+    expect(await main(h.options)).toBe(0);
+    expect(operation === "provision" ? h.services.provisionOwner : h.services.rotateOwnerAccessCode).toHaveBeenCalledWith(value);
+    expect(JSON.parse(h.stdout())).toMatchObject({ ok: true, operation });
+    expect(h.stderr()).toBe("Access code (hidden): \nConfirm access code (hidden): \n");
+    expect(h.terminal.isRaw).toBe(false);
+  });
+
   it.each(["provision", "rotate"])("passes an exact whitespace-preserving code from --stdin to %s", async (operation) => {
     const h = harness([operation, "--stdin"]);
     expect(await main(h.options)).toBe(0);
@@ -111,10 +151,31 @@ describe("owner operator CLI", () => {
     expect(h.services.provisionOwner).toHaveBeenCalledWith("synthetic access code \ud800\udc00\udbff\udfff\ufffd");
   });
 
-  it.each(["short", "😀".repeat(15), "x".repeat(1_025)])("rejects codes outside the length policy before storage", async (value) => {
-    const h = harness(["rotate", "--stdin"], JSON.stringify({ accessCode: value }));
+  const invalidLengths = ["provision", "rotate"].flatMap((operation) =>
+    ["", "x".repeat(1_025), "😀".repeat(257)].map((value, index) => ({ operation, value, index })),
+  );
+
+  it.each(invalidLengths)("rejects empty or oversized protected-stdin $operation before storage (case $index)", async ({ operation, value }) => {
+    const h = harness([operation, "--stdin"], JSON.stringify({ accessCode: value }));
     expect(await main(h.options)).toBe(2);
+    expect(JSON.parse(h.stdout()).error.code).toBe("INVALID_INPUT");
     expect(h.loadServices).not.toHaveBeenCalled();
+  });
+
+  it.each(invalidLengths)("rejects empty or oversized hidden-terminal $operation before storage (case $index)", async ({ operation, value }) => {
+    const h = terminalHarness(operation, value);
+    expect(await main(h.options)).toBe(2);
+    expect(JSON.parse(h.stdout()).error.code).toBe("INVALID_INPUT");
+    expect(h.loadServices).not.toHaveBeenCalled();
+    expect(h.terminal.isRaw).toBe(false);
+  });
+
+  it.each(["provision", "rotate"])("rejects malformed UTF-8 in hidden-terminal %s before storage", async (operation) => {
+    const h = terminalHarness(operation, Buffer.from([0xc3, 0x28]));
+    expect(await main(h.options)).toBe(2);
+    expect(JSON.parse(h.stdout()).error.code).toBe("INVALID_INPUT");
+    expect(h.loadServices).not.toHaveBeenCalled();
+    expect(h.terminal.isRaw).toBe(false);
   });
 
   it("returns only safe status fields and never requests input", async () => {
@@ -143,6 +204,8 @@ describe("owner operator CLI", () => {
     help.options.env.DATABASE_URL = "";
     expect(await main(help.options)).toBe(0);
     expect(help.stdout()).toContain("Usage:");
+    expect(help.stdout()).toContain("must be nonempty");
+    expect(help.stdout()).not.toContain("at least 16");
     expect(help.loadServices).not.toHaveBeenCalled();
   });
 

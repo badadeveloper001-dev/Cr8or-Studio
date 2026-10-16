@@ -32,6 +32,17 @@ const schemaName = `private_auth_test_${randomBytes(8).toString("hex")}`;
 const ACCESS_CODE = "synthetic-integration-only-V7!xQ2#pL9@kD4$mR8";
 const NEXT_ACCESS_CODE = "synthetic-rotated-only-B3@jM8!wT2#qF6$zN9";
 const WRONG_ACCESS_CODE = "synthetic-incorrect-only-C8!sJ4@rP7#vD2$mK6";
+const OWNER_SELECTED_CODES = [
+  { label: "a one-character code", accessCode: "7" },
+  { label: "a four-digit PIN", accessCode: "1234" },
+  { label: "a six-digit PIN", accessCode: "123456" },
+  { label: "an eight-digit PIN", accessCode: "12345678" },
+  { label: "a mixed alphanumeric code", accessCode: "Studio2026" },
+  { label: "a long passphrase", accessCode: "synthetic river lantern orchard glass for isolated tests" },
+  { label: "a single whitespace character", accessCode: " " },
+  { label: "an exact code with surrounding whitespace and decomposed Unicode", accessCode: " e\u0301 " },
+  { label: "a code at the UTF-8 byte limit", accessCode: "💡".repeat(256) },
+];
 const ORIGIN = "http://localhost:3000";
 const RATE_LIMIT_KEY = randomBytes(32);
 const ENVIRONMENT_KEYS = [
@@ -324,7 +335,10 @@ describe.skipIf(!testUrl)("private authentication services on isolated PostgreSQ
       { body: JSON.stringify({ accessCode: 123 }) },
       { body: JSON.stringify({ accessCode: "" }) },
       { body: JSON.stringify({ accessCode: ACCESS_CODE, ownerId: "owner" }) },
+      { body: JSON.stringify({ accessCode: "a".repeat(1_025) }) },
       { body: JSON.stringify({ accessCode: "💡".repeat(257) }) },
+      { body: JSON.stringify({ accessCode: "\uD800" }) },
+      { body: JSON.stringify({ accessCode: "\uDC00" }) },
       { body: " ".repeat(4_097) },
       { headers: { "content-type": "text/plain" } },
       { headers: { "content-encoding": "gzip" } },
@@ -338,6 +352,57 @@ describe.skipIf(!testUrl)("private authentication services on isolated PostgreSQ
     }
     expect(await database.authSession.count()).toBe(0);
     expect(await database.authRateLimit.count()).toBe(0);
+  });
+
+  it.each(OWNER_SELECTED_CODES)("provisions, authenticates, and rotates to $label", async ({ accessCode }) => {
+    await database.ownerCredential.deleteMany();
+    await owners.provisionOwner(accessCode);
+    const provisioned = await database.ownerCredential.findUniqueOrThrow({ where: { id: "owner" } });
+    expect(provisioned.credentialVersion).toBe(1);
+    expect(provisioned.accessCodeHash).toMatch(/^\$cr8or\$scrypt\$v=1\$N=32768,r=8,p=3\$/);
+    const first = await unlock(accessCode);
+    expectPrivateResponse(first, 200);
+    const firstCookie = cookieFrom(first);
+    await expectAuthenticated(firstCookie, true);
+
+    // Rotate away, then back, so both provisioning and rotation must accept
+    // the exact owner-selected input rather than only an existing short hash.
+    expect(await owners.rotateOwnerAccessCode(NEXT_ACCESS_CODE)).toMatchObject({
+      credentialVersion: 2, revokedCount: 1,
+    });
+    expect(await owners.rotateOwnerAccessCode(accessCode)).toMatchObject({
+      credentialVersion: 3, revokedCount: 0,
+    });
+    const rotated = await database.ownerCredential.findUniqueOrThrow({ where: { id: "owner" } });
+    expect(rotated.webAuthnUserHandle).toEqual(provisioned.webAuthnUserHandle);
+    expect(rotated.accessCodeHash).not.toBe(provisioned.accessCodeHash);
+    await expectAuthenticated(firstCookie, false);
+    expectPrivateResponse(await unlock(NEXT_ACCESS_CODE), 401);
+    const current = await unlock(accessCode);
+    expectPrivateResponse(current, 200);
+    await expectAuthenticated(cookieFrom(current), true);
+    expect(await database.authSession.count({ where: { credentialVersion: 3, revokedAt: null } })).toBe(1);
+  }, 15_000);
+
+  it.each([
+    { label: "an empty code", accessCode: "" },
+    { label: "an oversized ASCII code", accessCode: "a".repeat(1_025) },
+    { label: "an oversized UTF-8 code", accessCode: "💡".repeat(257) },
+    { label: "an unpaired high surrogate", accessCode: "\uD800" },
+    { label: "an unpaired low surrogate", accessCode: "\uDC00" },
+    { label: "a non-string code", accessCode: 1234 },
+  ])("rejects $label without changing owner or session records", async ({ accessCode }) => {
+    const cookie = await unlockedCookie();
+    await expect(owners.rotateOwnerAccessCode(accessCode as string)).rejects.toBeInstanceOf(TypeError);
+    expect(await database.ownerCredential.findUniqueOrThrow({ where: { id: "owner" } })).toEqual(ownerFixture);
+    await expectAuthenticated(cookie, true);
+    expect(await database.authSession.count({ where: { revokedAt: null } })).toBe(1);
+
+    await database.authSession.deleteMany();
+    await database.ownerCredential.deleteMany();
+    await expect(owners.provisionOwner(accessCode as string)).rejects.toBeInstanceOf(TypeError);
+    expect(await database.ownerCredential.count()).toBe(0);
+    expect(await database.authSession.count()).toBe(0);
   });
 
   it("unlocks with a real encoded credential, stores only a digest, and sets an absolute local session cookie", async () => {

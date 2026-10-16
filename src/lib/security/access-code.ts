@@ -3,7 +3,6 @@ import "server-only";
 import { randomBytes, scrypt, timingSafeEqual } from "node:crypto";
 
 const MAX_CODE_BYTES = 1_024;
-const MIN_CODE_POINTS = 16;
 const SALT_BYTES = 32;
 const KEY_BYTES = 64;
 // OWASP's scrypt N=2^15, r=8, p=3 option uses about 32 MiB per derivation.
@@ -25,7 +24,7 @@ export class AccessCodeFormatError extends Error {
 export const DUMMY_ACCESS_CODE_HASH =
   "$cr8or$scrypt$v=1$N=32768,r=8,p=3$Y3I4b3ItcHVibGljLWR1bW15LW93bmVyLXNhbHQtdjE$Szggb0dmvAJf2DpHxl2bArC3F2YKKvu04KC2Io9U3lzpkUOxOS5jFDTvC5OqAeV_ERFRyFiWiUjscIl-Juc85w";
 
-/** Verification accepts existing short codes, but always bounds input before the KDF. */
+/** All credential operations accept nonempty input bounded before the KDF. */
 export function isAccessCodeInput(value: unknown): value is string {
   // In Unicode mode, this range matches only unpaired UTF-16 surrogates.
   // Reject them before Node's UTF-8 encoder silently substitutes U+FFFD.
@@ -34,10 +33,10 @@ export function isAccessCodeInput(value: unknown): value is string {
     Buffer.byteLength(value, "utf8") <= MAX_CODE_BYTES;
 }
 
-/** Count Unicode code points, not UTF-16 units; never trim or normalize a credential. */
-export function assertStrongAccessCode(code: string): void {
-  if (!isAccessCodeInput(code) || Array.from(code).length < MIN_CODE_POINTS) {
-    throw new TypeError("Access codes must contain valid Unicode, at least 16 characters, and at most 1024 UTF-8 bytes.");
+/** The owner chooses the length; never trim or normalize a credential. */
+export function assertAccessCodeInput(code: string): void {
+  if (!isAccessCodeInput(code)) {
+    throw new TypeError("Access codes must be nonempty, contain valid Unicode, and be at most 1024 UTF-8 bytes.");
   }
 }
 
@@ -68,7 +67,7 @@ function decodeHash(encoded: string): { salt: Buffer; key: Buffer } {
 }
 
 export async function hashAccessCode(code: string): Promise<string> {
-  assertStrongAccessCode(code);
+  assertAccessCodeInput(code);
   const salt = randomBytes(SALT_BYTES);
   const key = await deriveKey(code, salt);
   return `${HASH_PREFIX}${salt.toString("base64url")}$${key.toString("base64url")}`;

@@ -11,7 +11,7 @@ const HELP = `Usage: node --conditions=react-server scripts/manage-owner.mjs <op
 Operations: provision, rotate, revoke-all, status
 provision and rotate require hidden terminal input with confirmation, or --stdin.
 --stdin accepts one UTF-8 JSON object with exactly one string property: accessCode.
-Access codes must contain at least 16 Unicode code points and at most 1024 UTF-8 bytes.
+Access codes must be nonempty and contain at most 1024 UTF-8 bytes.
 Whitespace is preserved. Access codes must never be supplied as command arguments.
 Set DATABASE_URL in the trusted operator environment. No migrations are performed.
 `;
@@ -208,8 +208,8 @@ export async function main({
         const confirmation = await readHiddenLine(input, errorOutput, "Confirm access code (hidden): ");
         if (accessCode !== confirmation) throw new OperatorInputError("Access code confirmation did not match.");
       }
-      if (Array.from(accessCode).length < 16 || Buffer.byteLength(accessCode, "utf8") > MAX_ACCESS_CODE_BYTES) {
-        throw new OperatorInputError("Access code must contain at least 16 Unicode code points and at most 1024 UTF-8 bytes.");
+      if (accessCode.length === 0 || Buffer.byteLength(accessCode, "utf8") > MAX_ACCESS_CODE_BYTES) {
+        throw new OperatorInputError("Access code must be nonempty and contain at most 1024 UTF-8 bytes.");
       }
     }
     services = await loadServices();
