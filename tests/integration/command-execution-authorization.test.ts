@@ -74,7 +74,7 @@ describe.skipIf(!testUrl)("command execution authorization on isolated PostgreSQ
   let providerModule: typeof import("@/lib/workspace/providers/daytona");
   let tools: typeof import("@/lib/agents/tool-executor");
   let policy: typeof import("@/lib/security/policy");
-  let approvals: typeof import("@/lib/security/approvals");
+  let approvals: typeof import("@/lib/security/command-approvals");
 
   function request(cookie?: string) {
     return new NextRequest(`${ORIGIN}/api/auth/session`, { headers: cookie ? { cookie } : {} });
@@ -137,7 +137,7 @@ describe.skipIf(!testUrl)("command execution authorization on isolated PostgreSQ
     delete globalThis.prismaGlobal;
     vi.resetModules();
     database = (await import("@/lib/db/prisma")).prisma;
-    for (const migration of ["0_init", "20250101000000_add_workspace_table", "20261015000000_authentication_foundation", "20261016000000_command_operations"]) await applyMigration(migration);
+    for (const migration of ["0_init", "20250101000000_add_workspace_table", "20261015000000_authentication_foundation", "20261016000000_command_operations", "20261016010000_command_approvals"]) await applyMigration(migration);
     auth = await import("@/lib/security/auth");
     sessions = await import("@/lib/security/session-store");
     owners = await import("@/lib/security/owner-management");
@@ -148,13 +148,14 @@ describe.skipIf(!testUrl)("command execution authorization on isolated PostgreSQ
     providerModule = await import("@/lib/workspace/providers/daytona");
     tools = await import("@/lib/agents/tool-executor");
     policy = await import("@/lib/security/policy");
-    approvals = await import("@/lib/security/approvals");
+    approvals = await import("@/lib/security/command-approvals");
     await owners.provisionOwner("1234");
     ownerFixture = await database.ownerCredential.findUniqueOrThrow({ where: { id: "owner" } });
     root = await fs.mkdtemp(path.join(os.tmpdir(), "cr8or-command-db-"));
   }, 30_000);
 
   beforeEach(async () => {
+    await database.commandApproval.deleteMany();
     await database.commandOperation.deleteMany();
     await database.authSession.deleteMany();
     await database.ownerCredential.deleteMany();
@@ -323,12 +324,11 @@ describe.skipIf(!testUrl)("command execution authorization on isolated PostgreSQ
     expect(transmitted).not.toContain(process.env.DAYTONA_API_KEY);
   });
 
-  it("connects approved agent execution to the same runtime and consumes the existing approval", async () => {
-    const { authorization } = await capability();
+  it("connects scoped approved agent execution to the same runtime and consumes its durable approval", async () => {
+    const { authorization, authSession } = await capability();
     policy.setPolicyProfile("strict");
-    const approval = approvals.requestApproval({ action: "commands.execute", title: "Synthetic command approval",
-      preview: "npm test", requestedBy: "frontend", requestedRole: "agent" });
-    approvals.decideApproval({ id: approval.id, decision: "approved", decidedBy: "owner", decidedRole: "owner" });
+    const approval = await approvals.createPrivateCommandApproval(authorization, "npm test");
+    await approvals.decidePrivateCommandApproval(authSession, approval.id, "approved");
     const context = { ...toolContext(authorization), approvalId: approval.id };
     expect(await tools.executeTool("run_command", { command: "npm test" }, context))
       .toMatchObject({ ok: true, workspaceChanged: true, data: { exitCode: 0 } });

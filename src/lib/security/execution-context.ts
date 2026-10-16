@@ -3,7 +3,7 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 
 import { prisma } from "@/lib/db/prisma";
-import { revalidatePrivateOwnerSession, type AuthSession } from "@/lib/security/auth";
+import { revalidatePrivateOwnerSession, resolvePrivateOwnerBinding, type PrivateOwnerSessionBinding, type AuthSession } from "@/lib/security/auth";
 import { getPrivateAuthMode } from "@/lib/security/private-auth-mode";
 import { getActiveProjectRoot } from "@/lib/workspace/shell";
 
@@ -54,6 +54,21 @@ class ExecutionCapability {
       const workspace = await registeredWorkspace(projectId);
       if (JSON.stringify(workspace) !== JSON.stringify(context.workspace)) throw new ExecutionAuthorizationError(409);
       if (context.signal.aborted) throw new ExecutionAuthorizationError(401);
+    } catch (error) {
+      context.#controller.abort();
+      if (error instanceof ExecutionAuthorizationError) throw error;
+      throw new ExecutionAuthorizationError(503);
+    }
+  }
+
+  static async approvalBinding(context: ExecutionAuthorizationContext): Promise<PrivateOwnerSessionBinding> {
+    // Validate provenance before reading any purported scope or private field.
+    if (!context || typeof context !== "object" || !(#session in context)) throw new ExecutionAuthorizationError(401);
+    await ExecutionCapability.validate(context, context.projectId, "command");
+    try {
+      const binding = await resolvePrivateOwnerBinding(context.#session);
+      if (!binding || context.signal.aborted) throw new ExecutionAuthorizationError(401);
+      return binding;
     } catch (error) {
       context.#controller.abort();
       if (error instanceof ExecutionAuthorizationError) throw error;
@@ -185,4 +200,10 @@ export async function revalidateExecutionAuthorization(
 /** Disconnects and failed authorization stop queued work sharing this context. */
 export function cancelExecutionAuthorization(context: ExecutionAuthorizationContext | undefined): void {
   ExecutionCapability.cancel(context);
+}
+
+/** Internal approval persistence uses the initiating session, never a model or
+ * client's session identifier. Do not serialize this binding into a tool DTO. */
+export async function resolveExecutionSessionBinding(context: ExecutionAuthorizationContext): Promise<PrivateOwnerSessionBinding> {
+  return ExecutionCapability.approvalBinding(context);
 }

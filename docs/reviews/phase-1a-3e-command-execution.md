@@ -35,8 +35,10 @@ The remote helper repeats the exact command-to-argv mapping defensively.
 All npm scripts are potentially mutating, high-risk project code. The new
 `commands.execute` action requires approval under balanced and strict profiles;
 the existing autonomous profile retains its reviewed no-approval behavior.
-Approvals are consumed through the existing server policy guard. Client role or
-approval claims cannot mint a grant. Writer-tier agents retain command access;
+Private command approvals now use the durable operation scope described in the
+[approval correction](phase-1a-3e-approval-safeguards.md). Consumption binds the exact
+project, Daytona workspace, command, initiating session and credential generation.
+Client role or approval claims cannot mint a grant. Writer-tier agents retain command access;
 reviewer/read-only agents do not. Nonzero exit codes produce failed tool results
 with potentially changed workspace state. Existing inactive commands also use the
 exact catalogue, 60-second requested timeout and corrected policy metadata.
@@ -45,8 +47,9 @@ exact catalogue, 60-second requested timeout and corrected policy metadata.
 It binds the exact initiating execution capability, operation UUID, catalogue
 key, agent identity, request correlation and policy profile. Copies or serialized
 objects cannot pass validation. Profile changes invalidate an outstanding grant.
-The dispatch mechanism snapshots the request so later caller mutation cannot
-replace its operation or grant. Each execution capability has a random correlation
+The grant also retains its private consumed approval receipt. Runtime validation
+checks that receipt for scope, operation, actor, expiry and revocation. The dispatch
+mechanism snapshots the request so later caller mutation cannot replace its operation or grant. Each execution capability has a random correlation
 UUID, which is neither a session identifier nor authentication evidence.
 No raw token/session credential is sent to Daytona or stored with command records.
 
@@ -191,14 +194,17 @@ application byte checks; a malicious control plane can still exceed network-memo
 expectations. SDK instrumentation may record provider exception text before
 application sanitization; provider tracing/log retention also needs review.
 
-Existing policy profiles and approvals remain process-local, as in the approved
-foundation. A record missing on another application instance denies approval;
-this does not grant permission but can cause unavailable approval workflows.
-Profile changes are checked against the current process. Consistent distributed
-policy/approval administration is a release concern; no broad approval-system
-rewrite is included. PostgreSQL coordination itself is shared across instances.
+Policy profiles and unrelated legacy approvals retain their existing process-local
+administration. Private command approvals now use shared PostgreSQL scope and
+atomic consumption; an action-only legacy approval is never valid for a private
+command. Profile changes are checked against the current process, so consistent
+distributed profile administration remains a release concern. Both private command
+approvals and operation coordination are shared across application instances.
 
-## Validation
+## Initial implementation validation
+
+These results describe commit `2c57b0a`; current approval-correction results are in
+[the follow-up report](phase-1a-3e-approval-safeguards.md).
 
 Node.js **24.19.0**, npm **11.9.0**, installed Daytona SDK **0.214.0**.
 
@@ -260,3 +266,11 @@ from these local results and was not investigated or changed.
 - `tests/unit/command-catalogue.test.ts`
 - `tests/unit/command-provider.test.ts`
 - `tests/unit/private-cloud-command-program.test.ts`
+
+## Approval correction
+
+The follow-up [operation-scoped approval correction](phase-1a-3e-approval-safeguards.md)
+replaces action-only approvals for private commands with durable session-bound
+scope and atomic PostgreSQL consumption. Generic approvals are no longer accepted
+for private commands. The original command and cloud-write release restrictions
+remain unchanged.

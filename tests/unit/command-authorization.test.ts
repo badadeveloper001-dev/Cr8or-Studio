@@ -1,17 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ check: vi.fn(), runtime: vi.fn(), run: vi.fn(), audit: vi.fn() }));
+const mocks = vi.hoisted(() => ({ check: vi.fn(), runtime: vi.fn(), run: vi.fn(), audit: vi.fn(),
+  consumeApproval: vi.fn(), validateApproval: vi.fn() }));
 vi.mock("@/lib/security/execution-context", () => ({
   ExecutionAuthorizationError: class extends Error { constructor(readonly status: number, message = "Authentication required.") { super(message); } },
   revalidateExecutionAuthorization: mocks.check,
 }));
 vi.mock("@/lib/workspace/runtime-factory", () => ({ getWorkspaceRuntime: mocks.runtime }));
 vi.mock("@/lib/security/audit", () => ({ appendAuditEvent: mocks.audit }));
+vi.mock("@/lib/security/command-approvals", () => ({
+  consumePrivateCommandApproval: mocks.consumeApproval,
+  validateConsumedPrivateCommandApproval: mocks.validateApproval,
+}));
 
 import { authorizeDevelopmentCommand, validateCommandAuthorization, type CommandAuthorization } from "@/lib/security/command-authorization";
 import { DEVELOPMENT_COMMAND_TIMEOUT_MS, findDevelopmentCommand } from "@/lib/security/command-catalogue";
 import { ExecutionAuthorizationError, type ExecutionAuthorizationContext } from "@/lib/security/execution-context";
-import { decideApproval, requestApproval } from "@/lib/security/approvals";
+import { decideApproval, listApprovals, requestApproval } from "@/lib/security/approvals";
 import { setPolicyProfile } from "@/lib/security/policy";
 import { executeTool } from "@/lib/agents/tool-executor";
 import { toolMetadata, type ToolContext } from "@/lib/agents/tools";
@@ -36,6 +41,9 @@ beforeEach(() => {
   });
   mocks.runtime.mockResolvedValue({ runCommand: mocks.run });
   mocks.run.mockResolvedValue({ stdout: "finished", stderr: "", exitCode: 0 });
+  // Only explicit successful durable-store results may establish approval.
+  mocks.consumeApproval.mockResolvedValue(false);
+  mocks.validateApproval.mockResolvedValue(false);
 });
 
 async function mint() {
@@ -87,16 +95,129 @@ describe("trusted command authorization grants", () => {
     await expect(validateCommandAuthorization(grant, execution, request(grant))).rejects.toMatchObject({ status: 409 });
   });
 
-  it.each(["balanced", "strict"] as const)("requires an actual commands.execute approval under %s policy", async (profile) => {
+  it.each(["balanced", "strict"] as const)("requires a durable scoped approval under %s policy", async (profile) => {
     setPolicyProfile(profile);
     expect(await authorizeDevelopmentCommand(context(), "npm test")).toMatchObject({ allowed: false, requiresApproval: true });
     expect(await authorizeDevelopmentCommand({ ...context(), approvalId: "fabricated-approved-id" }, "npm test")).toMatchObject({ allowed: false });
+    expect(mocks.consumeApproval).toHaveBeenCalledTimes(1);
+    expect(mocks.validateApproval).not.toHaveBeenCalled();
+    expect(mocks.runtime).not.toHaveBeenCalled();
+  });
+
+  it.each(["balanced", "strict"] as const)("does not reinterpret an approved action-only command approval under %s policy", async (profile) => {
+    setPolicyProfile(profile);
     const approval = requestApproval({ action: "commands.execute", title: "Run tests", preview: "npm test", requestedBy: "owner", requestedRole: "owner" });
     decideApproval({ id: approval.id, decision: "approved", decidedBy: "owner", decidedRole: "owner" });
-    const approvedContext = { ...context(), approvalId: approval.id };
-    const grant = await authorizeDevelopmentCommand(approvedContext, "npm test");
-    expect(grant.allowed).toBe(true);
+    expect(await authorizeDevelopmentCommand({ ...context(), approvalId: approval.id }, "npm test"))
+      .toMatchObject({ allowed: false, requiresApproval: true });
+    expect(mocks.consumeApproval).toHaveBeenCalledWith(execution, "npm test", approval.id, expect.any(String), "frontend");
+    expect(listApprovals().find((record) => record.id === approval.id)?.consumedAt).toBeUndefined();
+    expect(mocks.runtime).not.toHaveBeenCalled();
+  });
+
+  it.each(["balanced", "strict"] as const)("binds one consumed scope to the exact operation and rechecks its receipt under %s policy", async (profile) => {
+    setPolicyProfile(profile);
+    mocks.consumeApproval.mockResolvedValueOnce(true);
+    mocks.validateApproval.mockResolvedValue(true);
+    const approvedContext = { ...context(), approvalId: "durable-approved-id" };
+    const result = await authorizeDevelopmentCommand(approvedContext, "npm test");
+    expect(result.allowed).toBe(true);
+    if (!result.allowed) throw new Error("Expected scoped grant");
+    const metadata = await validateCommandAuthorization(result.authorization, execution, request(result.authorization));
+    const expected = [execution, "npm test", approvedContext.approvalId, metadata.operationId, "frontend"];
+    expect(mocks.consumeApproval).toHaveBeenCalledWith(...expected);
+    expect(mocks.validateApproval).toHaveBeenCalledWith(...expected);
+    expect(metadata.operationId).toMatch(/^[0-9a-f-]{36}$/);
+    await validateCommandAuthorization(result.authorization, execution, request(result.authorization));
+    expect(mocks.consumeApproval).toHaveBeenCalledTimes(1);
+    expect(mocks.validateApproval).toHaveBeenCalledTimes(2);
     expect(await authorizeDevelopmentCommand(approvedContext, "npm test")).toMatchObject({ allowed: false });
+    expect(mocks.consumeApproval.mock.calls[1][3]).not.toBe(metadata.operationId);
+  });
+
+  it("rejects an invalidated consumed approval instead of releasing its grant", async () => {
+    setPolicyProfile("balanced");
+    mocks.consumeApproval.mockResolvedValueOnce(true);
+    mocks.validateApproval.mockResolvedValueOnce(true);
+    const result = await authorizeDevelopmentCommand({ ...context(), approvalId: "durable-approved-id" }, "npm test");
+    if (!result.allowed) throw new Error("Expected scoped grant");
+    await validateCommandAuthorization(result.authorization, execution, request(result.authorization));
+    await expect(validateCommandAuthorization(result.authorization, execution, request(result.authorization)))
+      .rejects.toMatchObject({ status: 403 });
+  });
+
+  it("denies approval-store failures without falling back to a legacy approval", async () => {
+    setPolicyProfile("balanced");
+    const approval = requestApproval({ action: "commands.execute", title: "Run tests", preview: "npm test", requestedBy: "owner", requestedRole: "owner" });
+    decideApproval({ id: approval.id, decision: "approved", decidedBy: "owner", decidedRole: "owner" });
+    mocks.consumeApproval.mockRejectedValue(new ExecutionAuthorizationError(503, "Approval infrastructure unavailable."));
+    await expect(authorizeDevelopmentCommand({ ...context(), approvalId: approval.id }, "npm test"))
+      .rejects.toMatchObject({ status: 503 });
+    expect(mocks.runtime).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when consumed approval validation loses database access", async () => {
+    setPolicyProfile("strict");
+    mocks.consumeApproval.mockResolvedValueOnce(true);
+    mocks.validateApproval.mockRejectedValue(new ExecutionAuthorizationError(503, "Approval infrastructure unavailable."));
+    const result = await authorizeDevelopmentCommand({ ...context(), approvalId: "durable-approved-id" }, "npm test");
+    if (!result.allowed) throw new Error("Expected scoped grant");
+    await expect(validateCommandAuthorization(result.authorization, execution, request(result.authorization)))
+      .rejects.toMatchObject({ status: 503 });
+  });
+
+  it("checks the session before consuming approval and again after consumption", async () => {
+    setPolicyProfile("balanced");
+    const approvedContext = { ...context(), approvalId: "durable-approved-id" };
+    active = false;
+    await expect(authorizeDevelopmentCommand(approvedContext, "npm test")).rejects.toMatchObject({ status: 401 });
+    expect(mocks.consumeApproval).not.toHaveBeenCalled();
+    active = true;
+    mocks.consumeApproval.mockImplementationOnce(async () => { active = false; return true; });
+    await expect(authorizeDevelopmentCommand(approvedContext, "npm test")).rejects.toMatchObject({ status: 401 });
+    expect(mocks.consumeApproval).toHaveBeenCalledTimes(1);
+    expect(mocks.runtime).not.toHaveBeenCalled();
+  });
+
+  it("checks session validity before consulting an existing receipt", async () => {
+    setPolicyProfile("balanced");
+    mocks.consumeApproval.mockResolvedValueOnce(true);
+    mocks.validateApproval.mockResolvedValue(true);
+    const result = await authorizeDevelopmentCommand({ ...context(), approvalId: "durable-approved-id" }, "npm test");
+    if (!result.allowed) throw new Error("Expected scoped grant");
+    active = false;
+    await expect(validateCommandAuthorization(result.authorization, execution, request(result.authorization)))
+      .rejects.toMatchObject({ status: 401 });
+    expect(mocks.validateApproval).not.toHaveBeenCalled();
+  });
+
+  it("does not use a valid consumed receipt after a policy-profile change", async () => {
+    setPolicyProfile("balanced");
+    mocks.consumeApproval.mockResolvedValueOnce(true);
+    mocks.validateApproval.mockResolvedValue(true);
+    const result = await authorizeDevelopmentCommand({ ...context(), approvalId: "durable-approved-id" }, "npm test");
+    if (!result.allowed) throw new Error("Expected scoped grant");
+    setPolicyProfile("autonomous");
+    await expect(validateCommandAuthorization(result.authorization, execution, request(result.authorization)))
+      .rejects.toMatchObject({ status: 409 });
+  });
+
+  it("does not mint a grant when policy changes during approval consumption", async () => {
+    setPolicyProfile("balanced");
+    mocks.consumeApproval.mockImplementationOnce(async () => { setPolicyProfile("autonomous"); return true; });
+    await expect(authorizeDevelopmentCommand({ ...context(), approvalId: "durable-approved-id" }, "npm test"))
+      .rejects.toMatchObject({ status: 409 });
+    expect(mocks.runtime).not.toHaveBeenCalled();
+  });
+
+  it("requires a valid session in autonomous mode without consuming human approval", async () => {
+    const grant = await mint();
+    await validateCommandAuthorization(grant, execution, request(grant));
+    expect(mocks.consumeApproval).not.toHaveBeenCalled();
+    expect(mocks.validateApproval).not.toHaveBeenCalled();
+    active = false;
+    await expect(validateCommandAuthorization(grant, execution, request(grant))).rejects.toMatchObject({ status: 401 });
+    await expect(authorizeDevelopmentCommand(context(), "npm test")).rejects.toMatchObject({ status: 401 });
   });
 
   it("does not accept a file-write approval in place of command approval", async () => {

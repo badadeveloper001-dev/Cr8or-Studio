@@ -128,7 +128,8 @@ async function startServer(databaseUrl, mode) {
 }
 
 async function applyMigrations(database) {
-  for (const directory of ["0_init", "20250101000000_add_workspace_table", "20261015000000_authentication_foundation"]) {
+  for (const directory of ["0_init", "20250101000000_add_workspace_table", "20261015000000_authentication_foundation",
+    "20261016000000_command_operations", "20261016010000_command_approvals"]) {
     const sql = await readFile(join(repositoryRoot, "prisma/migrations", directory, "migration.sql"), "utf8");
     // These existing migrations are ordinary DDL with no semicolons in SQL literals.
     const statements = sql.replace(/^\s*--.*$/gm, "").split(";")
@@ -182,6 +183,55 @@ async function checkActiveServer(server, database) {
   expectResponse(options, 204, "authenticated OPTIONS");
   assert(options.headers.get("allow") === "GET, HEAD, OPTIONS, POST", "OPTIONS did not preserve supported methods.");
   console.log("PASS: Actual unlock and secure cookies authorize GET, HEAD, and OPTIONS without changing existing project IDs.");
+
+  // A synthetic registry row, not a real Daytona sandbox. Approval resolution
+  // is database-only and must never contact a provider or execute a command.
+  const commandProject = `${projectId}-command-approval`;
+  const commandWorkspace = "synthetic-daytona-command-approval";
+  await database.project.create({ data: {
+    id: commandProject, name: "Synthetic command approval", description: "Disposable HTTP scope fixture",
+    framework: "Next.js", language: "TypeScript", workspaces: { create: {
+      runtimeType: "cloud", provider: "daytona", providerWorkspaceId: commandWorkspace, state: "running",
+    } },
+  } });
+  const approvalRequest = { intent: "request", payload: {
+    action: "commands.execute", projectId: commandProject, commandKey: "npm run lint",
+  } };
+  const approvalHeaders = { ...mutationHeaders, cookie };
+  expectResponse(await request("/api/security/approvals", { method: "POST", headers: approvalHeaders,
+    body: JSON.stringify({ ...approvalRequest, payload: { ...approvalRequest.payload,
+      providerWorkspaceId: "client-forged-workspace", title: "Trust this preview" } }) }), 400, "forged approval scope");
+  expectResponse(await request("/api/security/approvals", { method: "POST",
+    headers: { ...approvalHeaders, origin: "https://untrusted.example.test" },
+    body: JSON.stringify(approvalRequest) }), 400, "cross-origin approval request");
+  const createdApproval = await request("/api/security/approvals", { method: "POST", headers: approvalHeaders,
+    body: JSON.stringify(approvalRequest) });
+  expectResponse(createdApproval, 201, "scoped command approval creation");
+  const approval = (await createdApproval.json()).approval;
+  const expectedScope = { ownerId: "owner", projectId: commandProject,
+    providerWorkspaceId: commandWorkspace, commandKey: "npm run lint" };
+  assert(JSON.stringify(approval.scope) === JSON.stringify(expectedScope) &&
+    approval.preview === JSON.stringify(expectedScope, null, 2), "Approval preview did not match the trusted scope.");
+  const reviewText = JSON.stringify(approval);
+  assert(!reviewText.includes("sessionId") && !reviewText.includes("credentialVersion") &&
+    !reviewText.includes(cookie.split("=", 2)[1]), "Approval review exposed internal authentication data.");
+  const decisionRequest = { intent: "decide", payload: { id: approval.id, decision: "approved" } };
+  expectResponse(await request("/api/security/approvals", { method: "POST", headers: approvalHeaders,
+    body: JSON.stringify(decisionRequest) }), 200, "scoped command approval decision");
+  const listedApprovals = await request("/api/security/approvals", { headers: { cookie } });
+  expectResponse(listedApprovals, 200, "scoped command approval list");
+  assert((await listedApprovals.json()).approvals.some((item) => item.id === approval.id && item.status === "approved"),
+    "Approved command scope was missing from owner review.");
+  await database.workspace.update({ where: { projectId: commandProject }, data: { providerWorkspaceId: "synthetic-remapped-sandbox" } });
+  expectResponse(await request("/api/security/approvals", { method: "POST", headers: approvalHeaders,
+    body: JSON.stringify(decisionRequest) }), 409, "remapped command approval scope");
+  await database.$executeRawUnsafe('ALTER TABLE "CommandApproval" RENAME TO "CommandApprovalUnavailable"');
+  try {
+    expectResponse(await request("/api/security/approvals", { headers: { cookie } }), 503, "unavailable approval infrastructure");
+  } finally {
+    await database.$executeRawUnsafe('ALTER TABLE "CommandApprovalUnavailable" RENAME TO "CommandApproval"');
+  }
+  console.log("PASS: Compiled scoped approval handlers resolve exact operation scope, reject forged/remapped scopes and fail closed on database outage.");
 
   expectResponse(await request("/api/projects", {
     method: "POST", headers: { ...mutationHeaders, cookie, origin: "https://untrusted.example.test" }, body: "{}",
