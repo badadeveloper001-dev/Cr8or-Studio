@@ -5,9 +5,18 @@ import { authorizedRuntime } from "@/lib/workspace/authorized-runtime";
 import { evaluatePolicyGuard } from "@/lib/security/policy";
 import { errorResponse } from "@/lib/http/api-response";
 import { redactText } from "@/lib/security/redaction";
+import { ExecutionAuthorizationError } from "@/lib/security/execution-context";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+function executionFailure(error: ExecutionAuthorizationError) {
+  const status = error.status;
+  return errorResponse({ status,
+    code: status === 401 ? "UNAUTHORIZED" : status === 403 ? "FORBIDDEN" : status === 404 ? "NOT_FOUND" : status === 409 ? "CONFLICT" : "INTERNAL_ERROR",
+    message: error.message,
+  });
+}
 
 async function GETHandler(request: NextRequest) {
   try {
@@ -18,6 +27,7 @@ async function GETHandler(request: NextRequest) {
     if (request.nextUrl.searchParams.get("kind") === "list") return NextResponse.json({ files: await access.runtime.listFiles(path) });
     return NextResponse.json({ path, ...(await access.runtime.readFile(path)) });
   } catch (error) {
+    if (error instanceof ExecutionAuthorizationError) return executionFailure(error);
     return errorResponse({ status: 409, code: "CONFLICT", message: redactText(error instanceof Error ? error.message : "Unable to read workspace files.") });
   }
 }
@@ -34,6 +44,7 @@ async function POSTHandler(request: NextRequest) {
     await access.runtime.writeFile(payload.path, payload.content);
     return NextResponse.json({ path: payload.path, saved: true });
   } catch (error) {
+    if (error instanceof ExecutionAuthorizationError) return executionFailure(error);
     return errorResponse({ status: 400, code: "INVALID_REQUEST", message: redactText(error instanceof Error ? error.message : "Unable to save file.") });
   }
 }

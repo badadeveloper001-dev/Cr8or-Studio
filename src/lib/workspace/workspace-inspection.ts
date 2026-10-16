@@ -1,4 +1,5 @@
 import type { WorkspaceRuntime } from "@/lib/workspace/runtime";
+import { ExecutionAuthorizationError } from "@/lib/security/execution-context";
 
 const MAX_ACTIONS = 8;
 const MAX_FILE_READS = 5;
@@ -136,7 +137,8 @@ async function safeReadFile(ctx: InspectionContext, filePath: string): Promise<s
     ctx.filesRead++;
     ctx.readFileContents.set(filePath, result.content);
     return result.content;
-  } catch {
+  } catch (error) {
+    if (error instanceof ExecutionAuthorizationError) throw error;
     return null;
   }
 }
@@ -149,7 +151,8 @@ async function safeListDir(ctx: InspectionContext, dirPath: string): Promise<Arr
     ctx.visitedDirs.add(dirPath);
     ctx.dirEntries.set(dirPath, entries.slice(0, MAX_ENTRIES_PER_DIR));
     return entries;
-  } catch {
+  } catch (error) {
+    if (error instanceof ExecutionAuthorizationError) throw error;
     return null;
   }
 }
@@ -448,7 +451,8 @@ async function safeReadFileForReadiness(runtime: WorkspaceRuntime, filePath: str
   try {
     const result = await runtime.readFile(filePath);
     return result.content;
-  } catch {
+  } catch (error) {
+    if (error instanceof ExecutionAuthorizationError) throw error;
     return null;
   }
 }
@@ -456,7 +460,8 @@ async function safeReadFileForReadiness(runtime: WorkspaceRuntime, filePath: str
 async function safeListDirForReadiness(runtime: WorkspaceRuntime, dirPath: string): Promise<Array<{ name: string; type: "file" | "directory" }> | null> {
   try {
     return await runtime.listFiles(dirPath);
-  } catch {
+  } catch (error) {
+    if (error instanceof ExecutionAuthorizationError) throw error;
     return null;
   }
 }

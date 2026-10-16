@@ -81,7 +81,9 @@ Phase 1A-2 adds private access-code services and trusted operator credential
 management. Phase 1A-3A connects those sessions to the protected API boundary;
 production activation remains disabled. See [the access-code services guide](docs/private-access-code-authentication.md)
 for operator procedures and [the authorization guide](docs/private-api-authorization.md)
-for API coverage and the later activation boundary.
+for API coverage and the later activation boundary. Phase 1A-3B adds
+[trusted agent and workspace execution](docs/trusted-workspace-authorization.md),
+with per-operation session checks and documented execution restrictions.
 
 ## Getting Started
 

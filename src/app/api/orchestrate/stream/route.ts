@@ -4,7 +4,16 @@ import { z } from "zod";
 import { orchestrate, OrchestrationProgressEvent } from "@/lib/agents/orchestrator";
 import { withRouteMetrics } from "@/lib/observability/sli";
 import { authorizeRoute } from "@/lib/security/authorization";
+import { authError } from "@/lib/security/private-auth-http";
 import { redactText } from "@/lib/security/redaction";
+import { errorResponse, internalErrorResponse } from "@/lib/http/api-response";
+import {
+  cancelExecutionAuthorization,
+  createExecutionAuthorization,
+  ExecutionAuthorizationError,
+  revalidateExecutionAuthorization,
+  type ExecutionAuthorizationContext,
+} from "@/lib/security/execution-context";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -49,27 +58,67 @@ async function POSTHandler(request: NextRequest) {
     );
   }
 
-  const stream = new ReadableStream({
+  const cancellation = new AbortController();
+  let authorization: ExecutionAuthorizationContext | undefined;
+  let cancelled = false;
+  const cancel = () => {
+    cancelled = true;
+    cancellation.abort();
+    cancelExecutionAuthorization(authorization);
+  };
+  request.signal.addEventListener("abort", cancel, { once: true });
+  if (request.signal.aborted) cancel();
+
+  try {
+    // Resolve the canonical project before opening the stream or starting work.
+    authorization = await createExecutionAuthorization(auth.session, payload.projectId, { signal: cancellation.signal });
+    await revalidateExecutionAuthorization(authorization, payload.projectId, "model");
+  } catch (error) {
+    request.signal.removeEventListener("abort", cancel);
+    cancel();
+    if (error instanceof ExecutionAuthorizationError) {
+      if (error.status === 401 || error.status === 503) return authError(error.status, error.message);
+      return errorResponse({
+        status: error.status,
+        code: error.status === 404 ? "NOT_FOUND" : error.status === 409 ? "CONFLICT" : "FORBIDDEN",
+        message: error.message,
+      });
+    }
+    return internalErrorResponse("Failed to start execution.");
+  }
+
+  const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      const encode = (event: OrchestrationProgressEvent) => {
+      const encode = async (event: OrchestrationProgressEvent) => {
+        await revalidateExecutionAuthorization(authorization, payload.projectId, "model");
+        if (cancelled) throw new Error("Execution cancelled.");
         controller.enqueue(new TextEncoder().encode(encodeEvent(event)));
       };
 
       try {
-        await orchestrate(payload, encode);
+        await orchestrate(payload, encode, authorization);
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Orchestration failed.";
-        encode({ type: "error", message: redactText(message) });
+        // A terminal error contains no model output or workspace data. Never
+        // emit queued progress after the initiating session becomes invalid.
+        if (!cancelled) {
+          const message = err instanceof ExecutionAuthorizationError ? err.message
+            : authorization ? "Execution could not be completed."
+              : redactText(err instanceof Error ? err.message : "Orchestration failed.");
+          controller.enqueue(new TextEncoder().encode(encodeEvent({ type: "error", message })));
+        }
       } finally {
-        controller.close();
+        request.signal.removeEventListener("abort", cancel);
+        cancelExecutionAuthorization(authorization);
+        if (!cancelled) controller.close();
       }
     },
+    cancel,
   });
 
   return new Response(stream, {
     headers: {
       "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache, no-transform",
+      "Cache-Control": "no-store, no-transform",
       Connection: "keep-alive",
       "X-Accel-Buffering": "no",
     },
@@ -78,7 +127,7 @@ async function POSTHandler(request: NextRequest) {
 }
 
 export const POST = withPrivateApiAuth(
-  { route: "api/orchestrate/stream:post", minRole: "viewer", privateExecutionBlocked: true },
+  { route: "api/orchestrate/stream:post", minRole: "viewer" },
   POSTHandler,
 );
 

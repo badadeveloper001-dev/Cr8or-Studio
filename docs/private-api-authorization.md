@@ -1,10 +1,10 @@
-# Private API authorization — Phase 1A-3A
+# Private API authorization — Phases 1A-3A and 1A-3B
 
 This stage connects the existing private owner-session system to the backend API
 boundary. It reuses the Phase 1A-1 PostgreSQL session store and Phase 1A-2
 authentication services. It does not activate production authentication, add a
-frontend lock screen, or implement the agent execution-context changes planned for
-Phase 1A-3B. The final production cutover remains Phase 1A-5.
+frontend lock screen. Phase 1A-3B adds the
+[trusted execution boundary](trusted-workspace-authorization.md). The final production cutover remains Phase 1A-5.
 
 ## One activation configuration
 
@@ -87,7 +87,8 @@ that boundary. Authentication failures retain the API's
 
 - `401` for missing or invalid private sessions.
 - `503` for unavailable authentication infrastructure or invalid configuration.
-- `503` for the authenticated AI entrypoints temporarily blocked below.
+- `503` for operations whose execution isolation/lifecycle remains unavailable.
+- `404` for unknown registered projects; `409` for changed or ambiguous runtime bindings.
 
 Sensitive handler responses include `Cache-Control: no-store`, including rejected
 requests. Errors do not expose database diagnostics or authentication metadata.
@@ -124,16 +125,16 @@ handling on routes with GET passes through the protected GET boundary.
 | Route | Method(s) and operation | Category / authorization after the central boundary |
 | --- | --- | --- |
 | `/api/projects` | GET: list projects; POST: create project | Protected read/write; existing viewer/maintainer checks precede database operations. |
-| `/api/projects/workspace` | POST: recent/open/create/clone | Protected read/write and execution; existing branch and cloud-service authorization precedes local filesystem, Git, runtime, or Daytona work. |
-| `/api/workspaces` | GET: list cloud projects; POST: create/clone cloud project | Protected read/write and cloud creation; existing cloud-service role and policy checks remain. |
-| `/api/workspaces/[projectId]/preview` | POST: start/refresh/stop preview | Sensitive process control; authorized project lookup precedes Daytona access. |
-| `/api/files` | GET: list/read; POST: write | Sensitive workspace read/write; existing authorized-runtime/project lookup and write policy remain. |
+| `/api/projects/workspace` | POST: recent/open/create/clone | Cloud listing/open/reuse is guarded; local directory management and new cloud provisioning remain unavailable in private mode. |
+| `/api/workspaces` | GET: list cloud projects; POST: create/clone cloud project | Protected listing and existing repository reuse; new provisioning returns `503` in private mode. |
+| `/api/workspaces/[projectId]/preview` | POST: start/refresh/stop preview | Returns `503` in private mode pending process/URL lifecycle authorization. |
+| `/api/files` | GET: list/read; POST: write | Verified registered project/runtime binding, per-operation session revalidation, path containment, and existing write policy. |
 | `/api/github/api` | POST: list/read repositories, branches, files and checks; upsert file/create branch/create PR | Protected external read/write; authentication precedes secret access, and existing write-role/ownership/policy checks remain. |
-| `/api/github/ops` | POST: status/diff/stage/unstage/commit-push | Sensitive filesystem/Git execution; operation-specific role and commit-push ownership/policy checks remain. |
-| `/api/deploy` | POST: build/deploy | Sensitive execution/deployment; existing owner, workspace-ownership and deployment-policy checks remain. |
-| `/api/chat/main` | POST: AI chat and workspace/tool actions | Authenticated requests are temporarily blocked with `503` before AI, filesystem or tool work; Phase 1A-3B dependency. |
-| `/api/orchestrate` | POST: agent orchestration | Authenticated requests are temporarily blocked with `503` before orchestration or memory/tool work; Phase 1A-3B dependency. |
-| `/api/orchestrate/stream` | POST: streaming agent orchestration | Same temporary `503` block, before opening an execution stream; Phase 1A-3B dependency. |
+| `/api/github/ops` | POST: status/diff/stage/unstage/commit-push | Returns `503` in private mode until local commands have an isolation boundary. |
+| `/api/deploy` | POST: build/deploy | Returns `503` in private mode until local command/deployment lifecycle authorization is complete. |
+| `/api/chat/main` | POST: AI chat and workspace/tool actions | Verified owner session and registered project; shared guarded runtime for direct reads and tools. |
+| `/api/orchestrate` | POST: agent orchestration | Trusted context propagates through agents, model calls, memory work, tools, and runtime operations. |
+| `/api/orchestrate/stream` | POST: streaming agent orchestration | Same trusted execution boundary; awaited progress validation and disconnect cancellation. |
 | `/api/health/slis` | GET: service metrics and feature configuration | Protected operational diagnostics; no public health-data exemption. |
 | `/api/security/audit` | GET: audit records | Protected operational diagnostics; existing owner check and audit feature gate remain. |
 | `/api/security/readiness` | GET: integration-secret readiness | Protected operational diagnostics; no unauthenticated configuration disclosure. |
@@ -147,44 +148,28 @@ authorization checks, and depended on a default-disabled legacy guard that could
 return a synthetic owner. The central boundary closes these paths in private
 mode without treating middleware as the sole authorization layer.
 
-## Deliberate execution restriction and remaining limits
+## Execution restrictions and remaining limits
 
-The existing agent tool context does not carry the authenticated owner/session
-through project authorization and execution. Chat also has direct workspace
-reads that bypass that context. Consequently, all three AI POST entrypoints are
-blocked in private mode, including for a valid owner. Inactive-stage behavior is
-preserved. This stage does not refactor the orchestrator, tool executor, or agent
-execution context; Phase 1A-3B must establish that boundary before removing the
-restriction.
+The [Phase 1A-3B guide](trusted-workspace-authorization.md) describes the trusted
+execution context, revalidation, runtime containment, historical workspace reuse,
+and operation-specific restrictions. The three AI entrypoints now use that
+boundary. Unsupported local command paths, previews, and new cloud provisioning
+remain unavailable in private mode; inactive staging behavior is preserved.
 
-Direct project, file, GitHub, preview, and deployment APIs remain available to a
-validated owner, subject to their existing policies. This is admission control
-for each request, not a promise to cancel work already started when a session is
-revoked. Cloud processes and externally issued preview URLs may outlive a
-session. Their lifecycle and external URL protection need separate review; API
-session validation does not revoke an already issued external preview URL.
-
-Existing cloud project IDs are derived partly from the creating actor ID. The
-private singleton identity can list and open historical projects without changing
-their IDs, but cloning the same repository under the new identity may derive a
-different project ID and create another workspace. Existing IDs must not be
-rewritten to resolve that compatibility issue; repository/branch reuse requires
-a separately reviewed narrow change if needed.
-
-The frontend lock screen, agent authorization, final deployment protection
-verification, and production cutover remain pending. Existing short-code policy,
-scrypt parameters, distributed unlock limits, secure cookies, credential rotation,
-and session expiration are unchanged. No production credential, migration,
-environment update, merge, or manual deployment is part of this stage.
+Session checks cannot recall a completed external operation or atomically
+combine a database decision with a filesystem/provider effect. Revocation stops
+subsequent work at the next validation boundary, with best-effort cancellation
+of supported pending operations. The frontend lock screen, final deployment
+protection verification, and production cutover remain pending.
 
 ## Validation procedure
 
-Use Node.js 20 for dependency installation, Prisma validation/generation, ESLint,
+Use Node.js 20 and a supported Node.js 22+ runtime for dependency installation, Prisma validation/generation, ESLint,
 TypeScript, unit tests, authentication database tests, and a production build.
 Exercise real protected route handlers for invalid cookies, revoked/expired or
 obsolete sessions, legacy-token attempts, infrastructure failures, invalid
 configuration, mutation-origin checks, and rejection before sensitive side
-effects. Verify public authentication behavior and private-mode AI restrictions.
+effects. Verify public authentication behavior, trusted agent execution, and remaining operation restrictions.
 
 Database-backed verification uses only an explicitly configured disposable local
 PostgreSQL database through `CR8OR_AUTH_TEST_DATABASE_URL`; never substitute

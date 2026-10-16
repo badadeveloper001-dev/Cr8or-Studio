@@ -10,9 +10,6 @@ const PUBLIC_AUTH_METHODS = new Map([
   ["/api/auth/session", "GET"],
   ["/api/auth/lock", "POST"],
 ]);
-const DEFERRED_EXECUTION_PATHS = new Set([
-  "/api/chat/main", "/api/orchestrate", "/api/orchestrate/stream",
-]);
 
 export async function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
@@ -34,7 +31,6 @@ export async function middleware(request: NextRequest) {
       const auth = await authorizeRoute(request, {
         route: pathname.slice(1),
         minRole: "viewer",
-        privateExecutionBlocked: request.method === "POST" && DEFERRED_EXECUTION_PATHS.has(pathname),
       });
       if (!auth.ok) return auth.response;
       // No trusted identity is forwarded in headers. The handler independently

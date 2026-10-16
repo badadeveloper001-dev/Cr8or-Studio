@@ -8,11 +8,35 @@ import { getSupabaseClient } from "@/lib/supabase/server";
 import { appendAuditEvent } from "@/lib/security/audit";
 import { getPrivateAuthMode } from "@/lib/security/private-auth-mode";
 import { readPrivateAuthConfig, readSessionToken } from "@/lib/security/private-auth-http";
-import { resolveOwnerSession } from "@/lib/security/session-store";
+import { resolveOwnerSession, resolveSessionById } from "@/lib/security/session-store";
 
 // A fresh context carries provenance from this resolver, never client-supplied
 // roles or IDs. The marker is not serialized, and stores no authorization cache.
 const VERIFIED_PRIVATE_OWNER = Symbol("verified-private-owner");
+const REVALIDATE_PRIVATE_OWNER = Symbol("revalidate-private-owner");
+const MINT_PRIVATE_PROOF = Symbol("mint-private-proof");
+
+class PrivateOwnerProof {
+  #session: AuthSession;
+  #id: string;
+  #version: number;
+  constructor(key: symbol, session: AuthSession, id: string, version: number) {
+    if (key !== MINT_PRIVATE_PROOF) throw new Error("Invalid owner proof.");
+    this.#session = session;
+    this.#id = id;
+    this.#version = version;
+    Object.freeze(this);
+  }
+  static matches(proof: PrivateOwnerProof | undefined, candidate: AuthSession): proof is PrivateOwnerProof {
+    return !!proof && typeof proof === "object" && #session in proof && proof.#session === candidate;
+  }
+  static async validate(proof: PrivateOwnerProof | undefined, candidate: AuthSession): Promise<boolean> {
+    if (!PrivateOwnerProof.matches(proof, candidate)) return false;
+    readPrivateAuthConfig();
+    const current = await resolveSessionById(proof.#id);
+    return current !== null && current.ownerId === "owner" && current.credentialVersion === proof.#version;
+  }
+}
 
 export type WorkspaceRole = "owner" | "maintainer" | "viewer";
 
@@ -23,6 +47,7 @@ export type AuthSession = {
   provider: "supabase" | "dev-token" | "disabled" | "private-session";
   authenticated: boolean;
   readonly [VERIFIED_PRIVATE_OWNER]?: true;
+  readonly [REVALIDATE_PRIVATE_OWNER]?: PrivateOwnerProof;
 };
 
 const ROLE_PRECEDENCE: Record<WorkspaceRole, number> = {
@@ -81,6 +106,12 @@ export async function resolveAuthSession(request: NextRequest, authEnabled: bool
       authenticated: true,
     };
     Object.defineProperty(session, VERIFIED_PRIVATE_OWNER, { value: true });
+    // The database reference is confined to private fields. It cannot appear in
+    // JSON, prompts, tool arguments, external runtimes, or a client DTO. Copying
+    // symbol properties onto a fabricated object does not transfer the proof.
+    Object.defineProperty(session, REVALIDATE_PRIVATE_OWNER, {
+      value: new PrivateOwnerProof(MINT_PRIVATE_PROOF, session, ownerSession.id, ownerSession.credentialVersion),
+    });
     return Object.freeze(session);
   }
 
@@ -137,8 +168,16 @@ export function hasMinRole(session: AuthSession, minRole: WorkspaceRole): boolea
 
 /** Only contexts returned after this request's PostgreSQL validation qualify. */
 export function isVerifiedPrivateOwnerSession(session: AuthSession): boolean {
+  if (!session || typeof session !== "object") return false;
   return session[VERIFIED_PRIVATE_OWNER] === true && session.provider === "private-session" &&
-    session.authenticated === true && session.userId === "owner" && session.role === "owner";
+    session.authenticated === true && session.userId === "owner" && session.role === "owner" &&
+    PrivateOwnerProof.matches(session[REVALIDATE_PRIVATE_OWNER], session);
+}
+
+/** No cached authorization: every invocation checks PostgreSQL and its clock. */
+export async function revalidatePrivateOwnerSession(session: AuthSession): Promise<boolean> {
+  if (!isVerifiedPrivateOwnerSession(session)) return false;
+  return PrivateOwnerProof.validate(session[REVALIDATE_PRIVATE_OWNER], session);
 }
 
 export function recordAccessDenied(input: {

@@ -461,7 +461,8 @@ async function POSTHandler(request: NextRequest) {
 }
 
 export const POST = withPrivateApiAuth(
-  { route: "api/github/ops:post", minRole: "viewer" },
+  // Legacy local shell operations do not provide an isolated project boundary.
+  { route: "api/github/ops:post", minRole: "viewer", privateExecutionBlocked: true },
   POSTHandler,
 );
 

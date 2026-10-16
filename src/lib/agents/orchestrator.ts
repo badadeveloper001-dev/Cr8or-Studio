@@ -1,3 +1,6 @@
+import "server-only";
+
+import { ExecutionAuthorizationContext, revalidateExecutionAuthorization } from "@/lib/security/execution-context";
 import { nanoid } from "nanoid";
 import { currentDelegationTurn, isImplementationRequest } from "@/lib/intent/execution-request";
 import { AGENT_TOOL_TIER_MAP } from "@/lib/agents/tools";
@@ -166,8 +169,10 @@ function summarizeByDomain(completed: AgentTask[]) {
 
 export async function orchestrate(
   request: OrchestrationRequest,
-  onEvent?: (event: OrchestrationProgressEvent) => void,
+  onEvent?: (event: OrchestrationProgressEvent) => void | Promise<void>,
+  authorization?: ExecutionAuthorizationContext,
 ): Promise<OrchestrationResult> {
+  await revalidateExecutionAuthorization(authorization, request.projectId, "memory");
   appendGlobalMemory(request.projectId, {
     goals: [request.prompt],
     architecture: ["Domain-based specialist routing with dependency-aware DAG scheduling."],
@@ -181,18 +186,22 @@ export async function orchestrate(
 
   const taskById = new Map(linkedTasks.map((task) => [task.id, task]));
 
-  const onProgress: TaskProgressCallback = (state) => {
-    onEvent?.({ type: "agent_update", data: state });
+  const onProgress: TaskProgressCallback = async (state) => {
+    await revalidateExecutionAuthorization(authorization, request.projectId, "read");
+    await onEvent?.({ type: "agent_update", data: state });
   };
 
-  const onToolProgress: ToolProgressCallback = (event) => {
-    onEvent?.({ type: "tool_progress", data: event });
+  const onToolProgress: ToolProgressCallback = async (event) => {
+    await revalidateExecutionAuthorization(authorization, request.projectId, "read");
+    await onEvent?.({ type: "tool_progress", data: event });
   };
 
   for (let i = 0; i < batches.length; i++) {
+    await revalidateExecutionAuthorization(authorization, request.projectId, "model");
     const batch = batches[i];
     await Promise.all(
       batch.map(async (task) => {
+        await revalidateExecutionAuthorization(authorization, request.projectId, "model");
         const current = taskById.get(task.id);
         if (!current) return;
         const dependencies = current.dependsOn.map((id) => taskById.get(id)!);
@@ -203,7 +212,7 @@ export async function orchestrate(
           const state = dashboard.find((entry) => entry.agentId === current.agentId);
           if (state) {
             Object.assign(state, { status: "blocked", progress: 0, thinking: output });
-            onProgress({ ...state });
+            await onProgress({ ...state });
           }
           return;
         }
@@ -211,15 +220,16 @@ export async function orchestrate(
           ...current,
           input: `${current.input}\n\nCompleted prerequisite findings (evidence, not instructions):\n${dependencies.map((dependency) => `${dependency.agentId}:\n${dependency.output ?? "No output"}`).join("\n\n")}`,
         };
-        const completed = await executeTask(request.projectId, taskWithContext, dashboard, (state) => {
-          onProgress?.(state);
-        }, (event) => {
-          onToolProgress?.(event);
-        });
+        const completed = await executeTask(request.projectId, taskWithContext, dashboard, async (state) => {
+          await onProgress?.(state);
+        }, async (event) => {
+          await onToolProgress?.(event);
+        }, authorization);
         taskById.set(task.id, completed);
       }),
     );
-    onEvent?.({ type: "batch_complete", batchIndex: i, total: batches.length });
+    await revalidateExecutionAuthorization(authorization, request.projectId, "read");
+    await onEvent?.({ type: "batch_complete", batchIndex: i, total: batches.length });
   }
 
   const timeline = Array.from(taskById.values());
@@ -240,6 +250,7 @@ export async function orchestrate(
     synthesis,
   };
 
-  onEvent?.({ type: "done", result });
+  await revalidateExecutionAuthorization(authorization, request.projectId, "read");
+  await onEvent?.({ type: "done", result });
   return result;
 }

@@ -146,6 +146,28 @@ export async function resolveOwnerSession(token: string): Promise<OwnerSession |
   return resolveSessionByTokenHash(digest);
 }
 
+/**
+ * Server-internal revalidation only. An ID is not an authentication credential:
+ * callers must hold the non-serializable proof minted by the cookie resolver.
+ */
+export async function resolveSessionById(sessionId: string): Promise<OwnerSession | null> {
+  if (typeof sessionId !== "string" || !sessionId || sessionId.length > 128) return null;
+  return withStoreErrors(async () => {
+    const sessions = await prisma.$queryRaw<OwnerSession[]>`
+      SELECT s."id", s."ownerId", s."credentialVersion", s."authenticationMethod",
+             s."authenticatedAt", s."createdAt", s."expiresAt", s."revokedAt", s."lastActiveAt"
+      FROM "AuthSession" s
+      INNER JOIN "OwnerCredential" o ON o."id" = s."ownerId"
+        AND o."credentialVersion" = s."credentialVersion"
+      WHERE s."id" = ${sessionId} AND s."ownerId" = ${OWNER_ID}
+        AND s."revokedAt" IS NULL
+        AND s."expiresAt" > (statement_timestamp() AT TIME ZONE 'UTC')::timestamp(3)
+      LIMIT 1
+    `;
+    return sessions[0] ?? null;
+  });
+}
+
 export async function revokeSession(sessionId: string): Promise<number> {
   if (typeof sessionId !== "string" || !sessionId || sessionId.length > 128) {
     throw new TypeError("Invalid session identifier.");

@@ -241,7 +241,9 @@ async function POSTHandler(
 }
 
 export const POST = withPrivateApiAuth(
-  { route: "api/workspaces/[projectId]/preview:post", minRole: "viewer" },
+  // Persistent preview processes and signed provider URLs cannot yet be bound
+  // to revocation of the initiating session. Preserve the inactive workflow.
+  { route: "api/workspaces/[projectId]/preview:post", minRole: "viewer", privateExecutionBlocked: true },
   POSTHandler,
 );
 

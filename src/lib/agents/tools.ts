@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { RiskAction } from "@/lib/security/policy";
+import type { ExecutionAuthorizationContext } from "@/lib/security/execution-context";
 import { AgentId } from "@/lib/agents/types";
 
 export type ToolName =
@@ -38,6 +39,8 @@ export interface ToolContext {
   actorId: string;
   actorRole: string;
   approvalId?: string;
+  /** Server-created capability; never included in model tool arguments. */
+  authorization?: ExecutionAuthorizationContext;
 }
 
 export interface ToolResult<T = unknown> {
@@ -64,27 +67,27 @@ export interface ToolDefinition<TParams = unknown, TResult = unknown> {
 
 const readFileParams = z.object({
   path: z.string().min(1),
-});
+}).strict();
 
 const listFilesParams = z.object({
   path: z.string().optional(),
-});
+}).strict();
 
 const writeFileParams = z.object({
   path: z.string().min(1),
   content: z.string(),
-});
+}).strict();
 
-const gitStatusParams = z.object({});
+const gitStatusParams = z.object({}).strict();
 
 const gitDiffParams = z.object({
   path: z.string().optional(),
   staged: z.boolean().optional(),
-});
+}).strict();
 
 const runCommandParams = z.object({
   command: z.string().min(1),
-});
+}).strict();
 
 export const toolParameterSchemas: Record<ToolName, z.ZodSchema<unknown>> = {
   read_file: readFileParams,
@@ -192,6 +195,13 @@ export const AGENT_TOOL_TIER_MAP: Record<AgentId, ToolPermissionTier> = {
 
 export function getAgentToolPreset(agentId: AgentId): ToolName[] {
   const tier = AGENT_TOOL_TIER_MAP[agentId];
-  const preset = AGENT_TOOL_PRESETS[tier as keyof typeof AGENT_TOOL_PRESETS] ?? AGENT_TOOL_PRESETS.none;
+  const preset = AGENT_TOOL_PRESETS[tier === "read-only" ? "read_only" : tier] ?? AGENT_TOOL_PRESETS.none;
   return preset;
+}
+
+/** Agent identities select a fixed capability tier, never owner authentication. */
+export function getToolPresetForActor(actorId: string): ToolName[] {
+  if (actorId === "main-chat") return [...AGENT_TOOL_PRESETS.read_only];
+  if (!Object.hasOwn(AGENT_TOOL_TIER_MAP, actorId)) return [];
+  return getAgentToolPreset(actorId as AgentId);
 }

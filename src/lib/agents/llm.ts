@@ -1,8 +1,25 @@
+import "server-only";
+
+import { ExecutionAuthorizationContext, ExecutionAuthorizationError, revalidateExecutionAuthorization } from "@/lib/security/execution-context";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { generateText, LanguageModel } from "ai";
 import { withRetry } from "@/lib/reliability/retry";
 import { getSecret } from "@/lib/security/secrets";
+
+export interface LLMExecutionOptions {
+  authorization?: ExecutionAuthorizationContext;
+  projectId?: string;
+}
+
+async function revalidateModelExecution(execution: LLMExecutionOptions, operation: "model" | "read") {
+  await revalidateExecutionAuthorization(execution.authorization, execution.projectId ?? execution.authorization?.projectId ?? "", operation);
+}
+
+async function authorizedFetch(url: string, init: RequestInit, execution: LLMExecutionOptions): Promise<Response> {
+  await revalidateModelExecution(execution, "model");
+  return fetch(url, { ...init, signal: execution.authorization?.signal });
+}
 
 export type LLMProvider = "openai" | "anthropic" | "deepseek";
 
@@ -159,6 +176,7 @@ async function runDeepSeekChatCompletion(
   userMessage: string,
   config: LLMConfig,
   attachments: ChatImageAttachment[] = [],
+  execution: LLMExecutionOptions = {},
 ): Promise<string> {
   const apiKey = getSecret("DEEPSEEK_API_KEY");
   if (!apiKey) {
@@ -170,7 +188,7 @@ async function runDeepSeekChatCompletion(
 
   const response = await withRetry(
     async () =>
-      fetch(endpoint, {
+      authorizedFetch(endpoint, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -199,12 +217,13 @@ async function runDeepSeekChatCompletion(
           thinking: { type: "disabled" },
           stream: false,
         }),
-      }),
+      }, execution),
     {
       retries: 2,
       minDelayMs: 200,
       maxDelayMs: 1600,
       shouldRetry: (error) => {
+        if (error instanceof ExecutionAuthorizationError || execution.authorization?.signal.aborted) return false;
         if (!(error instanceof Error)) return false;
         const msg = error.message.toLowerCase();
         return msg.includes("timeout") || msg.includes("rate") || msg.includes("tempor") || msg.includes("503");
@@ -280,6 +299,7 @@ async function runDeepSeekVisionResponse(
   userMessage: string,
   config: LLMConfig,
   attachments: ChatImageAttachment[],
+  execution: LLMExecutionOptions = {},
 ): Promise<string> {
   const apiKey = getSecret("DEEPSEEK_API_KEY");
   if (!apiKey) {
@@ -292,7 +312,7 @@ async function runDeepSeekVisionResponse(
 
   const response = await withRetry(
     async () =>
-      fetch(endpoint, {
+      authorizedFetch(endpoint, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -318,12 +338,13 @@ async function runDeepSeekVisionResponse(
           thinking: { type: "disabled" },
           stream: false,
         }),
-      }),
+      }, execution),
     {
       retries: 2,
       minDelayMs: 200,
       maxDelayMs: 1600,
       shouldRetry: (error) => {
+        if (error instanceof ExecutionAuthorizationError || execution.authorization?.signal.aborted) return false;
         if (!(error instanceof Error)) return false;
         const msg = error.message.toLowerCase();
         return msg.includes("timeout") || msg.includes("rate") || msg.includes("tempor") || msg.includes("503");
@@ -360,6 +381,7 @@ async function runOpenAIChatCompletion(
   userMessage: string,
   config: LLMConfig,
   attachments: ChatImageAttachment[] = [],
+  execution: LLMExecutionOptions = {},
 ): Promise<string> {
   const apiKey = getSecret("OPENAI_API_KEY");
   if (!apiKey) {
@@ -368,7 +390,7 @@ async function runOpenAIChatCompletion(
 
   const response = await withRetry(
     async () =>
-      fetch("https://api.openai.com/v1/chat/completions", {
+      authorizedFetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -395,12 +417,13 @@ async function runOpenAIChatCompletion(
           max_tokens: config.maxTokens,
           temperature: 0.2,
         }),
-      }),
+      }, execution),
     {
       retries: 2,
       minDelayMs: 200,
       maxDelayMs: 1600,
       shouldRetry: (error) => {
+        if (error instanceof ExecutionAuthorizationError || execution.authorization?.signal.aborted) return false;
         if (!(error instanceof Error)) return false;
         const msg = error.message.toLowerCase();
         return msg.includes("timeout") || msg.includes("rate") || msg.includes("tempor") || msg.includes("503");
@@ -428,6 +451,7 @@ async function runAnthropicMessage(
   userMessage: string,
   config: LLMConfig,
   attachments: ChatImageAttachment[] = [],
+  execution: LLMExecutionOptions = {},
 ): Promise<string> {
   const apiKey = getSecret("ANTHROPIC_API_KEY");
   if (!apiKey) {
@@ -436,7 +460,7 @@ async function runAnthropicMessage(
 
   const response = await withRetry(
     async () =>
-      fetch("https://api.anthropic.com/v1/messages", {
+      authorizedFetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -467,12 +491,13 @@ async function runAnthropicMessage(
             },
           ],
         }),
-      }),
+      }, execution),
     {
       retries: 2,
       minDelayMs: 200,
       maxDelayMs: 1600,
       shouldRetry: (error) => {
+        if (error instanceof ExecutionAuthorizationError || execution.authorization?.signal.aborted) return false;
         if (!(error instanceof Error)) return false;
         const msg = error.message.toLowerCase();
         return msg.includes("timeout") || msg.includes("rate") || msg.includes("tempor") || msg.includes("503");
@@ -495,11 +520,12 @@ async function runAnthropicMessage(
   return content;
 }
 
-export async function runAgentLLM(
+async function runAgentLLMInternal(
   systemPrompt: string,
   userMessage: string,
   config?: Partial<LLMConfig>,
   attachments: ChatImageAttachment[] = [],
+  execution: LLMExecutionOptions = {},
 ): Promise<string> {
   const resolved = { ...getDefaultLLMConfig(), ...config };
 
@@ -520,24 +546,26 @@ export async function runAgentLLM(
   if (resolved.provider === "deepseek") {
     try {
       if (attachments.length === 0) {
-        return await runDeepSeekChatCompletion(systemPrompt, userMessage, resolved, attachments);
+        return await runDeepSeekChatCompletion(systemPrompt, userMessage, resolved, attachments, execution);
       }
 
       try {
-        return await runDeepSeekVisionResponse(systemPrompt, userMessage, resolved, attachments);
+        return await runDeepSeekVisionResponse(systemPrompt, userMessage, resolved, attachments, execution);
       } catch (deepseekError) {
+        if (deepseekError instanceof ExecutionAuthorizationError) throw deepseekError;
         const fallbackErrors: string[] = [];
         const visionFallbacks = getVisionFallbackConfigs();
 
         for (const fallback of visionFallbacks) {
           try {
             if (fallback.provider === "openai") {
-              return await runOpenAIChatCompletion(systemPrompt, userMessage, fallback, attachments);
+              return await runOpenAIChatCompletion(systemPrompt, userMessage, fallback, attachments, execution);
             }
             if (fallback.provider === "anthropic") {
-              return await runAnthropicMessage(systemPrompt, userMessage, fallback, attachments);
+              return await runAnthropicMessage(systemPrompt, userMessage, fallback, attachments, execution);
             }
           } catch (fallbackError) {
+            if (fallbackError instanceof ExecutionAuthorizationError) throw fallbackError;
             const reason = fallbackError instanceof Error ? fallbackError.message : "Unknown fallback error";
             fallbackErrors.push(`${fallback.provider}: ${reason}`);
           }
@@ -550,6 +578,7 @@ export async function runAgentLLM(
         return buildFallbackReply(resolved.provider, reason);
       }
     } catch (error) {
+      if (error instanceof ExecutionAuthorizationError) throw error;
       const reason = error instanceof Error ? error.message : "Unknown DeepSeek error";
       return buildFallbackReply(resolved.provider, reason);
     }
@@ -557,8 +586,9 @@ export async function runAgentLLM(
 
   if (attachments.length > 0 && resolved.provider === "openai") {
     try {
-      return await runOpenAIChatCompletion(systemPrompt, userMessage, resolved, attachments);
+      return await runOpenAIChatCompletion(systemPrompt, userMessage, resolved, attachments, execution);
     } catch (error) {
+      if (error instanceof ExecutionAuthorizationError) throw error;
       const reason = error instanceof Error ? error.message : "Unknown OpenAI error";
       return buildFallbackReply(resolved.provider, reason);
     }
@@ -566,8 +596,9 @@ export async function runAgentLLM(
 
   if (attachments.length > 0 && resolved.provider === "anthropic") {
     try {
-      return await runAnthropicMessage(systemPrompt, userMessage, resolved, attachments);
+      return await runAnthropicMessage(systemPrompt, userMessage, resolved, attachments, execution);
     } catch (error) {
+      if (error instanceof ExecutionAuthorizationError) throw error;
       const reason = error instanceof Error ? error.message : "Unknown Anthropic error";
       return buildFallbackReply(resolved.provider, reason);
     }
@@ -575,18 +606,23 @@ export async function runAgentLLM(
 
   const model = getModel(resolved);
   const { text } = await withRetry(
-    async () =>
-      generateText({
+    async () => {
+      await revalidateModelExecution(execution, "model");
+      return generateText({
         model,
         system: systemPrompt,
         prompt: userMessage,
         maxOutputTokens: resolved.maxTokens,
-      }),
+        abortSignal: execution.authorization?.signal,
+        maxRetries: 0,
+      });
+    },
     {
       retries: 2,
       minDelayMs: 200,
       maxDelayMs: 1600,
       shouldRetry: (error) => {
+        if (error instanceof ExecutionAuthorizationError || execution.authorization?.signal.aborted) return false;
         if (!(error instanceof Error)) return false;
         const msg = error.message.toLowerCase();
         return msg.includes("timeout") || msg.includes("rate") || msg.includes("tempor") || msg.includes("503");
@@ -595,4 +631,24 @@ export async function runAgentLLM(
   );
 
   return text;
+}
+
+/** Provider attempts, retries and fallbacks all retain the initiating capability. */
+export async function runAgentLLM(
+  systemPrompt: string,
+  userMessage: string,
+  config?: Partial<LLMConfig>,
+  attachments: ChatImageAttachment[] = [],
+  execution: LLMExecutionOptions = {},
+): Promise<string> {
+  await revalidateModelExecution(execution, "model");
+  try {
+    const output = await runAgentLLMInternal(systemPrompt, userMessage, config, attachments, execution);
+    await revalidateModelExecution(execution, "read");
+    return output;
+  } catch (error) {
+    if (error instanceof ExecutionAuthorizationError) throw error;
+    await revalidateModelExecution(execution, "read");
+    throw error;
+  }
 }

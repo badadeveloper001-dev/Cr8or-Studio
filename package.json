@@ -12,11 +12,12 @@
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration",
-    "test:auth-db": "vitest run --no-file-parallelism tests/integration/auth-foundation.test.ts tests/integration/private-authentication.test.ts tests/integration/private-authorization.test.ts",
+    "test:auth-db": "vitest run --no-file-parallelism tests/integration/auth-foundation.test.ts tests/integration/private-authentication.test.ts tests/integration/private-authorization.test.ts tests/integration/execution-authorization.test.ts",
     "test:auth-boundary": "node scripts/check-auth-client-boundary.mjs",
     "test:auth-http": "node --conditions=react-server scripts/check-private-authorization-http.mjs",
     "owner:manage": "node --conditions=react-server scripts/manage-owner.mjs",
-    "auth:benchmark": "node --conditions=react-server scripts/benchmark-access-code.mjs"
+    "auth:benchmark": "node --conditions=react-server scripts/benchmark-access-code.mjs",
+    "test:execution-auth": "vitest run --no-file-parallelism tests/integration/execution-authorization.test.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.27",

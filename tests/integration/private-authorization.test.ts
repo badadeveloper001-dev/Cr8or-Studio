@@ -393,7 +393,7 @@ describe.skipIf(!testUrl)("private API authorization on isolated PostgreSQL", ()
     expectResponse(await projectsRoute.OPTIONS(request("/api/projects", { method: "OPTIONS" })), 401);
   });
 
-  it("blocks incomplete agent execution paths even after real owner authentication", async () => {
+  it("rejects unknown projects before starting authenticated agent execution", async () => {
     const { cookie } = await createSessionCookie();
     for (const [endpoint, handler] of [
       ["/api/chat/main", chatRoute.POST],
@@ -401,11 +401,11 @@ describe.skipIf(!testUrl)("private API authorization on isolated PostgreSQL", ()
       ["/api/orchestrate/stream", streamRoute.POST],
     ] as const) {
       const incoming = request(endpoint, { method: "POST", cookie, body: {
-        projectId: PROJECT_ID, prompt: "Synthetic execution request", message: "Read package.json",
+        projectId: "unknown-project", prompt: "Synthetic execution request", message: "Read package.json",
       } });
       const parseBody = vi.spyOn(incoming, "json");
-      expectResponse(await handler(incoming), 503);
-      expect(parseBody).not.toHaveBeenCalled();
+      expectResponse(await handler(incoming), 404);
+      expect(parseBody).toHaveBeenCalledOnce();
     }
   });
 });

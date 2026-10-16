@@ -1,6 +1,7 @@
 import { z } from "zod";
 
-import { runAgentLLM, getDefaultLLMConfig } from "@/lib/agents/llm";
+import { runAgentLLM, getDefaultLLMConfig, type LLMExecutionOptions } from "@/lib/agents/llm";
+import { ExecutionAuthorizationError } from "@/lib/security/execution-context";
 import type { IntentDecision } from "@/lib/intent/types";
 import { validateIntentDecision, INTENT_TOOL_MODE, INTENT_SHOULD_DELEGATE, INTENT_REQUIRES_APPROVAL, classifyIntentDeterministic } from "@/lib/intent/classifier";
 
@@ -50,7 +51,7 @@ function buildClassifierPrompt(message: string): string {
   return `User message: "${message}"\n\nClassify intent and provide confidence + reason.`;
 }
 
-export async function classifyIntentWithLLM(message: string): Promise<IntentDecision | null> {
+export async function classifyIntentWithLLM(message: string, execution?: LLMExecutionOptions): Promise<IntentDecision | null> {
   const config = getDefaultLLMConfig();
   
   const hasKey = 
@@ -66,7 +67,9 @@ export async function classifyIntentWithLLM(message: string): Promise<IntentDeci
     const raw = await runAgentLLM(
       CLASSIFIER_SYSTEM_PROMPT,
       buildClassifierPrompt(message),
-      { maxTokens: 200 }
+      { maxTokens: 200 },
+      [],
+      execution,
     );
 
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
@@ -83,12 +86,13 @@ export async function classifyIntentWithLLM(message: string): Promise<IntentDeci
       requiresExplicitApproval: INTENT_REQUIRES_APPROVAL[validated.intent],
       reason: validated.reason,
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof ExecutionAuthorizationError) throw error;
     return null;
   }
 }
 
-export async function classifyIntent(message: string, previousContext = ""): Promise<IntentDecision> {
+export async function classifyIntent(message: string, previousContext = "", execution?: LLMExecutionOptions): Promise<IntentDecision> {
   const deterministic = classifyIntentDeterministic(message, previousContext);
 
   if (deterministic.intent !== "unclear" && deterministic.confidence >= 80) {
@@ -96,7 +100,7 @@ export async function classifyIntent(message: string, previousContext = ""): Pro
   }
 
   if (deterministic.intent === "unclear" || deterministic.confidence < 70) {
-    const llmDecision = await classifyIntentWithLLM(message);
+    const llmDecision = await classifyIntentWithLLM(message, execution);
     if (llmDecision && llmDecision.confidence > deterministic.confidence) {
       return llmDecision;
     }
