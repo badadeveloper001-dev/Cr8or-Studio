@@ -8,6 +8,7 @@ import {
   validateGitOperationScope, validGitPath, type GitOperationRequest, type GitOperationScope,
 } from "@/lib/security/git-operation-catalogue";
 import { shellQuote } from "@/lib/workspace/cloud-path";
+import { formatGitPullTitle, resolveGitProjectCode } from "@/lib/security/git-project-naming";
 import { PRIVATE_GIT_LIMITS, PRIVATE_GIT_PROGRAM } from "@/lib/workspace/private-git-program";
 import type { PrivateCloudSessionProcess } from "@/lib/workspace/private-cloud-write-session";
 
@@ -54,7 +55,13 @@ const oid = z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/);
 const state = { head: oid.nullable(), branch: z.string().nullable(), index: z.string().regex(/^[a-f0-9]{64}$/) };
 function resultData(data: unknown, scope: GitOperationScope): unknown {
   const change = z.object({ status: z.string().regex(/^[ MADRCU?!]{2}$/), path: z.string().refine(validGitPath) }).strict();
-  const title = z.string().regex(/^PROJECT-[0-9]{3,9}: (?:General maintenance|Code improvements|Documentation updates|Test improvements|Configuration updates)$/);
+  const title = z.string().refine((value) => {
+    if (scope.operationKey !== "commit" || scope.category === null) return false;
+    try {
+      const match = /^([A-Z][A-Z0-9]{1,15})-([0-9]{3,9}): (.+)$/.exec(value);
+      return !!match && value === formatGitPullTitle(resolveGitProjectCode(scope.repositoryKey), Number(match[2]), scope.category);
+    } catch { return false; }
+  });
   const historicalTitle = z.string().regex(/^[A-Z][A-Z0-9]{1,11}-[0-9]{3,9}: (?:General maintenance|Code improvements|Documentation updates|Test improvements|Configuration updates)$/);
   const schemas: Record<string, z.ZodType> = {
     status: z.object({ ...state, changes: z.array(change).max(1000) }).strict(),
@@ -108,7 +115,11 @@ export async function privateGitSession(
     metadata.expectedHead = request.expectedHead;
     metadata.expectedIndex = request.expectedIndex;
   }
-  if (request.operation === "commit") { metadata.commitPrefix = "PROJECT"; metadata.category = request.category; }
+  if (request.operation === "commit") {
+    try { metadata.commitPrefix = resolveGitProjectCode(scope.repositoryKey); }
+    catch { throw new ExecutionAuthorizationError(403, "Git project naming is not configured."); }
+    metadata.category = request.category;
+  }
   const frame = JSON.stringify(metadata) + "\n";
   const limits = PRIVATE_GIT_SESSION_LIMITS;
   if (Buffer.byteLength(frame, "utf8") > limits.requestBytes) throw new ExecutionAuthorizationError(403, "Git request exceeds the supported limit.");

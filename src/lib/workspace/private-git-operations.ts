@@ -6,6 +6,7 @@ import { ExecutionAuthorizationError, type ExecutionAuthorizationContext } from 
 import { validateGitAuthorization, type GitAuthorization } from "@/lib/security/git-authorization";
 import { buildGitOperationScope, canonicalGitRepository, gitScopeDigest, isGithubOperation, isGitMutation, parseGitOperation, type GitOperationRequest, type GitOperationScope } from "@/lib/security/git-operation-catalogue";
 import { reserveGitOperation, markGitDispatched, finishGitOperation } from "@/lib/security/git-operation-store";
+import { formatGitPullTitle, resolveGitProjectCode } from "@/lib/security/git-project-naming";
 import { executePrivateGithubOperation, type PrivateGithubOperation } from "@/lib/workspace/private-github-api";
 import { privateGitSession } from "@/lib/workspace/private-git-session";
 import type { DaytonaProvider } from "@/lib/workspace/providers/daytona";
@@ -113,9 +114,10 @@ export function createDaytonaGitAdapter(provider: DaytonaProvider): GitExecution
 export function createGithubGitAdapter(token: () => string | undefined, fetcher?: typeof fetch): GitExecutionAdapter {
   return { kind: "github", execute: async (request, scope, revalidate, signal) => {
     await revalidate();
-    if (request.operation === "create-pr") {
-      // The transport derives the title only from the immutable approved inputs.
-      // Do not let a mutated request or stale naming policy reach credentials.
+    if (request.operation === "create-pr" || request.operation === "upsert-file") {
+      // Reconstruct the approved inputs and naming policy before credentials.
+      // The PR title is fixed by its approved head; file-update numbering is
+      // separately checked against verified history before mutation.
       const intended = buildGitOperationScope({ projectId: scope.projectId, workspace: {
         id: scope.workspaceRecordId, runtimeType: "cloud", provider: "daytona",
         providerWorkspaceId: scope.providerWorkspaceId, repositoryUrl: `https://github.com/${scope.repositoryKey}`,
@@ -142,14 +144,16 @@ export function createGithubGitAdapter(token: () => string | undefined, fetcher?
         expectedHead: request.expectedRemoteHead, expectedBase: request.expectedBase, category: request.category, body: "Created through an authorized Cr8or Studio operation." }; break;
       case "upsert-file": {
         const history = await run({ kind: "commit-sequence", branch: scope.branch, expectedHead: request.expectedRemoteHead });
-        const data = history.data as { head?: string; nextSequence?: number } | undefined;
+        const projectCode = resolveGitProjectCode(scope.repositoryKey);
+        const data = history.data as { head?: string; projectCode?: string; nextSequence?: number } | undefined;
         if (history.status !== "SUCCEEDED" || data?.head !== request.expectedRemoteHead ||
+            data.projectCode !== projectCode ||
             !Number.isSafeInteger(data.nextSequence) || data.nextSequence! < 1 || data.nextSequence! > 999_999_999) {
           throw new ExecutionAuthorizationError(409, "Commit sequence cannot be verified.");
         }
         const sequence = data.nextSequence!;
         operation = { kind: "update-file", branch: scope.branch, expectedHead: request.expectedRemoteHead, path: request.filePath,
-          expectedFileSha: request.expectedBlob, content: request.content, message: `PROJECT-${String(sequence).padStart(3, "0")}: ${request.category}` }; break;
+          expectedFileSha: request.expectedBlob, content: request.content, message: formatGitPullTitle(projectCode, sequence, request.category) }; break;
       }
       default: throw new ExecutionAuthorizationError(403);
     }

@@ -26,7 +26,9 @@ const suffix = randomBytes(8).toString("hex");
 const schemaName = `git_authorization_${suffix}`;
 const PROJECT_A = `git-project-a-${suffix}`, PROJECT_B = `git-project-b-${suffix}`;
 const SANDBOX_A = `git-sandbox-a-${suffix}`, SANDBOX_B = `git-sandbox-b-${suffix}`;
-const REPOSITORY_A = "synthetic-owner/repository-a", REPOSITORY_B = "synthetic-owner/repository-b";
+// This is only a synthetic database registration for the reviewed naming map;
+// this suite never connects to GitHub or creates a provider workspace.
+const REPOSITORY_A = "badadeveloper001-dev/cr8or-studio", REPOSITORY_B = "synthetic-owner/repository-b";
 const HEAD = "1".repeat(40), INDEX = "2".repeat(64), TARGET = "3".repeat(40);
 const ORIGIN = "http://localhost:3000";
 const environmentKeys = ["DATABASE_URL", "DIRECT_URL", "NODE_ENV", "VERCEL", "VERCEL_ENV", "VERCEL_URL", "VERCEL_DEPLOYMENT_ID",
@@ -194,7 +196,7 @@ describe.skipIf(!testUrl)("Git approvals and coordination on isolated PostgreSQL
     const row = await approvalRow(identity.approval.id);
     expect(row.scope).toMatchObject({ operationKey: "create-pr", repositoryKey: "badadeveloper001-dev/cr8or-studio",
       expectedRemoteHead: HEAD, baseBranch: "review", expectedBase: TARGET, category: "General maintenance",
-      pullRequestNaming: { version: 1, projectCode: "CR8OR", strategy: "approved-head-successor" } });
+      pullRequestNaming: { version: 2, projectCode: "CR8OR", strategy: "approved-head-commit" } });
     expect(row).toMatchObject({ sessionId: identity.session.id, credentialVersion: ownerFixture.credentialVersion,
       scopeDigest: catalogue.gitScopeDigest(identity.scope) });
     expect(new Date(identity.approval.expiresAt).getTime() - new Date(identity.approval.requestedAt).getTime()).toBe(10 * 60 * 1_000);
@@ -207,8 +209,8 @@ describe.skipIf(!testUrl)("Git approvals and coordination on isolated PostgreSQL
   it.each([
     ["approved head", { expectedRemoteHead: "a".repeat(40) }], ["category", { category: "Test improvements" }],
     ["base branch", { baseBranch: "different-review" }], ["base head", { expectedBase: "b".repeat(40) }],
-    ["project code", { pullRequestNaming: { version: 1, projectCode: "OTHER", strategy: "approved-head-successor" } }],
-    ["strategy", { pullRequestNaming: { version: 1, projectCode: "CR8OR", strategy: "next-available" } }],
+    ["project code", { pullRequestNaming: { version: 2, projectCode: "OTHER", strategy: "approved-head-commit" } }],
+    ["strategy", { pullRequestNaming: { version: 2, projectCode: "CR8OR", strategy: "next-available" } }],
     ["missing naming", { pullRequestNaming: undefined }], ["repository", { repositoryKey: REPOSITORY_B }],
   ])("cannot consume a pull-request approval with changed %s", async (_name, changed) => {
     const identity = await approvedPullRequest();
@@ -230,6 +232,49 @@ describe.skipIf(!testUrl)("Git approvals and coordination on isolated PostgreSQL
     const retained = await approvalRow(identity.approval.id);
     expect(retained.consumedAt).toBeNull();
     expect(retained.scope).not.toHaveProperty("pullRequestNaming");
+  });
+  it("rejects the previous successor allocation policy without rewriting its approval record", async () => {
+    const identity = await approvedPullRequest();
+    const legacyNaming = JSON.stringify({ version: 1, projectCode: "CR8OR", strategy: "approved-head-successor" });
+    await database.$executeRaw`UPDATE "GitApproval" SET "scope" = jsonb_set("scope", '{pullRequestNaming}', ${legacyNaming}::jsonb)
+      WHERE "id" = ${identity.approval.id}::uuid`;
+    expect(await approvals.listPrivateGitApprovals(identity.authSession)).toEqual([]);
+    expect(await approvals.consumePrivateGitApproval(identity.authorization, identity.scope, identity.approval.id, randomUUID(), "frontend")).toBe(false);
+    const row = await approvalRow(identity.approval.id);
+    expect(row.consumedAt).toBeNull();
+    expect(row.scope.pullRequestNaming).toEqual(JSON.parse(legacyNaming));
+  });
+
+  it.each(["commit", "upsert-file"] as const)("persists immutable naming policy for %s without upgrading old approvals", async operation => {
+    const input: GitOperationRequest = operation === "commit" ? { operation, branch: "main", expectedHead: HEAD,
+      expectedIndex: INDEX, category: "General maintenance" } : { operation, branch: "main", expectedRemoteHead: HEAD,
+      filePath: "src/app.ts", expectedBlob: TARGET, content: "synthetic update\n", category: "General maintenance" };
+    const identity = await approved(input);
+    expect(identity.scope.commitNaming).toEqual({ version: 1, projectCode: "CR8OR", strategy: "registered-history-next" });
+    expect((await approvalRow(identity.approval.id)).scope.commitNaming).toEqual(identity.scope.commitNaming);
+    for (const changed of [
+      { category: "Test improvements" }, { commitNaming: { version: 1, projectCode: "PROJECT", strategy: "registered-history-next" } },
+      { commitNaming: { version: 1, projectCode: "CR8OR", strategy: "next-available" } }, { commitNaming: undefined },
+      operation === "commit" ? { expectedHead: TARGET } : { expectedRemoteHead: TARGET },
+      operation === "commit" ? { expectedIndex: "f".repeat(64) } : { contentDigest: "f".repeat(64) },
+      operation === "commit" ? { expectedHead: "e".repeat(40) } : { expectedBlob: "e".repeat(40) },
+    ]) {
+      expect(await approvals.consumePrivateGitApproval(identity.authorization, { ...identity.scope, ...(changed as object) },
+        identity.approval.id, randomUUID(), "frontend").catch(() => false)).toBe(false);
+    }
+    expect((await approvalRow(identity.approval.id)).consumedAt).toBeNull();
+    await database.$executeRaw`UPDATE "GitApproval" SET "scope" = "scope" - 'commitNaming'
+      WHERE "id" = ${identity.approval.id}::uuid`;
+    expect(await approvals.listPrivateGitApprovals(identity.authSession)).toEqual([]);
+    expect(await approvals.consumePrivateGitApproval(identity.authorization, identity.scope, identity.approval.id, randomUUID(), "frontend")).toBe(false);
+    const retained = await approvalRow(identity.approval.id);
+    expect(retained.scope).not.toHaveProperty("commitNaming");
+    expect(retained.consumedAt).toBeNull();
+    const fresh = await approvals.createPrivateGitApproval(identity.authorization, identity.scope);
+    await approvals.decidePrivateGitApproval(identity.authSession, fresh.id, "approved");
+    const operationId = randomUUID();
+    expect(await approvals.consumePrivateGitApproval(identity.authorization, identity.scope, fresh.id, operationId, "frontend")).toBe(true);
+    expect(await approvals.validateConsumedPrivateGitApproval(identity.authorization, identity.scope, fresh.id, operationId, "frontend")).toBe(true);
   });
   it.each(["revoked", "expired", "rotated"] as const)("keeps pull-request approval invalid when its initiating session is %s", async state => {
     const identity = await approvedPullRequest();

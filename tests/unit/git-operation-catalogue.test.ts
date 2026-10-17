@@ -65,11 +65,19 @@ describe("trusted Git operation catalogue", () => {
   });
 
   it.each([{ title: "CR8OR-012: General maintenance" }, { projectCode: "FORGED" }, { sequence: 12 },
-    { pullRequestNaming: { version: 1, projectCode: "CR8OR", strategy: "approved-head-successor" } }])(
+    { pullRequestNaming: { version: 2, projectCode: "CR8OR", strategy: "approved-head-commit" } }])(
     "rejects caller-supplied pull-request naming metadata %#", fields => {
       expect(() => parseGitOperation({ ...pullRequest, ...fields })).toThrow(ExecutionAuthorizationError);
     },
   );
+
+  it.each(["commit", "upsert-file"] as const)("rejects client naming metadata for %s", operation => {
+    const request = operation === "commit" ? { operation, ...localMutation, category: "General maintenance" } : update;
+    for (const fields of [{ projectCode: "FORGED" }, { sequence: 1 }, { title: "CR8OR-001: General maintenance" },
+      { commitNaming: { version: 1, projectCode: "CR8OR", strategy: "registered-history-next" } }]) {
+      expect(() => parseGitOperation({ ...request, ...fields })).toThrow(ExecutionAuthorizationError);
+    }
+  });
 
   it.each(["", "-main", "main;id", "$(id)", "main\nsecret", "main branch", "../main", "main..old", "a//b", "a/.hidden", "a/b.lock", "refs/heads/main", "HEAD", "main.", "a".repeat(201)])(
     "rejects unsafe Git reference %j", value => expect(validGitRef(value)).toBe(false),
@@ -120,9 +128,9 @@ describe("registered Git repository and operation scopes", () => {
   );
 
   it("derives identity only from the registered context and excludes source content", () => {
-    const scope = buildGitOperationScope(context, parseGitOperation(update));
+    const scope = buildGitOperationScope(namedContext, parseGitOperation(update));
     expect(scope).toMatchObject({ ownerId: "owner", projectId: "project-a", workspaceRecordId: "workspace-record-a",
-      providerWorkspaceId: "sandbox-a", repositoryKey: "fixture/project-a", branch: "main", filePath: "src/app.ts", operationKey: "upsert-file" });
+      providerWorkspaceId: "sandbox-a", repositoryKey: "badadeveloper001-dev/cr8or-studio", branch: "main", filePath: "src/app.ts", operationKey: "upsert-file" });
     expect(JSON.stringify(scope)).not.toContain(update.content);
     expect(scope.payloadDigest).toMatch(/^[0-9a-f]{64}$/);
   });
@@ -141,10 +149,10 @@ describe("registered Git repository and operation scopes", () => {
   });
 
   it("binds payload digests to exact contents, target commit and file scope", () => {
-    const base = buildGitOperationScope(context, parseGitOperation(update));
+    const base = buildGitOperationScope(namedContext, parseGitOperation(update));
     for (const replacement of [{ content: "different" }, { filePath: "src/other.ts" }, { expectedBlob: otherHead },
       { expectedRemoteHead: otherHead }, { category: "Test improvements" }]) {
-      const changed = buildGitOperationScope(context, parseGitOperation({ ...update, ...replacement }));
+      const changed = buildGitOperationScope(namedContext, parseGitOperation({ ...update, ...replacement }));
       expect(changed.payloadDigest).not.toBe(base.payloadDigest);
       expect(gitScopeDigest(changed)).not.toBe(gitScopeDigest(base));
     }
@@ -155,7 +163,7 @@ describe("registered Git repository and operation scopes", () => {
 
   it("binds pull-request naming to the trusted repository mapping and immutable approved head", () => {
     const scope = buildGitOperationScope(namedContext, parseGitOperation(pullRequest));
-    expect(scope.pullRequestNaming).toEqual({ version: 1, projectCode: "CR8OR", strategy: "approved-head-successor" });
+    expect(scope.pullRequestNaming).toEqual({ version: 2, projectCode: "CR8OR", strategy: "approved-head-commit" });
     expect(scope.repositoryKey).toBe("badadeveloper001-dev/cr8or-studio");
     expect(scope.expectedRemoteHead).toBe(head);
     expect(Object.isFrozen(scope.pullRequestNaming)).toBe(true);
@@ -171,10 +179,10 @@ describe("registered Git repository and operation scopes", () => {
     } catch (error) { expect(error).toMatchObject({ status: 409, message: "Registered project naming is unavailable." }); }
   });
 
-  it.each([undefined, { version: 2, projectCode: "CR8OR", strategy: "approved-head-successor" },
-    { version: 1, projectCode: "OTHER", strategy: "approved-head-successor" },
-    { version: 1, projectCode: "CR8OR", strategy: "next-available" },
-    { version: 1, projectCode: "CR8OR", strategy: "approved-head-successor", sequence: 12 },
+  it.each([undefined, { version: 1, projectCode: "CR8OR", strategy: "approved-head-successor" },
+    { version: 2, projectCode: "OTHER", strategy: "approved-head-commit" },
+    { version: 2, projectCode: "CR8OR", strategy: "next-available" },
+    { version: 2, projectCode: "CR8OR", strategy: "approved-head-commit", sequence: 12 },
   ])("invalidates missing, altered or unsupported pull-request naming %#", pullRequestNaming => {
     const scope = buildGitOperationScope(namedContext, parseGitOperation(pullRequest));
     expect(() => validateGitOperationScope({ ...scope, pullRequestNaming })).toThrow(ExecutionAuthorizationError);
@@ -195,9 +203,42 @@ describe("registered Git repository and operation scopes", () => {
       expect(gitScopeDigest(changed)).not.toBe(gitScopeDigest(scope));
     }
     expect(() => validateGitOperationScope({ ...scope, repositoryKey: "unrelated/project" })).toThrow();
-    const unrelated = buildGitOperationScope(context, parseGitOperation(update));
+    const unrelated = buildGitOperationScope(namedContext, parseGitOperation(update));
     expect(unrelated).not.toHaveProperty("pullRequestNaming");
     expect(() => validateGitOperationScope({ ...unrelated, pullRequestNaming: scope.pullRequestNaming })).toThrow();
+  });
+
+  it.each(["commit", "upsert-file"] as const)("binds trusted project naming and immutable mutation inputs for %s", operation => {
+    const request = parseGitOperation(operation === "commit" ? { operation, ...localMutation, category: "General maintenance" } : update);
+    const scope = buildGitOperationScope(namedContext, request);
+    expect(scope.commitNaming).toEqual({ version: 1, projectCode: "CR8OR", strategy: "registered-history-next" });
+    expect(Object.isFrozen(scope.commitNaming)).toBe(true);
+    expect(() => { scope.commitNaming!.projectCode = "OTHER"; }).toThrow();
+    expect(scope).not.toHaveProperty("pullRequestNaming");
+    for (const commitNaming of [undefined, { version: 0, projectCode: "CR8OR", strategy: "registered-history-next" },
+      { version: 1, projectCode: "PROJECT", strategy: "registered-history-next" },
+      { version: 1, projectCode: "CR8OR", strategy: "next-available" },
+      { version: 1, projectCode: "CR8OR", strategy: "registered-history-next", sequence: 1 }]) {
+      expect(() => validateGitOperationScope({ ...scope, commitNaming })).toThrow(ExecutionAuthorizationError);
+    }
+    const relevantFields = operation === "commit" ? ["expectedHead", "expectedIndex", "category"] :
+      ["expectedRemoteHead", "filePath", "contentDigest", "category"];
+    for (const field of relevantFields) {
+      expect(() => validateGitOperationScope({ ...scope, [field]: null })).toThrow(ExecutionAuthorizationError);
+    }
+    const changed = buildGitOperationScope(namedContext, parseGitOperation({ ...request, category: "Test improvements" }));
+    expect(gitScopeDigest(changed)).not.toBe(gitScopeDigest(scope));
+    expect(() => buildGitOperationScope(context, request)).toThrow("Registered project naming is unavailable.");
+    expect(() => validateGitOperationScope({ ...scope, repositoryKey: "unrelated/project" })).toThrow();
+  });
+
+  it.each(["status", "stage", "create-pr"] as const)("does not add commit allocation semantics to %s", operation => {
+    const request = parseGitOperation(operation === "stage" ? { operation, ...localMutation, paths: ["src/app.ts"] } :
+      operation === "create-pr" ? pullRequest : { operation });
+    const scope = buildGitOperationScope(namedContext, request);
+    expect(scope).not.toHaveProperty("commitNaming");
+    expect(() => validateGitOperationScope({ ...scope,
+      commitNaming: { version: 1, projectCode: "CR8OR", strategy: "registered-history-next" } })).toThrow();
   });
 
   it("binds digest to project, workspace, repository, branch and full structured scope", () => {

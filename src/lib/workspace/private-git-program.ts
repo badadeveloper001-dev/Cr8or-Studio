@@ -1,5 +1,7 @@
 import "server-only";
 
+import { GIT_PROJECT_CODES } from "@/lib/security/git-project-naming";
+
 export const PRIVATE_GIT_LIMITS = Object.freeze({
   seconds: 30,
   outputBytes: 256 * 1024,
@@ -7,6 +9,7 @@ export const PRIVATE_GIT_LIMITS = Object.freeze({
   pathBytes: 4096,
   paths: 64,
   scannedEntries: 50_000,
+  historyCommits: 1000,
 });
 
 /**
@@ -29,6 +32,8 @@ MAX_REQUEST=32768
 MAX_PATH=4096
 MAX_PATHS=64
 MAX_ENTRIES=50000
+MAX_HISTORY_COMMITS=1000
+PROJECT_CODES=${JSON.stringify(GIT_PROJECT_CODES)}
 ROOT="repo"
 PREFIX="CR8OR-GIT/1 "
 TRUSTED_OWNER_UIDS=(0,)
@@ -351,7 +356,11 @@ try:
         paths=[safe_path(value) for value in request["paths"]]
         if len(set(paths))!=len(paths): raise Rejected()
     if operation=="commit":
-        if request["commitPrefix"]!="PROJECT" or request["category"] not in CATEGORIES: raise Rejected()
+        # The registry is embedded by trusted server code, never selected from
+        # model arguments, repository history or sandbox environment variables.
+        repository_key=expected_repository[len("https://github.com/"):-4]
+        approved_prefix=PROJECT_CODES.get(repository_key)
+        if approved_prefix is None or request["commitPrefix"]!=approved_prefix or request["category"] not in CATEGORIES: raise Rejected()
     parent_fd=os.open(".",os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
     root_fd=os.open(ROOT,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent_fd)
     git_fd=os.open(".git",os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=root_fd)
@@ -418,9 +427,11 @@ try:
         # mutation. Database coordination remains the cross-instance authority.
         config_repository(expected_repository)
         validate_expected(request,head(),branch(),index_digest())
-        mutating=True
-        if operation=="stage": git(["add","--",*paths])
+        if operation=="stage":
+            mutating=True
+            git(["add","--",*paths])
         elif operation=="unstage":
+            mutating=True
             if initial_head is None: git(["rm","--cached","--ignore-unmatch","--",*paths])
             else: git(["restore","--staged","--source=HEAD","--",*paths])
         else:
@@ -433,12 +444,35 @@ try:
             prefix=request["commitPrefix"]
             last=0
             if initial_head is not None:
-                history,_=git(["log","--all","--no-show-signature","--format=%s"])
-                for line in history.decode("utf-8").splitlines():
-                    match=re.fullmatch(re.escape(prefix)+r"-([0-9]{3,9}): .+",line)
-                    if match is not None: last=max(last,int(match.group(1)))
+                refs,_=git(["for-each-ref","--format=%(refname)%00%(objectname)"])
+                history,_=git(["log","--all","--no-show-signature","--max-count="+str(MAX_HISTORY_COMMITS+1),"--format=%H%x00%s%x00"])
+                commits=[record for record in history.split(b"\0\n") if record]
+                if len(commits)>MAX_HISTORY_COMMITS: raise Limited()
+                seen={}
+                for record in commits:
+                    fields=record.split(b"\0")
+                    if len(fields)!=2: raise Rejected()
+                    oid,subject=[field.decode("utf-8") for field in fields]
+                    if HASH_RE.fullmatch(oid) is None: raise Rejected()
+                    # Legacy PROJECT identifiers remain unchanged and reserve
+                    # their numeric floor. Other project prefixes cannot select
+                    # this repository's trusted code or affect its allocation.
+                    for namespace in {prefix,"PROJECT"}:
+                        if not subject.startswith(namespace+"-"): continue
+                        match=re.fullmatch(re.escape(namespace)+r"-([0-9]{3,9}): .+",subject)
+                        if match is None: raise Rejected()
+                        number=int(match.group(1))
+                        if number<1 or number>999999999 or str(number).zfill(3)!=match.group(1): raise Rejected()
+                        identity=(namespace,number)
+                        if identity in seen and seen[identity]!=oid: raise Conflict()
+                        seen[identity]=oid
+                        last=max(last,number)
+                current_refs,_=git(["for-each-ref","--format=%(refname)%00%(objectname)"])
+                if refs!=current_refs: raise Conflict()
             if last>=999999999: raise Limited()
             title=prefix+"-"+str(last+1).zfill(3)+": "+request["category"]
+            validate_expected(request,head(),branch(),index_digest())
+            mutating=True
             git(["commit","--no-gpg-sign","--no-verify","--cleanup=verbatim","-F","-"],input_bytes=(title+"\n").encode("utf-8"))
         data={"head":head(),"branch":branch(),"index":index_digest(),"operation":operation}
         if operation=="commit":

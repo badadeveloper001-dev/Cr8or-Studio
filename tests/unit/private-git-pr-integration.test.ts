@@ -43,7 +43,7 @@ function fixture(options: FixtureOptions = {}) {
   const sequence = options.sequence ?? 11;
   const head = sequence.toString(16).padStart(40, "0");
   const category = options.category ?? "General maintenance";
-  const title = `CR8OR-${String(sequence + 1).padStart(3, "0")}: ${category}`;
+  const title = `CR8OR-${String(sequence).padStart(3, "0")}: ${category}`;
   const workspace: ExecutionWorkspace = { id: "registered-workspace", runtimeType: "cloud", provider: "daytona",
     providerWorkspaceId: "registered-sandbox", repositoryUrl: `https://github.com/${repositoryKey}.git`, branch: "feature/review" };
   const context = { projectId: "registered-project", workspace, signal: new AbortController().signal, executionId: "execution-fixture" } as unknown as ExecutionAuthorizationContext;
@@ -87,7 +87,7 @@ function fixture(options: FixtureOptions = {}) {
     if (path === "/tags") return json([]);
     if (path === "/commits") {
       const tip = url.searchParams.get("sha");
-      if (tip === head) return json([{ sha: head, commit: { message: `CR8OR-${String(sequence).padStart(3, "0")}: Code improvements` } }]);
+      if (tip === head) return json([{ sha: head, commit: { message: `CR8OR-${String(sequence).padStart(3, "0")}: ${category}` } }]);
       if (tip === base) return json([{ sha: base, commit: { message: "CR8OR-001: General maintenance" } }]);
       if (tip === other) return json([{ sha: other, commit: { message: `CR8OR-${String(options.otherBranchSequence).padStart(3, "0")}: Code improvements` } }]);
     }
@@ -123,7 +123,7 @@ describe("trusted create-PR adapter through the GitHub HTTP transport", () => {
       data: { number: 42, state: "open", draft: true, title: test.title,
         url: `https://github.com/${repositoryKey}/pull/42` } });
     expect(test.mutations).toEqual([{ method: "POST", path: "/pulls", body: {
-      title: `CR8OR-012: ${category}`, body: "Created through an authorized Cr8or Studio operation.",
+      title: `CR8OR-011: ${category}`, body: "Created through an authorized Cr8or Studio operation.",
       head: "feature/review", base: "main", draft: true,
     } }]);
     expect(test.unexpected).toEqual([]);
@@ -138,12 +138,12 @@ describe("trusted create-PR adapter through the GitHub HTTP transport", () => {
 
   it("advances numbering only when a newly approved immutable head advances history", async () => {
     const first = fixture({ sequence: 11 });
-    const second = fixture({ sequence: 12, existingTitle: "CR8OR-012: General maintenance" });
+    const second = fixture({ sequence: 12, existingTitle: "CR8OR-011: General maintenance" });
     expect((await first.execute()).status).toBe("SUCCEEDED");
     expect((await second.execute()).status).toBe("SUCCEEDED");
     expect(first.scope.expectedRemoteHead).not.toBe(second.scope.expectedRemoteHead);
-    expect(first.mutations[0].body.title).toBe("CR8OR-012: General maintenance");
-    expect(second.mutations[0].body.title).toBe("CR8OR-013: General maintenance");
+    expect(first.mutations[0].body.title).toBe("CR8OR-011: General maintenance");
+    expect(second.mutations[0].body.title).toBe("CR8OR-012: General maintenance");
   });
 
   it.each(["title", "sequence", "projectCode"])("rejects caller-supplied %s before adapter dispatch", field => {

@@ -17,7 +17,7 @@ let repo: string;
 let adapter: ReturnType<typeof createControlledDaytonaSessionAdapter>;
 const registration = { projectId: "local-disposable-fixture", workspace: {
   id: "synthetic-registration", runtimeType: "cloud" as const, provider: "daytona", providerWorkspaceId: "synthetic-daytona",
-  repositoryUrl: "https://github.com/fixture/repo.git", branch: "main",
+  repositoryUrl: "https://github.com/badadeveloper001-dev/cr8or-studio.git", branch: "main",
 } };
 async function git(...args: string[]) {
   return (await execute("git", args, { cwd: repo, env: { NODE_ENV: "test", PATH: process.env.PATH, HOME: root,
@@ -68,7 +68,7 @@ describe("private Git protocol with real disposable repositories and controlled 
     const committed = await operation({ operation: "commit", branch: "main", expectedHead: afterStage.head,
       expectedIndex: afterStage.index, category: "Code improvements" });
     expect(committed).toMatchObject({ status: "SUCCEEDED", cancellationConfirmed: true, cleanupConfirmed: true,
-      data: { title: "PROJECT-001: Code improvements" } });
+      data: { title: "CR8OR-001: Code improvements" } });
     expect(await git("show", "HEAD:src/label.ts")).toBe(content.trim());
     expect(await fs.readFile(path.join(repo, "src/label.ts"), "utf8")).toBe(content);
     expect(adapter.activeCommands.size).toBe(0);

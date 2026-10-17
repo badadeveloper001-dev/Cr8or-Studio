@@ -28,7 +28,7 @@ const relativePath = z.string().min(1).refine((value) => {
   return value.split("/").every((part) => part && part !== "." && part !== ".." && !part.startsWith("-") &&
     !/^(?:\.git|\.env(?:\..*)?|\.ssh|\.aws|\.npmrc|\.netrc|credentials(?:\..*)?)$/i.test(part));
 });
-const commitMessage = z.string().regex(/^PROJECT-[0-9]{3,9}: (General maintenance|Code improvements|Documentation updates|Test improvements|Configuration updates)$/);
+const commitMessage = z.string().regex(/^[A-Z][A-Z0-9]{1,15}-[0-9]{3,9}: (General maintenance|Code improvements|Documentation updates|Test improvements|Configuration updates)$/);
 const utf8Content = z.string().refine((value) => Buffer.byteLength(value, "utf8") <= PRIVATE_GITHUB_LIMITS.fileBytes &&
   Buffer.from(value, "utf8").toString("utf8") === value);
 const operationSchema = z.discriminatedUnion("kind", [
@@ -83,8 +83,16 @@ export async function executePrivateGithubOperation(input: PrivateGithubInput): 
   const operation = parsedOperation.data;
   const repositoryKey = `${repository.owner}/${repository.repo}`.toLowerCase();
   let projectCode: string | undefined;
-  if (operation.kind === "create-pr") {
+  if (["create-pr", "commit-sequence", "update-file"].includes(operation.kind)) {
     try { projectCode = resolveGitProjectCode(repositoryKey); } catch { return { status: "FAILED", code: "INVALID_REQUEST" }; }
+  }
+  if (operation.kind === "update-file") {
+    const match = /^([A-Z][A-Z0-9]{1,15})-([0-9]{3,9}): (.+)$/.exec(operation.message);
+    if (!match || match[1] !== projectCode || Number(match[2]) < 1 ||
+      match[2] !== String(Number(match[2])).padStart(3, "0") ||
+      operation.message !== formatGitPullTitle(match[1], Number(match[2]), match[3])) {
+      return { status: "FAILED", code: "INVALID_REQUEST" };
+    }
   }
   const repoPath = `/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.repo)}`;
   const endpoint = (suffix: string) => `https://api.github.com${repoPath}${suffix}`;
@@ -207,27 +215,41 @@ export async function executePrivateGithubOperation(input: PrivateGithubInput): 
     return history;
   };
   const titleSequence = (title: string, code: string) => {
-    // code is server-owned (or the existing fixed PROJECT commit namespace).
-    const match = new RegExp(`^${code}-([0-9]{3,}): `).exec(title);
-    if (!match) return 0;
+    // Only a reviewed project namespace (or the historical fixed namespace).
+    const subject = title.split("\n", 1)[0];
+    if (!subject.startsWith(`${code}-`)) return 0;
+    const match = new RegExp(`^${code}-([0-9]{3,9}): `).exec(subject);
+    if (!match) throw new TransportFailure("PROVIDER_FAILURE");
     const value = Number(match[1]);
-    if (!Number.isSafeInteger(value) || value > 999_999_999) throw new TransportFailure("PROVIDER_FAILURE");
+    if (!Number.isSafeInteger(value) || value < 1 || value > 999_999_999 ||
+      match[1] !== String(value).padStart(3, "0")) throw new TransportFailure("PROVIDER_FAILURE");
     return value;
   };
-  const scanHistorySequences = async (refs: ReadonlyArray<{ sha: string }>, code: string,
+  const scanHistorySequences = async (refs: ReadonlyArray<{ sha: string }>, codes: readonly string[],
     known?: Awaited<ReturnType<typeof completeHistory>>) => {
-    const seen = new Set<string>();
-    let sequence = 0;
+    const seen = new Map<string, string>();
+    const numbered = new Map<string, string>();
+    const sequences: Record<string, number> = Object.fromEntries(codes.map(code => [code, 0]));
     for (const tip of new Set(refs.map((item) => item.sha))) {
       const history = known?.[0].sha === tip ? known : await completeHistory(tip);
       for (const commit of history) {
-        if (seen.has(commit.sha)) continue;
-        seen.add(commit.sha);
+        if (seen.has(commit.sha)) {
+          if (seen.get(commit.sha) !== commit.commit.message) throw new TransportFailure("PROVIDER_FAILURE");
+          continue;
+        }
+        seen.set(commit.sha, commit.commit.message);
         if (seen.size > PRIVATE_GITHUB_LIMITS.sequenceCommits) throw new TransportFailure("PROVIDER_FAILURE");
-        sequence = Math.max(sequence, titleSequence(commit.commit.message, code));
+        for (const code of codes) {
+          const value = titleSequence(commit.commit.message, code);
+          if (!value) continue;
+          const key = `${code}-${value}`;
+          if (numbered.has(key)) throw new TransportFailure("REMOTE_CHANGED");
+          numbered.set(key, commit.sha);
+          sequences[code] = Math.max(sequences[code], value);
+        }
       }
     }
-    return sequence;
+    return sequences;
   };
   const listCompletePulls = async () => {
     const items = z.array(z.object({ number: z.number().int().positive(), title: z.string().max(1024),
@@ -235,6 +257,13 @@ export async function executePrivateGithubOperation(input: PrivateGithubInput): 
       .parse(await request("/pulls?state=all&per_page=100", "GET", undefined, false, true));
     if (items.length >= PRIVATE_GITHUB_LIMITS.items || new Set(items.map((item) => item.number)).size !== items.length ||
       items.some((item) => item.base.repo.full_name.toLowerCase() !== repositoryKey)) throw new TransportFailure("PROVIDER_FAILURE");
+    const identifiers = new Set<number>();
+    for (const item of items) {
+      const identifier = titleSequence(item.title, projectCode!);
+      if (!identifier) continue;
+      if (identifiers.has(identifier)) throw new TransportFailure("REMOTE_CHANGED");
+      identifiers.add(identifier);
+    }
     // Keep only the numbering snapshot: provider URLs and unrelated PR bodies are never trusted or returned.
     return items.map((item) => ({ number: item.number, title: item.title })).sort((left, right) => left.number - right.number);
   };
@@ -254,19 +283,20 @@ export async function executePrivateGithubOperation(input: PrivateGithubInput): 
       const items = z.array(z.object({ sha, commit: z.object({ message: z.string().max(16_384) }) })).max(PRIVATE_GITHUB_LIMITS.items)
         .parse(await request(`/commits?sha=${encodeURIComponent(operation.branch)}&per_page=100`));
       return { commits: items.map((item) => {
-        const match = /^PROJECT-([0-9]{3,}): /.exec(item.commit.message);
-        const sequence = match ? Number(match[1]) : null;
-        if (sequence !== null && (!Number.isSafeInteger(sequence) || sequence > 999_999_999)) throw new TransportFailure("PROVIDER_FAILURE");
+        let code: string | undefined;
+        try { code = resolveGitProjectCode(repositoryKey); } catch { /* Unknown repositories have no trusted naming metadata. */ }
+        const sequence = code ? titleSequence(item.commit.message, code) || titleSequence(item.commit.message, "PROJECT") || null : null;
         return { sha: item.sha, sequence };
       }), complete: items.length < PRIVATE_GITHUB_LIMITS.items };
     }
     if (operation.kind === "commit-sequence") {
       const expected = [{ branch: operation.branch, head: operation.expectedHead }];
       const initialRefs = await listCompleteRefs(expected);
-      const sequence = await scanHistorySequences(initialRefs, "PROJECT");
+      const sequences = await scanHistorySequences(initialRefs, [projectCode!, "PROJECT"]);
+      const sequence = Math.max(...Object.values(sequences));
       if (sequence >= 999_999_999) throw new TransportFailure("PROVIDER_FAILURE");
       if (JSON.stringify(await listCompleteRefs(expected)) !== JSON.stringify(initialRefs)) throw new TransportFailure("REMOTE_CHANGED");
-      return { head: operation.expectedHead, nextSequence: sequence + 1 };
+      return { head: operation.expectedHead, projectCode, nextSequence: sequence + 1 };
     }
     if (operation.kind === "contents") {
       const result = await readContent(operation.path ?? "", operation.branch);
@@ -311,13 +341,15 @@ export async function executePrivateGithubOperation(input: PrivateGithubInput): 
       // fails; mutable state must never silently select a different approved title.
       const code = projectCode;
       const approvedHistory = await completeHistory(operation.expectedHead);
-      const nextSequence = 1 + Math.max(0, ...approvedHistory.map((item) => titleSequence(item.commit.message, code)));
-      const title = formatGitPullTitle(code, nextSequence, operation.category);
+      const sequence = titleSequence(approvedHistory[0].commit.message, code);
+      const title = formatGitPullTitle(code, sequence, operation.category);
+      if (approvedHistory[0].commit.message.split("\n", 1)[0] !== title) throw new TransportFailure("REMOTE_CHANGED");
       const expected = [{ branch: operation.branch, head: operation.expectedHead }, { branch: operation.base, head: operation.expectedBase }];
       const initialRefs = await listCompleteRefs(expected);
-      if (await scanHistorySequences(initialRefs, code, approvedHistory) >= nextSequence) throw new TransportFailure("REMOTE_CHANGED");
+      const sequences = await scanHistorySequences(initialRefs, [code, "PROJECT"], approvedHistory);
+      if (sequences[code] !== sequence || sequences.PROJECT >= sequence) throw new TransportFailure("REMOTE_CHANGED");
       const initialPulls = await listCompletePulls();
-      if (initialPulls.some((item) => titleSequence(item.title, code) >= nextSequence)) throw new TransportFailure("REMOTE_CHANGED");
+      if (initialPulls.some((item) => titleSequence(item.title, code) >= sequence)) throw new TransportFailure("REMOTE_CHANGED");
       if (JSON.stringify(await listCompleteRefs(expected)) !== JSON.stringify(initialRefs) ||
         JSON.stringify(await listCompletePulls()) !== JSON.stringify(initialPulls)) throw new TransportFailure("REMOTE_CHANGED");
       await requireHead(operation.base, operation.expectedBase);
@@ -326,7 +358,7 @@ export async function executePrivateGithubOperation(input: PrivateGithubInput): 
         head: operation.branch, base: operation.base, draft: true }), title);
       const verified = safePull(await request(`/pulls/${created.number}`), title, created.number);
       const finalPulls = await listCompletePulls();
-      if (finalPulls.filter((item) => titleSequence(item.title, code) === nextSequence).length !== 1 ||
+      if (finalPulls.filter((item) => titleSequence(item.title, code) === sequence).length !== 1 ||
         !finalPulls.some((item) => item.number === verified.number && item.title === title) ||
         JSON.stringify(finalPulls.filter((item) => item.number !== verified.number)) !== JSON.stringify(initialPulls) ||
         JSON.stringify(await listCompleteRefs(expected)) !== JSON.stringify(initialRefs)) throw new TransportFailure("REMOTE_CHANGED");
@@ -338,6 +370,15 @@ export async function executePrivateGithubOperation(input: PrivateGithubInput): 
       if (existing === null ? operation.expectedFileSha !== null :
         z.object({ type: z.literal("file"), path: relativePath, sha }).parse(existing).sha !== operation.expectedFileSha) throw new TransportFailure("REMOTE_CHANGED");
       if (existing !== null && z.object({ path: z.literal(operation.path) }).safeParse(existing).success === false) throw new TransportFailure("PROVIDER_FAILURE");
+      // Recheck the exact proposed title against current complete history. Never
+      // silently renumber an operation when its approved repository state is stale.
+      const expected = [{ branch: operation.branch, head: operation.expectedHead }];
+      const initialRefs = await listCompleteRefs(expected);
+      const sequences = await scanHistorySequences(initialRefs, [projectCode!, "PROJECT"]);
+      const nextSequence = Math.max(...Object.values(sequences)) + 1;
+      const category = operation.message.slice(operation.message.indexOf(": ") + 2);
+      if (operation.message !== formatGitPullTitle(projectCode!, nextSequence, category)) throw new TransportFailure("REMOTE_CHANGED");
+      if (JSON.stringify(await listCompleteRefs(expected)) !== JSON.stringify(initialRefs)) throw new TransportFailure("REMOTE_CHANGED");
       await requireHead(operation.branch, operation.expectedHead);
       const result = z.object({ content: z.object({ path: relativePath, sha }), commit: z.object({ sha }) }).parse(await request(
         `/contents/${encodePath(operation.path)}`, "PUT", { branch: operation.branch, message: operation.message,

@@ -1,5 +1,9 @@
 # Phase 1A-3F: Pull request safeguards
 
+The later [Git naming consistency correction](phase-1a-3f-naming-consistency.md)
+supersedes this report's successor-numbering rule with shared commit/PR change
+identifiers. The implementation and validation below describe CR8OR-012.
+
 This focused correction follows commit
 `e08084059a3725f2eac62e0b1749edfa5a30fc20` on the existing draft PR #8.
 All private Git, cloud-write and command-execution release restrictions remain

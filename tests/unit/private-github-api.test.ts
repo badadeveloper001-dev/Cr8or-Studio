@@ -13,28 +13,32 @@ const response = (value: unknown, status = 200) => new Response(JSON.stringify(v
 const input = (operation: PrivateGithubOperation, responses: unknown[]) => {
   const fetchMock = vi.fn<typeof fetch>();
   for (const value of responses) fetchMock.mockResolvedValueOnce(value instanceof Response ? value : response(value));
-  return { repository, token: TOKEN, operation, revalidate: vi.fn(async () => undefined), fetch: fetchMock } satisfies PrivateGithubInput;
+  return { repository: ["create-pr", "commits", "commit-sequence", "update-file"].includes(operation.kind) ? pullRepository : repository, token: TOKEN, operation, revalidate: vi.fn(async () => undefined), fetch: fetchMock } satisfies PrivateGithubInput;
 };
 const branchOperation = (): PrivateGithubOperation => ({ kind: "create-branch", branch: "feature", fromBranch: "main", expectedHead: HEAD });
 const pushOperation = (): PrivateGithubOperation => ({ kind: "advance-branch", branch: "main", expectedHead: HEAD, targetCommit: TARGET });
 const pushResponses = () => [ref(), { sha: TARGET, parents: [{ sha: HEAD }] }, { status: "ahead", merge_base_commit: { sha: HEAD } }, ref(), ref("main", TARGET), ref("main", TARGET)];
 const pullRepository = { owner: "badadeveloper001-dev", repo: "Cr8or-Studio" };
 const pullRepositoryKey = "badadeveloper001-dev/cr8or-studio";
-const intendedTitle = "CR8OR-010: General maintenance";
+const intendedTitle = "CR8OR-009: General maintenance";
 const pull = (title = intendedTitle, number = 7) => ({ number, title, draft: true, state: "open",
   head: { ref: "main", sha: HEAD, repo: { full_name: pullRepositoryKey } },
   base: { ref: "base", sha: BASE, repo: { full_name: pullRepositoryKey } } });
 const pullOperation = (): PrivateGithubOperation => ({ kind: "create-pr", branch: "main", base: "base",
   expectedHead: HEAD, expectedBase: BASE, category: "General maintenance", body: "Review changes." });
 const pullRefs = () => [{ name: "base", commit: { sha: BASE } }, { name: "main", commit: { sha: HEAD } }];
-const pullHistory = (sequence = 9) => [{ sha: HEAD, commit: { message: `CR8OR-${String(sequence).padStart(3, "0")}: Code improvements` } }];
+const pullHistory = (sequence = 9) => [{ sha: HEAD, commit: { message: `CR8OR-${String(sequence).padStart(3, "0")}: General maintenance` } }];
 const pullResponses = (sequence = 9): unknown[] => {
-  const title = `CR8OR-${String(sequence + 1).padStart(3, "0")}: General maintenance`;
+  const title = `CR8OR-${String(sequence).padStart(3, "0")}: General maintenance`;
   return [ref(), pullHistory(sequence), pullRefs(), [], [{ sha: BASE, commit: { message: "Initial changes" } }], [],
     pullRefs(), [], [], ref("base", BASE), ref(), pull(title), pull(title), [pull(title)], pullRefs(), []];
 };
 const pullInput = (responses = pullResponses(), operation = pullOperation()) => ({ ...input(operation, responses), repository: pullRepository });
 const dispatchedPulls = (args: ReturnType<typeof pullInput>) => args.fetch.mock.calls.filter(([, init]) => init?.method !== "GET");
+const updateHistory = (message = "Initial changes") => {
+  const refs = [{ name: "main", commit: { sha: HEAD } }];
+  return [refs, [], [{ sha: HEAD, commit: { message } }], refs, []];
+};
 afterEach(() => vi.useRealTimers());
 
 describe("bounded private GitHub adapter", () => {
@@ -117,7 +121,7 @@ describe("bounded private GitHub adapter", () => {
       [{ sha: TARGET, commit: { message: "PROJECT-040: General maintenance" } }],
       [{ sha: HEAD, commit: { message: "PROJECT-002: General maintenance" } }],
       [{ sha: BASE, commit: { message: "PROJECT-050: General maintenance" } }], branches, tags]);
-    expect(await executePrivateGithubOperation(args)).toEqual({ status: "SUCCEEDED", data: { head: HEAD, nextSequence: 51 } });
+    expect(await executePrivateGithubOperation(args)).toEqual({ status: "SUCCEEDED", data: { head: HEAD, projectCode: "CR8OR", nextSequence: 51 } });
     expect(args.fetch.mock.calls.every(([, init]) => init?.method === "GET")).toBe(true);
     expect(args.fetch).toHaveBeenCalledTimes(7);
   });
@@ -127,7 +131,7 @@ describe("bounded private GitHub adapter", () => {
     const args = input({ kind: "commit-sequence", branch: "main", expectedHead: HEAD }, [branches, tags,
       [{ sha: HEAD, commit: { message: `PROJECT-009: General maintenance\n${TOKEN}` } }], branches, tags]);
     const result = await executePrivateGithubOperation(args);
-    expect(result).toEqual({ status: "SUCCEEDED", data: { head: HEAD, nextSequence: 10 } });
+    expect(result).toEqual({ status: "SUCCEEDED", data: { head: HEAD, projectCode: "CR8OR", nextSequence: 10 } });
     expect(JSON.stringify(result)).not.toContain(TOKEN);
     expect(args.fetch).toHaveBeenCalledTimes(5);
   });
@@ -178,6 +182,41 @@ describe("bounded private GitHub adapter", () => {
     const args = input({ kind: "commit-sequence", branch: "main", expectedHead: HEAD }, [refs, [], ...history]);
     expect(await executePrivateGithubOperation(args)).toEqual({ status: "FAILED", code: "PROVIDER_FAILURE" });
     expect(args.fetch).toHaveBeenCalledTimes(13);
+  });
+  it("allocates above both the trusted project namespace and preserved legacy PROJECT floor", async () => {
+    const refs = [{ name: "main", commit: { sha: HEAD } }];
+    const history = [{ sha: HEAD, commit: { message: "CR8OR-012: Code improvements" } },
+      { sha: BASE, commit: { message: "PROJECT-040: General maintenance" } },
+      { sha: TARGET, commit: { message: "UNRELATED-999: General maintenance" } }];
+    const args = input({ kind: "commit-sequence", branch: "main", expectedHead: HEAD }, [refs, [], history, refs, []]);
+    expect(await executePrivateGithubOperation(args)).toEqual({ status: "SUCCEEDED",
+      data: { head: HEAD, projectCode: "CR8OR", nextSequence: 41 } });
+  });
+  it.each(["CR8OR", "PROJECT"])("rejects distinct commits reusing the %s identifier", async code => {
+    const refs = [{ name: "main", commit: { sha: HEAD } }, { name: "other", commit: { sha: TARGET } }];
+    const args = input({ kind: "commit-sequence", branch: "main", expectedHead: HEAD }, [refs, [],
+      [{ sha: HEAD, commit: { message: `${code}-009: General maintenance` } }],
+      [{ sha: TARGET, commit: { message: `${code}-009: Test improvements` } }]]);
+    expect(await executePrivateGithubOperation(args)).toEqual({ status: "FAILED", code: "REMOTE_CHANGED" });
+    expect(args.fetch.mock.calls.every(([, init]) => init?.method === "GET")).toBe(true);
+  });
+  it.each(["commit-sequence", "update-file"] as const)("requires a reviewed code mapping for %s", async kind => {
+    const operation: PrivateGithubOperation = kind === "commit-sequence" ? { kind, branch: "main", expectedHead: HEAD } :
+      { kind, branch: "main", expectedHead: HEAD, path: "source.ts", expectedFileSha: null, content: "", message: "CR8OR-001: General maintenance" };
+    const args = { ...input(operation, []), repository };
+    expect(await executePrivateGithubOperation(args)).toEqual({ status: "FAILED", code: "INVALID_REQUEST" });
+    expect(args.fetch).not.toHaveBeenCalled();
+  });
+  it.each(["PROJECT-001: General maintenance", "OTHER-001: General maintenance", "CR8OR-000: General maintenance", "CR8OR-0001: General maintenance", "CR8OR-001: General maintenance\n"])("rejects an untrusted or noncanonical update message %s", async message => {
+    const args = input({ kind: "update-file", branch: "main", expectedHead: HEAD, path: "source.ts", expectedFileSha: null, content: "", message }, []);
+    expect(await executePrivateGithubOperation(args)).toEqual({ status: "FAILED", code: "INVALID_REQUEST" });
+    expect(args.fetch).not.toHaveBeenCalled();
+  });
+  it("does not infer a trusted naming identity when reading another repository's commit messages", async () => {
+    const args = { ...input({ kind: "commits", branch: "main" }, [[{ sha: HEAD, commit: { message: "CR8OR-999: General maintenance" } }]]), repository };
+    expect(await executePrivateGithubOperation(args)).toEqual({ status: "SUCCEEDED", data: {
+      commits: [{ sha: HEAD, sequence: null }], complete: true,
+    } });
   });
   it("creates an exact pinned branch and verifies the remote result", async () => {
     const args = input(branchOperation(), [ref(), ref("feature"), ref("feature")]);
@@ -240,9 +279,9 @@ describe("bounded private GitHub adapter", () => {
     });
     expect(args.fetch.mock.calls.every(([url]) => String(url).startsWith("https://api.github.com/repos/badadeveloper001-dev/Cr8or-Studio/"))).toBe(true);
   });
-  it.each([0, 1, 11, 999, 999_999_998])("numbers from complete immutable project history after sequence %i", async (sequence) => {
+  it.each([1, 11, 999, 999_999_999])("uses the canonical immutable head identifier %i", async (sequence) => {
     const args = pullInput(pullResponses(sequence));
-    const title = `CR8OR-${String(sequence + 1).padStart(3, "0")}: General maintenance`;
+    const title = `CR8OR-${String(sequence).padStart(3, "0")}: General maintenance`;
     expect(await executePrivateGithubOperation(args)).toMatchObject({ status: "SUCCEEDED", data: { title } });
     expect(JSON.parse(dispatchedPulls(args)[0][1]?.body as string).title).toBe(title);
   });
@@ -269,15 +308,16 @@ describe("bounded private GitHub adapter", () => {
     expect(args.fetch).not.toHaveBeenCalled();
   });
   it.each(["General maintenance", "Code improvements", "Documentation updates", "Test improvements", "Configuration updates"] as const)("preserves permitted category %s", async (category) => {
-    const title = `CR8OR-010: ${category}`;
+    const title = `CR8OR-009: ${category}`;
     const responses = pullResponses();
+    responses[1] = [{ sha: HEAD, commit: { message: title } }];
     responses[11] = pull(title); responses[12] = pull(title); responses[13] = [pull(title)];
     const args = pullInput(responses, { ...pullOperation(), category } as PrivateGithubOperation);
     expect(await executePrivateGithubOperation(args)).toMatchObject({ status: "SUCCEEDED", data: { title } });
   });
   it.each([9, 12])("rejects an already consumed or stale candidate when PR history has sequence %i", async (sequence) => {
     const responses = pullResponses();
-    responses[5] = [pull(`CR8OR-${String(sequence + 1).padStart(3, "0")}: General maintenance`, 6)];
+    responses[5] = [pull(`CR8OR-${String(sequence).padStart(3, "0")}: General maintenance`, 6)];
     const args = pullInput(responses);
     expect(await executePrivateGithubOperation(args)).toEqual({ status: "FAILED", code: "REMOTE_CHANGED" });
     expect(dispatchedPulls(args)).toHaveLength(0);
@@ -289,12 +329,51 @@ describe("bounded private GitHub adapter", () => {
     expect(await executePrivateGithubOperation(args)).toEqual({ status: "FAILED", code: "REMOTE_CHANGED" });
     expect(dispatchedPulls(args)).toHaveLength(0);
   });
-  it("takes the maximum identifier across the complete approved ancestry, not only the tip commit", async () => {
+  it("rejects an unnumbered tip even when ancestry contains a valid identifier", async () => {
     const responses = pullResponses();
     responses[1] = [{ sha: HEAD, commit: { message: "Unnumbered change" } },
       { sha: TARGET, commit: { message: "CR8OR-009: Code improvements" } }];
     const args = pullInput(responses);
+    expect((await executePrivateGithubOperation(args)).status).toBe("FAILED");
+    expect(dispatchedPulls(args)).toHaveLength(0);
+  });
+  it.each(["CR8OR-009: Code improvements", "PROJECT-009: General maintenance", "CR8OR-000: General maintenance", "CR8OR-0009: General maintenance", "CR8OR-009: Arbitrary category"])("rejects a tip that does not match the exact canonical approved subject %s", async message => {
+    const responses = pullResponses(); responses[1] = [{ sha: HEAD, commit: { message } }];
+    const args = pullInput(responses);
+    expect((await executePrivateGithubOperation(args)).status).toBe("FAILED");
+    expect(dispatchedPulls(args)).toHaveLength(0);
+  });
+  it("rejects an approved head whose ancestry already has a higher trusted identifier", async () => {
+    const responses = pullResponses(); responses[1] = [...pullHistory(), { sha: TARGET, commit: { message: "CR8OR-010: General maintenance" } }];
+    const args = pullInput(responses);
+    expect(await executePrivateGithubOperation(args)).toEqual({ status: "FAILED", code: "REMOTE_CHANGED" });
+    expect(dispatchedPulls(args)).toHaveLength(0);
+  });
+  it.each([8, 9, 10])("reserves legacy history without selecting its namespace: PROJECT-%i", async sequence => {
+    const responses = pullResponses(); responses[4] = [{ sha: BASE, commit: { message: `PROJECT-${String(sequence).padStart(3, "0")}: General maintenance` } }];
+    const args = pullInput(responses);
+    const result = await executePrivateGithubOperation(args);
+    expect(result.status).toBe(sequence < 9 ? "SUCCEEDED" : "FAILED");
+    expect(dispatchedPulls(args)).toHaveLength(sequence < 9 ? 1 : 0);
+  });
+  it("rejects a distinct commit reusing the approved head identifier on another branch", async () => {
+    const responses = pullResponses(); responses[4] = [{ sha: BASE, commit: { message: "CR8OR-009: General maintenance" } }];
+    const args = pullInput(responses);
+    expect(await executePrivateGithubOperation(args)).toEqual({ status: "FAILED", code: "REMOTE_CHANGED" });
+    expect(dispatchedPulls(args)).toHaveLength(0);
+  });
+  it("deduplicates the identical approved commit reached from multiple refs", async () => {
+    const responses = pullResponses();
+    responses[4] = [{ sha: BASE, commit: { message: "Initial changes" } }, ...pullHistory()];
+    const args = pullInput(responses);
     expect(await executePrivateGithubOperation(args)).toMatchObject({ status: "SUCCEEDED", data: { title: intendedTitle } });
+    expect(dispatchedPulls(args)).toHaveLength(1);
+  });
+  it("rejects duplicate historical PR identifiers even below the proposed identifier", async () => {
+    const responses = pullResponses(); responses[5] = [pull("CR8OR-002: General maintenance", 1), pull("CR8OR-002: Test improvements", 2)];
+    const args = pullInput(responses);
+    expect(await executePrivateGithubOperation(args)).toEqual({ status: "FAILED", code: "REMOTE_CHANGED" });
+    expect(dispatchedPulls(args)).toHaveLength(0);
   });
   it("rejects reuse of a closed PR's identifier", async () => {
     const responses = pullResponses(); responses[5] = [{ ...pull(), state: "closed" }];
@@ -303,8 +382,8 @@ describe("bounded private GitHub adapter", () => {
     expect(dispatchedPulls(args)).toHaveLength(0);
     expect(args.fetch.mock.calls[5][0]).toContain("/pulls?state=all&per_page=100");
   });
-  it("rejects exhausted project numbering before creating a PR", async () => {
-    const responses = pullResponses(); responses[1] = pullHistory(999_999_999);
+  it("rejects out-of-range project numbering before creating a PR", async () => {
+    const responses = pullResponses(); responses[1] = pullHistory(1_000_000_000);
     const args = pullInput(responses);
     expect(await executePrivateGithubOperation(args)).toEqual({ status: "FAILED", code: "PROVIDER_FAILURE" });
     expect(dispatchedPulls(args)).toHaveLength(0);
@@ -383,7 +462,7 @@ describe("bounded private GitHub adapter", () => {
     expect(dispatchedPulls(args)).toHaveLength(1);
   });
   it("keeps a duplicate identifier appearing during creation UNKNOWN without modifying either PR", async () => {
-    const responses = pullResponses(); responses[13] = [pull(), pull("CR8OR-010: Code improvements", 8)];
+    const responses = pullResponses(); responses[13] = [pull(), pull("CR8OR-009: Code improvements", 8)];
     const args = pullInput(responses);
     expect(await executePrivateGithubOperation(args)).toEqual({ status: "UNKNOWN", code: "REMOTE_CHANGED" });
     expect(dispatchedPulls(args)).toHaveLength(1);
@@ -418,22 +497,36 @@ describe("bounded private GitHub adapter", () => {
   it.each(["", "const unicode = '𝒜😀';\r\n"])("writes exact UTF-8 through the JSON body with expected blob and branch checks", async (content) => {
     const bytes = Buffer.from(content);
     const blob = createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
-    const args = input({ kind: "update-file", branch: "main", expectedHead: HEAD, path: "source.ts", expectedFileSha: BASE, content, message: "PROJECT-001: General maintenance" }, [ref(), { type: "file", path: "source.ts", sha: BASE }, ref(), { content: { path: "source.ts", sha: blob }, commit: { sha: TARGET } }, ref("main", TARGET), { type: "file", path: "source.ts", sha: blob }]);
+    const args = input({ kind: "update-file", branch: "main", expectedHead: HEAD, path: "source.ts", expectedFileSha: BASE, content, message: "CR8OR-001: General maintenance" }, [ref(), { type: "file", path: "source.ts", sha: BASE }, ...updateHistory(), ref(), { content: { path: "source.ts", sha: blob }, commit: { sha: TARGET } }, ref("main", TARGET), { type: "file", path: "source.ts", sha: blob }]);
     expect(await executePrivateGithubOperation(args)).toEqual({ status: "SUCCEEDED", data: { branch: "main", path: "source.ts", contentSha: blob, commitSha: TARGET } });
-    const dispatched = JSON.parse(args.fetch.mock.calls[3][1]?.body as string);
-    expect(dispatched).toEqual({ branch: "main", message: "PROJECT-001: General maintenance", content: bytes.toString("base64"), sha: BASE });
+    const dispatched = JSON.parse(args.fetch.mock.calls[8][1]?.body as string);
+    expect(dispatched).toEqual({ branch: "main", message: "CR8OR-001: General maintenance", content: bytes.toString("base64"), sha: BASE });
     expect(args.fetch.mock.calls.some(([url]) => String(url).includes(TOKEN))).toBe(false);
   });
   it("rejects oversized and malformed write data before network requests", async () => {
     for (const content of ["x".repeat(PRIVATE_GITHUB_LIMITS.fileBytes + 1), "\ud800"]) {
-      const args = input({ kind: "update-file", branch: "main", expectedHead: HEAD, path: "source.ts", expectedFileSha: null, content, message: "PROJECT-001: General maintenance" }, []);
+      const args = input({ kind: "update-file", branch: "main", expectedHead: HEAD, path: "source.ts", expectedFileSha: null, content, message: "CR8OR-001: General maintenance" }, []);
       expect((await executePrivateGithubOperation(args)).code).toBe("INVALID_REQUEST");
       expect(args.fetch).not.toHaveBeenCalled();
     }
   });
   it("rejects file content mismatch after dispatch as an uncertain outcome", async () => {
-    const args = input({ kind: "update-file", branch: "main", expectedHead: HEAD, path: "source.ts", expectedFileSha: null, content: "changed", message: "PROJECT-001: General maintenance" }, [ref(), response({}, 404), ref(), { content: { path: "source.ts", sha: BASE }, commit: { sha: TARGET } }]);
+    const args = input({ kind: "update-file", branch: "main", expectedHead: HEAD, path: "source.ts", expectedFileSha: null, content: "changed", message: "CR8OR-001: General maintenance" }, [ref(), response({}, 404), ...updateHistory(), ref(), { content: { path: "source.ts", sha: BASE }, commit: { sha: TARGET } }]);
     expect(await executePrivateGithubOperation(args)).toEqual({ status: "UNKNOWN", code: "PROVIDER_FAILURE" });
+  });
+  it("rejects stale update-file numbering instead of silently changing the proposed message", async () => {
+    const args = input({ kind: "update-file", branch: "main", expectedHead: HEAD, path: "source.ts", expectedFileSha: null,
+      content: "", message: "CR8OR-001: General maintenance" }, [ref(), response({}, 404), ...updateHistory("CR8OR-001: Test improvements")]);
+    expect(await executePrivateGithubOperation(args)).toEqual({ status: "FAILED", code: "REMOTE_CHANGED" });
+    expect(args.fetch.mock.calls.every(([, init]) => init?.method === "GET")).toBe(true);
+  });
+  it("rechecks update-file reference snapshots before committing a numbered change", async () => {
+    const refs = [{ name: "main", commit: { sha: HEAD } }];
+    const args = input({ kind: "update-file", branch: "main", expectedHead: HEAD, path: "source.ts", expectedFileSha: null,
+      content: "", message: "CR8OR-001: General maintenance" }, [ref(), response({}, 404), refs, [],
+      [{ sha: HEAD, commit: { message: "Initial changes" } }], [{ name: "main", commit: { sha: TARGET } }], []]);
+    expect(await executePrivateGithubOperation(args)).toEqual({ status: "FAILED", code: "REMOTE_CHANGED" });
+    expect(args.fetch.mock.calls.every(([, init]) => init?.method === "GET")).toBe(true);
   });
   it("does not dispatch after revocation or disclose a read result after authorization fails", async () => {
     const args = input(branchOperation(), [ref()]);

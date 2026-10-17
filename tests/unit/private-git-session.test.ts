@@ -8,7 +8,7 @@ const READY = "CR8OR-GIT/1 READY\n", RESULT = "CR8OR-GIT/1 RESULT ";
 const state = { head: "a".repeat(40), branch: "main", index: "b".repeat(64) };
 const registration = { projectId: "registered-fixture", workspace: {
   id: "registry-fixture", runtimeType: "cloud" as const, provider: "daytona", providerWorkspaceId: "daytona-fixture",
-  repositoryUrl: "https://github.com/fixture/repo.git", branch: "main",
+  repositoryUrl: "https://github.com/badadeveloper001-dev/cr8or-studio.git", branch: "main",
 } };
 function scope(request: GitOperationRequest) { return buildGitOperationScope(registration, request); }
 function request(operation = "stage") {
@@ -59,7 +59,7 @@ describe("private Git fixed-purpose session transport", () => {
     expect(submitted[1].command).not.toContain(state.head);
     expect(submitted[2]).toBe(5);
     expect(JSON.parse(fixture.frames[0])).toEqual({ operation: "stage", branch: "main", paths: ["src/private-file.ts"],
-      expectedHead: state.head, expectedIndex: state.index, expectedRepository: "https://github.com/fixture/repo.git" });
+      expectedHead: state.head, expectedIndex: state.index, expectedRepository: "https://github.com/badadeveloper001-dev/cr8or-studio.git" });
     expect(fixture.frames[1]).toBe("START\n");
     expect(check.mock.invocationCallOrder[3]).toBeLessThan(fixture.provider.sendSessionCommandInput.mock.invocationCallOrder[1]);
     expect(check).toHaveBeenCalledTimes(6);
@@ -69,11 +69,11 @@ describe("private Git fixed-purpose session transport", () => {
   it.each([
     ["branch", state], ["status", { ...state, changes: [{ status: " M", path: "src/test.ts" }] }],
     ["changes", { ...state, changes: [] }], ["log", { commits: [{ sha: state.head, timestamp: 123, title: "Commit" }] }],
-    ["remote", { name: "origin", url: "https://github.com/fixture/repo.git" }],
+    ["remote", { name: "origin", url: "https://github.com/badadeveloper001-dev/cr8or-studio.git" }],
   ])("preserves bounded %s read results and sends registered branch metadata", async (operation, data) => {
     const fixture = adapter(data);
     expect(await run(fixture, request(operation as string))).toMatchObject({ status: "SUCCEEDED", data });
-    expect(JSON.parse(fixture.frames[0])).toEqual({ operation, branch: "main", expectedRepository: "https://github.com/fixture/repo.git" });
+    expect(JSON.parse(fixture.frames[0])).toEqual({ operation, branch: "main", expectedRepository: "https://github.com/badadeveloper001-dev/cr8or-studio.git" });
   });
 
   it("preserves Unicode diff output without truncation", async () => {
@@ -84,10 +84,20 @@ describe("private Git fixed-purpose session transport", () => {
   });
 
   it("sends only the exact neutral approved commit category", async () => {
-    const fixture = adapter({ ...state, operation: "commit", title: "PROJECT-002: Code improvements" });
+    const fixture = adapter({ ...state, operation: "commit", title: "CR8OR-002: Code improvements" });
     const input = parseGitOperation({ operation: "commit", branch: "main", expectedHead: state.head, expectedIndex: state.index, category: "Code improvements" });
     expect(await run(fixture, input)).toMatchObject({ status: "SUCCEEDED" });
-    expect(JSON.parse(fixture.frames[0])).toMatchObject({ commitPrefix: "PROJECT", category: "Code improvements" });
+    expect(JSON.parse(fixture.frames[0])).toMatchObject({ commitPrefix: "CR8OR", category: "Code improvements" });
+  });
+
+  it.each(["PROJECT-002: Code improvements", "OTHER-002: Code improvements", "CR8OR-002: General maintenance",
+    "CR8OR-000: Code improvements", "CR8OR-0002: Code improvements", "CR8OR-1000000000: Code improvements"])
+  ("withholds malformed or substituted commit receipt %s", async (title) => {
+    const fixture = adapter({ ...state, operation: "commit", title });
+    const input = parseGitOperation({ operation: "commit", branch: "main", expectedHead: state.head, expectedIndex: state.index, category: "Code improvements" });
+    const result = await run(fixture, input);
+    expect(result).toMatchObject({ status: "UNKNOWN" });
+    expect(result).not.toHaveProperty("data");
   });
 
   it.each(["projectId", "providerWorkspaceId", "repositoryKey", "branch", "payloadDigest"])("rejects a mismatched %s scope before provider access", async (field) => {

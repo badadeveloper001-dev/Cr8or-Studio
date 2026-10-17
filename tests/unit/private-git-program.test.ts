@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { PRIVATE_GIT_LIMITS, PRIVATE_GIT_PROGRAM } from "@/lib/workspace/private-git-program";
 
 const execute = promisify(execFile);
-const repository = "https://github.com/example/registered.git";
+const repository = "https://github.com/badadeveloper001-dev/cr8or-studio.git";
 let root: string;
 let repo: string;
 
@@ -147,15 +147,15 @@ describe("fixed-purpose Git helper with disposable real repositories", () => {
     const parent = await git("rev-parse", "HEAD");
     await fs.writeFile(path.join(repo, "README.md"), "changed\n");
     expect(await run({ operation: "stage", paths: ["README.md"], ...await snapshot() })).toMatchObject({ ok: true });
-    const request = { operation: "commit", commitPrefix: "PROJECT", category: "Code improvements", ...await snapshot() };
+    const request = { operation: "commit", commitPrefix: "CR8OR", category: "Code improvements", ...await snapshot() };
     const result = await run(request);
-    expect(result).toMatchObject({ ok: true, data: { title: "PROJECT-001: Code improvements" } });
+    expect(result).toMatchObject({ ok: true, data: { title: "CR8OR-001: Code improvements" } });
     expect(await git("rev-parse", "HEAD^")).toBe(parent);
-    expect(await git("log", "-1", "--format=%s")).toBe("PROJECT-001: Code improvements");
+    expect(await git("log", "-1", "--format=%s")).toBe("CR8OR-001: Code improvements");
     expect(await run(request)).toMatchObject({ ok: false, error: "CONFLICT" });
     await fs.writeFile(path.join(repo, "README.md"), "second change\n");
     expect(await run({ operation: "stage", paths: ["README.md"], ...await snapshot() })).toMatchObject({ ok: true });
-    expect(await run({ operation: "commit", commitPrefix: "PROJECT", category: "Test improvements", ...await snapshot() })).toMatchObject({ ok: true, data: { title: "PROJECT-002: Test improvements" } });
+    expect(await run({ operation: "commit", commitPrefix: "CR8OR", category: "Test improvements", ...await snapshot() })).toMatchObject({ ok: true, data: { title: "CR8OR-002: Test improvements" } });
   });
 
   it("suppresses repository hooks and does not forward application secrets to Git", async () => {
@@ -163,10 +163,76 @@ describe("fixed-purpose Git helper with disposable real repositories", () => {
     await fs.writeFile(path.join(repo, ".git", "hooks", "pre-commit"), `#!/bin/sh\necho unsafe > '${marker}'\n`, { mode: 0o755 });
     await fs.writeFile(path.join(repo, "README.md"), "change\n");
     expect(await run({ operation: "stage", paths: ["README.md"], ...await snapshot() })).toMatchObject({ ok: true });
-    expect(await run({ operation: "commit", commitPrefix: "PROJECT", category: "General maintenance", ...await snapshot() }, {
+    expect(await run({ operation: "commit", commitPrefix: "CR8OR", category: "General maintenance", ...await snapshot() }, {
       environment: { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.hooksPath", GIT_CONFIG_VALUE_0: path.join(repo, ".git", "hooks"), GIT_TRACE: "1", DATABASE_URL: "postgresql://synthetic-secret", GITHUB_TOKEN: "synthetic-provider-secret" },
     })).toMatchObject({ ok: true, stderr: "" });
     await expect(fs.stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("reserves the historical PROJECT floor without rewriting commits or allowing unrelated prefixes to influence naming", async () => {
+    for (const subject of ["PROJECT-007: Legacy category", "CR8OR-003: Historical category", "UNRELATED-999: Other project"]) {
+      await git("-c", "commit.gpgSign=false", "commit", "--allow-empty", "-m", subject);
+    }
+    const previousHistory = await git("log", "--format=%H %s");
+    await fs.writeFile(path.join(repo, "README.md"), "next supported cycle\n");
+    expect(await run({ operation: "stage", paths: ["README.md"], ...await snapshot() })).toMatchObject({ ok: true });
+    expect(await run({ operation: "commit", commitPrefix: "CR8OR", category: "General maintenance", ...await snapshot() }))
+      .toMatchObject({ ok: true, data: { title: "CR8OR-008: General maintenance" } });
+    expect(await git("log", "HEAD^", "--format=%H %s")).toBe(previousHistory);
+  });
+
+  it("treats legacy and trusted-code identifiers as separate historical namespaces sharing one allocation floor", async () => {
+    for (const subject of ["PROJECT-001: Legacy category", "CR8OR-001: Historical category"]) {
+      await git("-c", "commit.gpgSign=false", "commit", "--allow-empty", "-m", subject);
+    }
+    await fs.writeFile(path.join(repo, "README.md"), "next\n");
+    expect(await run({ operation: "stage", paths: ["README.md"], ...await snapshot() })).toMatchObject({ ok: true });
+    expect(await run({ operation: "commit", commitPrefix: "CR8OR", category: "Test improvements", ...await snapshot() }))
+      .toMatchObject({ ok: true, data: { title: "CR8OR-002: Test improvements" } });
+  });
+
+  it.each(["CR8OR", "PROJECT"])("rejects duplicate %s identifiers on different commits without changing the staged state", async (prefix) => {
+    for (const category of ["General maintenance", "Test improvements"]) {
+      await git("-c", "commit.gpgSign=false", "commit", "--allow-empty", "-m", `${prefix}-001: ${category}`);
+    }
+    await fs.writeFile(path.join(repo, "README.md"), "must remain staged\n");
+    await git("add", "--", "README.md");
+    const before = await snapshot();
+    expect(await run({ operation: "commit", commitPrefix: "CR8OR", category: "General maintenance", ...before }))
+      .toMatchObject({ ok: false, error: "CONFLICT" });
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it.each(["CR8OR-000", "CR8OR-0001", "CR8OR-1000000000", "CR8OR-01", "PROJECT-000", "PROJECT-0001", "PROJECT-1000000000"])("rejects malformed historical identifier %s without a commit", async (identifier) => {
+    await git("-c", "commit.gpgSign=false", "commit", "--allow-empty", "-m", `${identifier}: Historical category`);
+    await fs.writeFile(path.join(repo, "README.md"), "staged\n");
+    await git("add", "--", "README.md");
+    const before = await snapshot();
+    expect(await run({ operation: "commit", commitPrefix: "CR8OR", category: "General maintenance", ...before }))
+      .toMatchObject({ ok: false, error: "REJECTED" });
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it("rejects exhausted or incomplete bounded history without silently allocating from a truncated scan", async () => {
+    await git("-c", "commit.gpgSign=false", "commit", "--allow-empty", "-m", "CR8OR-999999999: Historical category");
+    await fs.writeFile(path.join(repo, "README.md"), "staged\n");
+    await git("add", "--", "README.md");
+    const before = await snapshot();
+    const request = { operation: "commit", commitPrefix: "CR8OR", category: "General maintenance", ...before };
+    expect(await run(request)).toMatchObject({ ok: false, error: "LIMIT" });
+    expect(await run(request, { program: PRIVATE_GIT_PROGRAM.replace("MAX_HISTORY_COMMITS=1000", "MAX_HISTORY_COMMITS=1") }))
+      .toMatchObject({ ok: false, error: "LIMIT" });
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it("allows reads for an unconfigured repository but never infers its commit code from a caller or existing history", async () => {
+    const unknownRepository = "https://github.com/synthetic/unconfigured.git";
+    await git("remote", "set-url", "origin", unknownRepository);
+    expect(await run({ operation: "remote", expectedRepository: unknownRepository }))
+      .toMatchObject({ ok: true, data: { url: unknownRepository } });
+    expect(await run({ operation: "commit", expectedRepository: unknownRepository, branch: "main", expectedHead: await git("rev-parse", "HEAD"),
+      expectedIndex: "a".repeat(64), commitPrefix: "CR8OR", category: "General maintenance" }))
+      .toMatchObject({ ok: false, error: "REJECTED" });
   });
 
   it.each(["../outside", "/tmp/outside", "-u", ":(top)*", ".git/config", "nested/../../outside", "nested\\outside", ".env.production", ".npmrc", "private.pem", ".gitattributes", ".gitmodules"])("rejects unsafe path %j before mutation", async (file) => {
@@ -185,8 +251,11 @@ describe("fixed-purpose Git helper with disposable real repositories", () => {
       { operation: "status", args: ["--exec=bad"] },
       { operation: "status", cwd: "../outside" },
       { operation: "status", environment: { GIT_CONFIG_COUNT: "1" } },
-      { operation: "commit", ...await snapshot(), commitPrefix: "PROJECT", category: "Sensitive implementation detail" },
+      { operation: "commit", ...await snapshot(), commitPrefix: "CR8OR", category: "Sensitive implementation detail" },
       { operation: "commit", ...await snapshot(), commitPrefix: "CUSTOM", category: "General maintenance" },
+      { operation: "commit", ...await snapshot(), commitPrefix: "PROJECT", category: "General maintenance" },
+      { operation: "commit", ...await snapshot(), commitPrefix: "CR8OR;echo injected", category: "General maintenance" },
+      { operation: "commit", ...await snapshot(), commitPrefix: "CR8OR", sequence: 123, category: "General maintenance" },
     ]) expect(await run(request)).toMatchObject({ ok: false, error: "REJECTED" });
   });
 
@@ -346,7 +415,7 @@ def kill_child():`);
     const previous = await git("rev-parse", "HEAD");
     await fs.writeFile(path.join(repo, ".env.production"), "SYNTHETIC_SECRET=value\n");
     await git("add", "--", ".env.production");
-    const result = await run({ operation: "commit", commitPrefix: "PROJECT", category: "General maintenance", ...await snapshot() });
+    const result = await run({ operation: "commit", commitPrefix: "CR8OR", category: "General maintenance", ...await snapshot() });
     expect(result.ok).toBe(false);
     expect(result.output).not.toContain("SYNTHETIC_SECRET");
     expect(await git("rev-parse", "HEAD")).toBe(previous);

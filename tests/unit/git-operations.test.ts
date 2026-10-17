@@ -20,7 +20,7 @@ import type { DaytonaProvider } from "@/lib/workspace/providers/daytona";
 
 const head = "a".repeat(40), otherHead = "b".repeat(40), index = "c".repeat(64);
 const workspace: ExecutionWorkspace = { id: "workspace-a", runtimeType: "cloud", provider: "daytona",
-  providerWorkspaceId: "sandbox-a", repositoryUrl: "https://github.com/fixture/project-a.git", branch: "main" };
+  providerWorkspaceId: "sandbox-a", repositoryUrl: "https://github.com/badadeveloper001-dev/cr8or-studio.git", branch: "main" };
 const mutation = parseGitOperation({ operation: "commit", branch: "main", expectedHead: head, expectedIndex: index, category: "Code improvements" });
 const read = parseGitOperation({ operation: "status" });
 const push = parseGitOperation({ operation: "push", branch: "main", expectedRemoteHead: head, targetCommit: otherHead });
@@ -53,7 +53,7 @@ describe("authorized Git operation coordination", () => {
     const result = await executeAuthorizedGitOperation(grant, context, mutation, adapter);
     expect(result).toEqual({ ...complete, operationId });
     expect(mocks.reserve).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: operationId,
-      projectId: "project-a", workspaceId: "sandbox-a", repositoryKey: "fixture/project-a", operationKey: "commit" }));
+      projectId: "project-a", workspaceId: "sandbox-a", repositoryKey: "badadeveloper001-dev/cr8or-studio", operationKey: "commit" }));
     expect(mocks.mark).toHaveBeenCalledExactlyOnceWith(operationId);
     expect(mocks.finish).toHaveBeenCalledExactlyOnceWith(operationId, { status: "SUCCEEDED", exitCode: 0,
       cancellationConfirmed: true, cleanupConfirmed: true });
@@ -226,7 +226,7 @@ describe("trusted Git adapter factories", () => {
     const result = await createGithubGitAdapter(credential).execute(request, scope(request), revalidate, context.signal);
     expect(result.status).toBe("SUCCEEDED");
     expect(revalidate.mock.invocationCallOrder[0]).toBeLessThan(credential.mock.invocationCallOrder[0]);
-    expect(mocks.github).toHaveBeenCalledWith(expect.objectContaining({ repository: { owner: "fixture", repo: "project-a" },
+    expect(mocks.github).toHaveBeenCalledWith(expect.objectContaining({ repository: { owner: "badadeveloper001-dev", repo: "cr8or-studio" },
       token: "synthetic_token", operation: { kind: "branches" }, revalidate, signal: context.signal }));
     expect(JSON.stringify(result)).not.toContain("synthetic_token");
   });
@@ -269,12 +269,12 @@ describe("trusted Git adapter factories", () => {
   });
 
   it("derives neutral sequential commit titles from the verified project-wide sequence", async () => {
-    mocks.github.mockResolvedValueOnce({ status: "SUCCEEDED", data: { head, nextSequence: 11 } }).mockResolvedValueOnce({ status: "SUCCEEDED", data: { head: otherHead } });
+    mocks.github.mockResolvedValueOnce({ status: "SUCCEEDED", data: { head, projectCode: "CR8OR", nextSequence: 11 } }).mockResolvedValueOnce({ status: "SUCCEEDED", data: { head: otherHead } });
     const result = await createGithubGitAdapter(() => "synthetic_token").execute(update, scope(update), async () => undefined, context.signal);
     expect(result.status).toBe("SUCCEEDED");
     expect(mocks.github).toHaveBeenNthCalledWith(1, expect.objectContaining({ operation: { kind: "commit-sequence", branch: "main", expectedHead: head } }));
     expect(mocks.github).toHaveBeenNthCalledWith(2, expect.objectContaining({ operation: expect.objectContaining({
-      kind: "update-file", message: "PROJECT-011: Code improvements", expectedHead: head,
+      kind: "update-file", message: "CR8OR-011: Code improvements", expectedHead: head,
       path: "src/app.ts", expectedFileSha: null, content: "private synthetic fixture content",
     }) }));
   });
@@ -282,15 +282,17 @@ describe("trusted Git adapter factories", () => {
   it.each([
     { status: "FAILED" }, { status: "UNKNOWN" },
     { status: "SUCCEEDED" },
-    { status: "SUCCEEDED", data: { head: otherHead, nextSequence: 11 } },
+    { status: "SUCCEEDED", data: { head: otherHead, projectCode: "CR8OR", nextSequence: 11 } },
     { status: "SUCCEEDED", data: { head } },
-    { status: "SUCCEEDED", data: { head, nextSequence: 1_000_000_000 } },
-    { status: "SUCCEEDED", data: { head, nextSequence: 0 } },
-    { status: "SUCCEEDED", data: { head, nextSequence: -1 } },
-    { status: "SUCCEEDED", data: { head, nextSequence: 1.5 } },
-    { status: "SUCCEEDED", data: { head, nextSequence: "11" } },
-    { status: "SUCCEEDED", data: { head, nextSequence: Number.NaN } },
-    { status: "SUCCEEDED", data: { head, nextSequence: Number.POSITIVE_INFINITY } },
+    { status: "SUCCEEDED", data: { head, nextSequence: 11 } },
+    { status: "SUCCEEDED", data: { head, projectCode: "UNRELATED", nextSequence: 11 } },
+    { status: "SUCCEEDED", data: { head, projectCode: "CR8OR", nextSequence: 1_000_000_000 } },
+    { status: "SUCCEEDED", data: { head, projectCode: "CR8OR", nextSequence: 0 } },
+    { status: "SUCCEEDED", data: { head, projectCode: "CR8OR", nextSequence: -1 } },
+    { status: "SUCCEEDED", data: { head, projectCode: "CR8OR", nextSequence: 1.5 } },
+    { status: "SUCCEEDED", data: { head, projectCode: "CR8OR", nextSequence: "11" } },
+    { status: "SUCCEEDED", data: { head, projectCode: "CR8OR", nextSequence: Number.NaN } },
+    { status: "SUCCEEDED", data: { head, projectCode: "CR8OR", nextSequence: Number.POSITIVE_INFINITY } },
     { status: "SUCCEEDED", data: { complete: true, commits: [{ sha: head, sequence: 10 }] } },
   ])("rejects unverified commit numbering without mutating remote files: %#", async history => {
     mocks.github.mockResolvedValue(history);

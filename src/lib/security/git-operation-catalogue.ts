@@ -74,8 +74,10 @@ const scopeSchema = z.object({
   expectedHead: sha.nullable(), expectedIndex: digest.nullable(), expectedRemoteHead: sha.nullable(),
   targetCommit: sha.nullable(), targetBranch: ref.nullable(), baseBranch: ref.nullable(),
   filePath: path.nullable(), expectedBlob: sha.nullable(), expectedBase: sha.nullable(), category: category.nullable(), contentDigest: digest.nullable(), payloadDigest: digest,
-  pullRequestNaming: z.object({ version: z.literal(1), projectCode: z.string().regex(/^[A-Z][A-Z0-9]{1,19}$/),
-    strategy: z.literal("approved-head-successor") }).strict().optional(),
+  pullRequestNaming: z.object({ version: z.literal(2), projectCode: z.string().regex(/^[A-Z][A-Z0-9]{1,15}$/),
+    strategy: z.literal("approved-head-commit") }).strict().optional(),
+  commitNaming: z.object({ version: z.literal(1), projectCode: z.string().regex(/^[A-Z][A-Z0-9]{1,15}$/),
+    strategy: z.literal("registered-history-next") }).strict().optional(),
 }).strict();
 export type GitOperationScope = Readonly<z.infer<typeof scopeSchema>>;
 export function validateGitOperationScope(value: unknown): GitOperationScope {
@@ -93,6 +95,19 @@ export function validateGitOperationScope(value: unknown): GitOperationScope {
     }
     Object.freeze(result.data.pullRequestNaming);
   } else if (result.data.pullRequestNaming !== undefined) {
+    throw new ExecutionAuthorizationError(403, "Git approval scope is invalid.");
+  }
+  if (result.data.operationKey === "commit" || result.data.operationKey === "upsert-file") {
+    let projectCode: string;
+    try { projectCode = resolveGitProjectCode(result.data.repositoryKey); }
+    catch { throw new ExecutionAuthorizationError(403, "Git approval scope is invalid."); }
+    if (!result.data.commitNaming || result.data.commitNaming.projectCode !== projectCode || !result.data.category ||
+        (result.data.operationKey === "commit" && (!result.data.expectedHead || !result.data.expectedIndex)) ||
+        (result.data.operationKey === "upsert-file" && (!result.data.expectedRemoteHead || !result.data.filePath || !result.data.contentDigest))) {
+      throw new ExecutionAuthorizationError(403, "Git approval scope is invalid.");
+    }
+    Object.freeze(result.data.commitNaming);
+  } else if (result.data.commitNaming !== undefined) {
     throw new ExecutionAuthorizationError(403, "Git approval scope is invalid.");
   }
   Object.freeze(result.data.paths);
@@ -118,11 +133,13 @@ export function buildGitOperationScope(context: Pick<ExecutionAuthorizationConte
   const repository = canonicalGitRepository(workspace.repositoryUrl);
   const canonicalRequest = { ...request, branch: workspace.branch };
   let pullRequestNaming: GitOperationScope["pullRequestNaming"];
-  if (request.operation === "create-pr") {
+  let commitNaming: GitOperationScope["commitNaming"];
+  if (["create-pr", "commit", "upsert-file"].includes(request.operation)) {
     let projectCode: string;
     try { projectCode = resolveGitProjectCode(repository.key); }
     catch { throw new ExecutionAuthorizationError(409, "Registered project naming is unavailable."); }
-    pullRequestNaming = { version: 1, projectCode, strategy: "approved-head-successor" };
+    if (request.operation === "create-pr") pullRequestNaming = { version: 2, projectCode, strategy: "approved-head-commit" };
+    else commitNaming = { version: 1, projectCode, strategy: "registered-history-next" };
   }
   return validateGitOperationScope({ ownerId: "owner", projectId: context.projectId,
     workspaceRecordId: workspace.id, providerWorkspaceId: workspace.providerWorkspaceId, repositoryKey: repository.key,
@@ -131,6 +148,7 @@ export function buildGitOperationScope(context: Pick<ExecutionAuthorizationConte
     targetCommit: get("targetCommit"), targetBranch: get("targetBranch"), baseBranch: get("baseBranch"), filePath: get("filePath"), expectedBlob: get("expectedBlob"),
     expectedBase: get("expectedBase"), category: get("category"),
     ...(pullRequestNaming ? { pullRequestNaming } : {}),
+    ...(commitNaming ? { commitNaming } : {}),
     contentDigest: "content" in request ? createHash("sha256").update(request.content, "utf8").digest("hex") : null,
     payloadDigest: createHash("sha256").update(stable(canonicalRequest)).digest("hex") });
 }

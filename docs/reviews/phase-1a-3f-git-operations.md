@@ -1,8 +1,9 @@
 # Phase 1A-3F: Git operation safeguards
 
-The subsequent [pull-request correction](phase-1a-3f-pr-correction.md) records
-the final title-generation, approval-scope and draft-verification safeguards and
-their validation. The implementation and validation below describe CR8OR-011.
+The subsequent [pull-request correction](phase-1a-3f-pr-correction.md) and
+[Git naming consistency correction](phase-1a-3f-naming-consistency.md) record
+the current naming, approval and draft-verification safeguards. The
+implementation and validation below describe CR8OR-011.
 
 Implementation starts from PR #7 commit
 `4d6ab65982c61a9fe05c3aa8695664e5bbb8b586` and is stacked on
