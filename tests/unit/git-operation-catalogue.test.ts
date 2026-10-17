@@ -13,8 +13,10 @@ const workspace: ExecutionWorkspace = {
   repositoryUrl: "https://github.com/Fixture/Project-A.git", branch: "main",
 };
 const context = { projectId: "project-a", workspace };
+const namedContext = { ...context, workspace: { ...workspace, repositoryUrl: "https://github.com/badadeveloper001-dev/Cr8or-Studio.git" } };
 const localMutation = { branch: "main", expectedHead: head, expectedIndex: index };
 const remoteMutation = { branch: "main", expectedRemoteHead: head };
+const pullRequest = { operation: "create-pr", ...remoteMutation, baseBranch: "review", expectedBase: otherHead, category: "General maintenance" };
 it("rejects malformed UTF-8 paths before provider dispatch", () => {
   expect(validGitPath("src/\ud800.ts")).toBe(false);
   expect(() => parseGitOperation({ operation: "diff", paths: ["src/\ud800.ts"] })).toThrow();
@@ -61,6 +63,13 @@ describe("trusted Git operation catalogue", () => {
     expect(isGithubOperation("push")).toBe(true);
     expect(isGithubOperation("stage")).toBe(false);
   });
+
+  it.each([{ title: "CR8OR-012: General maintenance" }, { projectCode: "FORGED" }, { sequence: 12 },
+    { pullRequestNaming: { version: 1, projectCode: "CR8OR", strategy: "approved-head-successor" } }])(
+    "rejects caller-supplied pull-request naming metadata %#", fields => {
+      expect(() => parseGitOperation({ ...pullRequest, ...fields })).toThrow(ExecutionAuthorizationError);
+    },
+  );
 
   it.each(["", "-main", "main;id", "$(id)", "main\nsecret", "main branch", "../main", "main..old", "a//b", "a/.hidden", "a/b.lock", "refs/heads/main", "HEAD", "main.", "a".repeat(201)])(
     "rejects unsafe Git reference %j", value => expect(validGitRef(value)).toBe(false),
@@ -140,8 +149,55 @@ describe("registered Git repository and operation scopes", () => {
       expect(gitScopeDigest(changed)).not.toBe(gitScopeDigest(base));
     }
     const pull = { operation: "create-pr", ...remoteMutation, baseBranch: "review", expectedBase: head, category: "Code improvements" };
-    expect(buildGitOperationScope(context, parseGitOperation(pull)).payloadDigest)
-      .not.toBe(buildGitOperationScope(context, parseGitOperation({ ...pull, expectedBase: otherHead })).payloadDigest);
+    expect(buildGitOperationScope(namedContext, parseGitOperation(pull)).payloadDigest)
+      .not.toBe(buildGitOperationScope(namedContext, parseGitOperation({ ...pull, expectedBase: otherHead })).payloadDigest);
+  });
+
+  it("binds pull-request naming to the trusted repository mapping and immutable approved head", () => {
+    const scope = buildGitOperationScope(namedContext, parseGitOperation(pullRequest));
+    expect(scope.pullRequestNaming).toEqual({ version: 1, projectCode: "CR8OR", strategy: "approved-head-successor" });
+    expect(scope.repositoryKey).toBe("badadeveloper001-dev/cr8or-studio");
+    expect(scope.expectedRemoteHead).toBe(head);
+    expect(Object.isFrozen(scope.pullRequestNaming)).toBe(true);
+    expect(() => { scope.pullRequestNaming!.projectCode = "OTHER"; }).toThrow();
+    expect(() => { scope.paths.push("other.ts"); }).toThrow();
+  });
+
+  it.each(["https://github.com/other-owner/Cr8or-Studio", "https://github.com/badadeveloper001-dev/other-project",
+    "https://github.com/Fixture/Project-A.git"])("never guesses a project code for unrelated repository %s", repositoryUrl => {
+    try {
+      buildGitOperationScope({ ...context, workspace: { ...workspace, repositoryUrl } }, parseGitOperation(pullRequest));
+      throw new Error("Expected rejection");
+    } catch (error) { expect(error).toMatchObject({ status: 409, message: "Registered project naming is unavailable." }); }
+  });
+
+  it.each([undefined, { version: 2, projectCode: "CR8OR", strategy: "approved-head-successor" },
+    { version: 1, projectCode: "OTHER", strategy: "approved-head-successor" },
+    { version: 1, projectCode: "CR8OR", strategy: "next-available" },
+    { version: 1, projectCode: "CR8OR", strategy: "approved-head-successor", sequence: 12 },
+  ])("invalidates missing, altered or unsupported pull-request naming %#", pullRequestNaming => {
+    const scope = buildGitOperationScope(namedContext, parseGitOperation(pullRequest));
+    expect(() => validateGitOperationScope({ ...scope, pullRequestNaming })).toThrow(ExecutionAuthorizationError);
+  });
+
+  it.each(["expectedRemoteHead", "expectedBase", "baseBranch", "category"] as const)(
+    "rejects incomplete approved pull-request derivation missing %s", field => {
+      const scope = buildGitOperationScope(namedContext, parseGitOperation(pullRequest));
+      expect(() => validateGitOperationScope({ ...scope, [field]: null })).toThrow(ExecutionAuthorizationError);
+    },
+  );
+
+  it("binds naming and title inputs to approval digests without changing unrelated scope shapes", () => {
+    const scope = buildGitOperationScope(namedContext, parseGitOperation(pullRequest));
+    for (const replacement of [{ expectedRemoteHead: otherHead }, { category: "Test improvements" },
+      { expectedBase: head }, { baseBranch: "other-review" }]) {
+      const changed = buildGitOperationScope(namedContext, parseGitOperation({ ...pullRequest, ...replacement }));
+      expect(gitScopeDigest(changed)).not.toBe(gitScopeDigest(scope));
+    }
+    expect(() => validateGitOperationScope({ ...scope, repositoryKey: "unrelated/project" })).toThrow();
+    const unrelated = buildGitOperationScope(context, parseGitOperation(update));
+    expect(unrelated).not.toHaveProperty("pullRequestNaming");
+    expect(() => validateGitOperationScope({ ...unrelated, pullRequestNaming: scope.pullRequestNaming })).toThrow();
   });
 
   it("binds digest to project, workspace, repository, branch and full structured scope", () => {

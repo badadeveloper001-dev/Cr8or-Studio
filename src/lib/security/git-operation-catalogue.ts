@@ -3,6 +3,7 @@ import "server-only";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { ExecutionAuthorizationError, type ExecutionAuthorizationContext } from "@/lib/security/execution-context";
+import { resolveGitProjectCode } from "@/lib/security/git-project-naming";
 
 export const GIT_MAX_CONTENT_BYTES = 256 * 1024;
 export const GIT_OPERATION_KEYS = ["status", "branch", "changes", "diff", "log", "remote", "stage", "unstage", "commit", "push", "create-branch", "create-pr", "upsert-file", "list-branches", "list-contents", "read-file", "pr-checks"] as const;
@@ -73,11 +74,25 @@ const scopeSchema = z.object({
   expectedHead: sha.nullable(), expectedIndex: digest.nullable(), expectedRemoteHead: sha.nullable(),
   targetCommit: sha.nullable(), targetBranch: ref.nullable(), baseBranch: ref.nullable(),
   filePath: path.nullable(), expectedBlob: sha.nullable(), expectedBase: sha.nullable(), category: category.nullable(), contentDigest: digest.nullable(), payloadDigest: digest,
+  pullRequestNaming: z.object({ version: z.literal(1), projectCode: z.string().regex(/^[A-Z][A-Z0-9]{1,19}$/),
+    strategy: z.literal("approved-head-successor") }).strict().optional(),
 }).strict();
 export type GitOperationScope = Readonly<z.infer<typeof scopeSchema>>;
 export function validateGitOperationScope(value: unknown): GitOperationScope {
   const result = scopeSchema.safeParse(value);
   if (!result.success || Buffer.byteLength(JSON.stringify(result.data), "utf8") > 24 * 1024 || canonicalGitRepository(`https://github.com/${result.data.repositoryKey}`).key !== result.data.repositoryKey) {
+    throw new ExecutionAuthorizationError(403, "Git approval scope is invalid.");
+  }
+  if (result.data.operationKey === "create-pr") {
+    let projectCode: string;
+    try { projectCode = resolveGitProjectCode(result.data.repositoryKey); }
+    catch { throw new ExecutionAuthorizationError(403, "Git approval scope is invalid."); }
+    if (!result.data.pullRequestNaming || result.data.pullRequestNaming.projectCode !== projectCode ||
+        !result.data.expectedRemoteHead || !result.data.expectedBase || !result.data.baseBranch || !result.data.category) {
+      throw new ExecutionAuthorizationError(403, "Git approval scope is invalid.");
+    }
+    Object.freeze(result.data.pullRequestNaming);
+  } else if (result.data.pullRequestNaming !== undefined) {
     throw new ExecutionAuthorizationError(403, "Git approval scope is invalid.");
   }
   Object.freeze(result.data.paths);
@@ -102,12 +117,20 @@ export function buildGitOperationScope(context: Pick<ExecutionAuthorizationConte
   const get = (key: string): string | null => typeof (request as Record<string, unknown>)[key] === "string" ? (request as Record<string, string>)[key] : null;
   const repository = canonicalGitRepository(workspace.repositoryUrl);
   const canonicalRequest = { ...request, branch: workspace.branch };
+  let pullRequestNaming: GitOperationScope["pullRequestNaming"];
+  if (request.operation === "create-pr") {
+    let projectCode: string;
+    try { projectCode = resolveGitProjectCode(repository.key); }
+    catch { throw new ExecutionAuthorizationError(409, "Registered project naming is unavailable."); }
+    pullRequestNaming = { version: 1, projectCode, strategy: "approved-head-successor" };
+  }
   return validateGitOperationScope({ ownerId: "owner", projectId: context.projectId,
     workspaceRecordId: workspace.id, providerWorkspaceId: workspace.providerWorkspaceId, repositoryKey: repository.key,
     operationKey: request.operation, branch: workspace.branch, paths: "paths" in request ? [...request.paths].sort() : [],
     expectedHead: get("expectedHead"), expectedIndex: get("expectedIndex"), expectedRemoteHead: get("expectedRemoteHead"),
     targetCommit: get("targetCommit"), targetBranch: get("targetBranch"), baseBranch: get("baseBranch"), filePath: get("filePath"), expectedBlob: get("expectedBlob"),
     expectedBase: get("expectedBase"), category: get("category"),
+    ...(pullRequestNaming ? { pullRequestNaming } : {}),
     contentDigest: "content" in request ? createHash("sha256").update(request.content, "utf8").digest("hex") : null,
     payloadDigest: createHash("sha256").update(stable(canonicalRequest)).digest("hex") });
 }

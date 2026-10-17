@@ -3,6 +3,7 @@ import "server-only";
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { formatGitPullTitle, GIT_PULL_CATEGORIES, resolveGitProjectCode } from "@/lib/security/git-project-naming";
 
 /** Low-level transport. Callers must obtain a trusted Git grant and enforce the release gate first. */
 export const PRIVATE_GITHUB_LIMITS = Object.freeze({
@@ -40,7 +41,7 @@ const operationSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("read-file"), branch, path: relativePath }).strict(),
   z.object({ kind: z.literal("create-branch"), branch, fromBranch: branch, expectedHead: sha }).strict(),
   z.object({ kind: z.literal("create-pr"), branch, base: branch, expectedHead: sha, expectedBase: sha,
-    title: z.string().min(1).max(200).refine((value) => !/[\x00-\x1f\x7f]/.test(value)),
+    category: z.enum(GIT_PULL_CATEGORIES),
     body: z.string().max(16_384) }).strict(),
   z.object({ kind: z.literal("update-file"), branch, expectedHead: sha, path: relativePath,
     expectedFileSha: sha.nullable(), content: utf8Content, message: commitMessage }).strict(),
@@ -80,6 +81,11 @@ export async function executePrivateGithubOperation(input: PrivateGithubInput): 
   }
   const repository = parsedRepository.data;
   const operation = parsedOperation.data;
+  const repositoryKey = `${repository.owner}/${repository.repo}`.toLowerCase();
+  let projectCode: string | undefined;
+  if (operation.kind === "create-pr") {
+    try { projectCode = resolveGitProjectCode(repositoryKey); } catch { return { status: "FAILED", code: "INVALID_REQUEST" }; }
+  }
   const repoPath = `/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.repo)}`;
   const endpoint = (suffix: string) => `https://api.github.com${repoPath}${suffix}`;
   const encodePath = (path: string) => path.split("/").map(encodeURIComponent).join("/");
@@ -167,14 +173,70 @@ export async function executePrivateGithubOperation(input: PrivateGithubInput): 
   };
   const readContent = (path: string, target: string, missingAllowed = false) =>
     request(`/contents/${encodePath(path)}?ref=${encodeURIComponent(target)}`, "GET", undefined, missingAllowed);
-  const safePull = (value: unknown, head: string, base: string) => {
-    const pull = z.object({ number: z.number().int().positive(), state: z.literal("open"),
+  const safePull = (value: unknown, title: string, expectedNumber?: number) => {
+    const pull = z.object({ number: z.number().int().positive(), state: z.literal("open"), draft: z.literal(true), title: z.literal(title),
       head: z.object({ ref: branch, sha, repo: z.object({ full_name: z.string() }) }),
       base: z.object({ ref: branch, sha, repo: z.object({ full_name: z.string() }) }) }).parse(value);
-    const fullName = `${repository.owner}/${repository.repo}`.toLowerCase();
-    if (pull.head.repo.full_name.toLowerCase() !== fullName || pull.base.repo.full_name.toLowerCase() !== fullName ||
-      pull.head.ref !== head || pull.base.ref !== base) throw new TransportFailure("PROVIDER_FAILURE");
+    if (operation.kind !== "create-pr" || pull.head.repo.full_name.toLowerCase() !== repositoryKey ||
+      pull.base.repo.full_name.toLowerCase() !== repositoryKey || pull.head.ref !== operation.branch || pull.base.ref !== operation.base ||
+      pull.head.sha !== operation.expectedHead || pull.base.sha !== operation.expectedBase ||
+      (expectedNumber !== undefined && pull.number !== expectedNumber)) throw new TransportFailure("PROVIDER_FAILURE");
     return pull;
+  };
+  const listCompleteRefs = async (expected: ReadonlyArray<{ branch: string; head: string }>) => {
+    const refs = z.array(z.object({ name: branch, commit: z.object({ sha }) })).max(PRIVATE_GITHUB_LIMITS.items);
+    const branches = refs.parse(await request("/branches?per_page=100", "GET", undefined, false, true));
+    const tags = refs.parse(await request("/tags?per_page=100", "GET", undefined, false, true));
+    // A full page is not proof of completeness. Never number from partial history.
+    if (branches.length >= PRIVATE_GITHUB_LIMITS.items || tags.length >= PRIVATE_GITHUB_LIMITS.items ||
+      branches.length + tags.length > PRIVATE_GITHUB_LIMITS.sequenceRefs) throw new TransportFailure("PROVIDER_FAILURE");
+    const all = [...branches.map((item) => ({ kind: "branch", name: item.name, sha: item.commit.sha })),
+      ...tags.map((item) => ({ kind: "tag", name: item.name, sha: item.commit.sha }))]
+      .sort((left, right) => `${left.kind}:${left.name}`.localeCompare(`${right.kind}:${right.name}`));
+    if (new Set(all.map((item) => `${item.kind}:${item.name}`)).size !== all.length) throw new TransportFailure("PROVIDER_FAILURE");
+    if (expected.some((item) => branches.find((candidate) => candidate.name === item.branch)?.commit.sha !== item.head)) {
+      throw new TransportFailure("REMOTE_CHANGED");
+    }
+    return all;
+  };
+  const completeHistory = async (tip: string) => {
+    const history = z.array(z.object({ sha, commit: z.object({ message: z.string().max(16_384) }) })).max(PRIVATE_GITHUB_LIMITS.items)
+      .parse(await request(`/commits?sha=${tip}&per_page=100`, "GET", undefined, false, true));
+    if (history.length === 0 || history.length >= PRIVATE_GITHUB_LIMITS.items || history[0].sha !== tip ||
+      new Set(history.map((item) => item.sha)).size !== history.length) throw new TransportFailure("PROVIDER_FAILURE");
+    return history;
+  };
+  const titleSequence = (title: string, code: string) => {
+    // code is server-owned (or the existing fixed PROJECT commit namespace).
+    const match = new RegExp(`^${code}-([0-9]{3,}): `).exec(title);
+    if (!match) return 0;
+    const value = Number(match[1]);
+    if (!Number.isSafeInteger(value) || value > 999_999_999) throw new TransportFailure("PROVIDER_FAILURE");
+    return value;
+  };
+  const scanHistorySequences = async (refs: ReadonlyArray<{ sha: string }>, code: string,
+    known?: Awaited<ReturnType<typeof completeHistory>>) => {
+    const seen = new Set<string>();
+    let sequence = 0;
+    for (const tip of new Set(refs.map((item) => item.sha))) {
+      const history = known?.[0].sha === tip ? known : await completeHistory(tip);
+      for (const commit of history) {
+        if (seen.has(commit.sha)) continue;
+        seen.add(commit.sha);
+        if (seen.size > PRIVATE_GITHUB_LIMITS.sequenceCommits) throw new TransportFailure("PROVIDER_FAILURE");
+        sequence = Math.max(sequence, titleSequence(commit.commit.message, code));
+      }
+    }
+    return sequence;
+  };
+  const listCompletePulls = async () => {
+    const items = z.array(z.object({ number: z.number().int().positive(), title: z.string().max(1024),
+      base: z.object({ repo: z.object({ full_name: z.string() }) }) })).max(PRIVATE_GITHUB_LIMITS.items)
+      .parse(await request("/pulls?state=all&per_page=100", "GET", undefined, false, true));
+    if (items.length >= PRIVATE_GITHUB_LIMITS.items || new Set(items.map((item) => item.number)).size !== items.length ||
+      items.some((item) => item.base.repo.full_name.toLowerCase() !== repositoryKey)) throw new TransportFailure("PROVIDER_FAILURE");
+    // Keep only the numbering snapshot: provider URLs and unrelated PR bodies are never trusted or returned.
+    return items.map((item) => ({ number: item.number, title: item.title })).sort((left, right) => left.number - right.number);
   };
   const perform = async (): Promise<unknown> => {
     if (operation.kind === "metadata") {
@@ -199,41 +261,11 @@ export async function executePrivateGithubOperation(input: PrivateGithubInput): 
       }), complete: items.length < PRIVATE_GITHUB_LIMITS.items };
     }
     if (operation.kind === "commit-sequence") {
-      const listRefs = async () => {
-        const refs = z.array(z.object({ name: branch, commit: z.object({ sha }) })).max(PRIVATE_GITHUB_LIMITS.items);
-        const branches = refs.parse(await request("/branches?per_page=100", "GET", undefined, false, true));
-        const tags = refs.parse(await request("/tags?per_page=100", "GET", undefined, false, true));
-        // A full page is not proof of completeness. There is no silent partial
-        // history result and no fallback to numbering only the current branch.
-        if (branches.length >= PRIVATE_GITHUB_LIMITS.items || tags.length >= PRIVATE_GITHUB_LIMITS.items ||
-          branches.length + tags.length > PRIVATE_GITHUB_LIMITS.sequenceRefs) throw new TransportFailure("PROVIDER_FAILURE");
-        const all = [...branches.map((item) => ({ kind: "branch", name: item.name, sha: item.commit.sha })),
-          ...tags.map((item) => ({ kind: "tag", name: item.name, sha: item.commit.sha }))]
-          .sort((left, right) => `${left.kind}:${left.name}`.localeCompare(`${right.kind}:${right.name}`));
-        if (new Set(all.map((item) => `${item.kind}:${item.name}`)).size !== all.length) throw new TransportFailure("PROVIDER_FAILURE");
-        if (branches.find((item) => item.name === operation.branch)?.commit.sha !== operation.expectedHead) throw new TransportFailure("REMOTE_CHANGED");
-        return all;
-      };
-      const initialRefs = await listRefs();
-      const seen = new Set<string>();
-      let sequence = 0;
-      for (const tip of new Set(initialRefs.map((item) => item.sha))) {
-        const history = z.array(z.object({ sha, commit: z.object({ message: z.string().max(16_384) }) })).max(PRIVATE_GITHUB_LIMITS.items)
-          .parse(await request(`/commits?sha=${tip}&per_page=100`, "GET", undefined, false, true));
-        if (history.length === 0 || history.length >= PRIVATE_GITHUB_LIMITS.items || history[0].sha !== tip) throw new TransportFailure("PROVIDER_FAILURE");
-        for (const commit of history) {
-          if (seen.has(commit.sha)) continue;
-          seen.add(commit.sha);
-          if (seen.size > PRIVATE_GITHUB_LIMITS.sequenceCommits) throw new TransportFailure("PROVIDER_FAILURE");
-          const match = /^PROJECT-([0-9]{3,}): /.exec(commit.commit.message);
-          if (match) {
-            const value = Number(match[1]);
-            if (!Number.isSafeInteger(value) || value >= 999_999_999) throw new TransportFailure("PROVIDER_FAILURE");
-            sequence = Math.max(sequence, value);
-          }
-        }
-      }
-      if (JSON.stringify(await listRefs()) !== JSON.stringify(initialRefs)) throw new TransportFailure("REMOTE_CHANGED");
+      const expected = [{ branch: operation.branch, head: operation.expectedHead }];
+      const initialRefs = await listCompleteRefs(expected);
+      const sequence = await scanHistorySequences(initialRefs, "PROJECT");
+      if (sequence >= 999_999_999) throw new TransportFailure("PROVIDER_FAILURE");
+      if (JSON.stringify(await listCompleteRefs(expected)) !== JSON.stringify(initialRefs)) throw new TransportFailure("REMOTE_CHANGED");
       return { head: operation.expectedHead, nextSequence: sequence + 1 };
     }
     if (operation.kind === "contents") {
@@ -274,14 +306,32 @@ export async function executePrivateGithubOperation(input: PrivateGithubInput): 
       return { branch: operation.branch, head: operation.expectedHead };
     }
     if (operation.kind === "create-pr") {
-      if (operation.branch === operation.base) throw new TransportFailure("INVALID_REQUEST");
+      if (operation.branch === operation.base || !projectCode) throw new TransportFailure("INVALID_REQUEST");
+      // The approved immutable head and category determine one title. A stale candidate
+      // fails; mutable state must never silently select a different approved title.
+      const code = projectCode;
+      const approvedHistory = await completeHistory(operation.expectedHead);
+      const nextSequence = 1 + Math.max(0, ...approvedHistory.map((item) => titleSequence(item.commit.message, code)));
+      const title = formatGitPullTitle(code, nextSequence, operation.category);
+      const expected = [{ branch: operation.branch, head: operation.expectedHead }, { branch: operation.base, head: operation.expectedBase }];
+      const initialRefs = await listCompleteRefs(expected);
+      if (await scanHistorySequences(initialRefs, code, approvedHistory) >= nextSequence) throw new TransportFailure("REMOTE_CHANGED");
+      const initialPulls = await listCompletePulls();
+      if (initialPulls.some((item) => titleSequence(item.title, code) >= nextSequence)) throw new TransportFailure("REMOTE_CHANGED");
+      if (JSON.stringify(await listCompleteRefs(expected)) !== JSON.stringify(initialRefs) ||
+        JSON.stringify(await listCompletePulls()) !== JSON.stringify(initialPulls)) throw new TransportFailure("REMOTE_CHANGED");
       await requireHead(operation.base, operation.expectedBase);
       await requireHead(operation.branch, operation.expectedHead);
-      const created = safePull(await request("/pulls", "POST", { title: operation.title, body: operation.body,
-        head: operation.branch, base: operation.base, draft: true }), operation.branch, operation.base);
-      const verified = safePull(await request(`/pulls/${created.number}`), operation.branch, operation.base);
-      if (verified.head.sha !== operation.expectedHead || verified.base.sha !== operation.expectedBase) throw new TransportFailure("REMOTE_CHANGED");
-      return { number: verified.number, state: verified.state, url: `https://github.com/${repository.owner}/${repository.repo}/pull/${verified.number}` };
+      const created = safePull(await request("/pulls", "POST", { title, body: operation.body,
+        head: operation.branch, base: operation.base, draft: true }), title);
+      const verified = safePull(await request(`/pulls/${created.number}`), title, created.number);
+      const finalPulls = await listCompletePulls();
+      if (finalPulls.filter((item) => titleSequence(item.title, code) === nextSequence).length !== 1 ||
+        !finalPulls.some((item) => item.number === verified.number && item.title === title) ||
+        JSON.stringify(finalPulls.filter((item) => item.number !== verified.number)) !== JSON.stringify(initialPulls) ||
+        JSON.stringify(await listCompleteRefs(expected)) !== JSON.stringify(initialRefs)) throw new TransportFailure("REMOTE_CHANGED");
+      return { number: verified.number, state: verified.state, draft: true, title,
+        url: `https://github.com/${repository.owner}/${repository.repo}/pull/${verified.number}` };
     }
     if (operation.kind === "update-file") {
       const existing = await readContent(operation.path, operation.branch, true);

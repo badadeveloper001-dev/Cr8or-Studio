@@ -250,7 +250,15 @@ export async function listPrivateGitApprovals(session: AuthSession, limit = 100)
       if (sessionExpiresAt <= now) throw new ExecutionAuthorizationError(401);
       // Review DTOs grant no authority. Consumption/decision separately take
       // registration locks; this read does not hold table locks across projects.
-      return rows.map((row) => {
+      return rows.flatMap((row) => {
+        // Unsupported historical scopes cannot be safely presented for review.
+        // Retain their audit rows without upgrading them or suppressing valid
+        // unrelated approvals. Database and other infrastructure failures still
+        // propagate through the enclosing fail-closed transaction.
+        try { validateGitOperationScope(row.scope); } catch (error) {
+          if (error instanceof ExecutionAuthorizationError && error.status === 403) return [];
+          throw error;
+        }
         const workspace: RegisteredWorkspace | null = row.currentWorkspaceId && row.associationCount === 1 &&
           row.currentRuntimeType === "cloud" && row.currentProvider === "daytona" ? {
             id: row.currentWorkspaceId, projectId: row.projectId, runtimeType: row.currentRuntimeType,
@@ -258,7 +266,7 @@ export async function listPrivateGitApprovals(session: AuthSession, limit = 100)
             repositoryUrl: row.currentRepositoryUrl, branch: row.currentBranch,
             projectRepository: row.currentProjectRepository,
           } : null;
-        return view(row, now, scopeMatches(row, binding, workspace));
+        return [view(row, now, scopeMatches(row, binding, workspace))];
       });
 
     }, TRANSACTION_OPTIONS);

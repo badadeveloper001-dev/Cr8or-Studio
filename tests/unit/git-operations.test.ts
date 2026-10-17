@@ -256,14 +256,16 @@ describe("trusted Git adapter factories", () => {
     expect(mocks.github).toHaveBeenCalledTimes(2);
   });
 
-  it("retains both exact PR branch targets and creates a neutral title", async () => {
+  it("retains exact PR targets and delegates only the approved category to trusted title generation", async () => {
     mocks.github.mockResolvedValue({ status: "SUCCEEDED" });
     const request = parseGitOperation({ operation: "create-pr", branch: "main", expectedRemoteHead: head,
       baseBranch: "review", expectedBase: otherHead, category: "Code improvements" });
-    await createGithubGitAdapter(() => "synthetic_token").execute(request, scope(request), async () => undefined, context.signal);
+    const registered = { ...context, workspace: { ...workspace, repositoryUrl: "https://github.com/badadeveloper001-dev/Cr8or-Studio.git" } };
+    await createGithubGitAdapter(() => "synthetic_token").execute(request, buildGitOperationScope(registered, request), async () => undefined, context.signal);
     expect(mocks.github).toHaveBeenCalledWith(expect.objectContaining({ operation: expect.objectContaining({
-      kind: "create-pr", branch: "main", base: "review", expectedHead: head, expectedBase: otherHead, title: "Code improvements",
+      kind: "create-pr", branch: "main", base: "review", expectedHead: head, expectedBase: otherHead, category: "Code improvements",
     }) }));
+    expect(mocks.github.mock.calls[0][0].operation).not.toHaveProperty("title");
   });
 
   it("derives neutral sequential commit titles from the verified project-wide sequence", async () => {

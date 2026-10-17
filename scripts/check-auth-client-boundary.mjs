@@ -13,6 +13,7 @@ const sourceFiles = [
   "src/lib/security/git-approvals.ts",
   "src/lib/security/git-authorization.ts",
   "src/lib/security/git-operation-catalogue.ts",
+  "src/lib/security/git-project-naming.ts",
   "src/lib/security/git-operation-store.ts",
   "src/lib/security/command-catalogue.ts",
   "src/lib/security/command-operation-store.ts",

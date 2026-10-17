@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { appendAuditEvent } from "@/lib/security/audit";
 import { ExecutionAuthorizationError, type ExecutionAuthorizationContext } from "@/lib/security/execution-context";
 import { validateGitAuthorization, type GitAuthorization } from "@/lib/security/git-authorization";
-import { canonicalGitRepository, gitScopeDigest, isGithubOperation, isGitMutation, parseGitOperation, type GitOperationRequest, type GitOperationScope } from "@/lib/security/git-operation-catalogue";
+import { buildGitOperationScope, canonicalGitRepository, gitScopeDigest, isGithubOperation, isGitMutation, parseGitOperation, type GitOperationRequest, type GitOperationScope } from "@/lib/security/git-operation-catalogue";
 import { reserveGitOperation, markGitDispatched, finishGitOperation } from "@/lib/security/git-operation-store";
 import { executePrivateGithubOperation, type PrivateGithubOperation } from "@/lib/workspace/private-github-api";
 import { privateGitSession } from "@/lib/workspace/private-git-session";
@@ -113,6 +113,16 @@ export function createDaytonaGitAdapter(provider: DaytonaProvider): GitExecution
 export function createGithubGitAdapter(token: () => string | undefined, fetcher?: typeof fetch): GitExecutionAdapter {
   return { kind: "github", execute: async (request, scope, revalidate, signal) => {
     await revalidate();
+    if (request.operation === "create-pr") {
+      // The transport derives the title only from the immutable approved inputs.
+      // Do not let a mutated request or stale naming policy reach credentials.
+      const intended = buildGitOperationScope({ projectId: scope.projectId, workspace: {
+        id: scope.workspaceRecordId, runtimeType: "cloud", provider: "daytona",
+        providerWorkspaceId: scope.providerWorkspaceId, repositoryUrl: `https://github.com/${scope.repositoryKey}`,
+        branch: scope.branch,
+      } }, request);
+      if (gitScopeDigest(intended) !== gitScopeDigest(scope)) throw new ExecutionAuthorizationError(403);
+    }
     const credential = token();
     if (!credential) throw unavailable();
     const repository = canonicalGitRepository(`https://github.com/${scope.repositoryKey}`);
@@ -129,7 +139,7 @@ export function createGithubGitAdapter(token: () => string | undefined, fetcher?
         if (request.targetCommit !== request.expectedRemoteHead) throw new ExecutionAuthorizationError(409);
         operation = { kind: "create-branch", branch: request.targetBranch, fromBranch: scope.branch, expectedHead: request.expectedRemoteHead }; break;
       case "create-pr": operation = { kind: "create-pr", branch: scope.branch, base: request.baseBranch,
-        expectedHead: request.expectedRemoteHead, expectedBase: request.expectedBase, title: request.category, body: "Created through an authorized Cr8or Studio operation." }; break;
+        expectedHead: request.expectedRemoteHead, expectedBase: request.expectedBase, category: request.category, body: "Created through an authorized Cr8or Studio operation." }; break;
       case "upsert-file": {
         const history = await run({ kind: "commit-sequence", branch: scope.branch, expectedHead: request.expectedRemoteHead });
         const data = history.data as { head?: string; nextSequence?: number } | undefined;

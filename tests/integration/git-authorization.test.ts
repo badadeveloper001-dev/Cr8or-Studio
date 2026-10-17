@@ -86,6 +86,15 @@ describe.skipIf(!testUrl)("Git approvals and coordination on isolated PostgreSQL
     await approvals.decidePrivateGitApproval(identity.authSession, approval.id, "approved");
     return { ...identity, input, scope, approval };
   }
+  async function approvedPullRequest() {
+    // Repository identity is synthetic registry data only: no transport/provider
+    // is instantiated and no GitHub credential or live repository is accessed.
+    const repositoryUrl = "https://github.com/badadeveloper001-dev/Cr8or-Studio.git";
+    await database.project.update({ where: { id: PROJECT_A }, data: { repository: repositoryUrl } });
+    await database.workspace.updateMany({ where: { projectId: PROJECT_A }, data: { repositoryUrl } });
+    return approved({ operation: "create-pr", branch: "main", expectedRemoteHead: HEAD,
+      baseBranch: "review", expectedBase: TARGET, category: "General maintenance" });
+  }
   async function approvalRow(id: string) {
     const rows = await database.$queryRaw<Array<{ consumedAt: Date | null; consumedOperationId: string | null; sessionId: string;
       credentialVersion: number; scope: GitOperationScope; scopeDigest: string }>>`SELECT * FROM "GitApproval" WHERE "id" = ${id}::uuid`;
@@ -179,6 +188,59 @@ describe.skipIf(!testUrl)("Git approvals and coordination on isolated PostgreSQL
     const identity = await capability(PROJECT_A, initiatingSession(60_000));
     const approval = await approvals.createPrivateGitApproval(identity.authorization, catalogue.buildGitOperationScope(identity.authorization, stage()));
     expect(new Date(approval.expiresAt).getTime()).toBe(identity.session.expiresAt.getTime());
+  });
+  it("persists immutable pull-request naming inputs with the existing ten-minute session-bound approval", async () => {
+    const identity = await approvedPullRequest();
+    const row = await approvalRow(identity.approval.id);
+    expect(row.scope).toMatchObject({ operationKey: "create-pr", repositoryKey: "badadeveloper001-dev/cr8or-studio",
+      expectedRemoteHead: HEAD, baseBranch: "review", expectedBase: TARGET, category: "General maintenance",
+      pullRequestNaming: { version: 1, projectCode: "CR8OR", strategy: "approved-head-successor" } });
+    expect(row).toMatchObject({ sessionId: identity.session.id, credentialVersion: ownerFixture.credentialVersion,
+      scopeDigest: catalogue.gitScopeDigest(identity.scope) });
+    expect(new Date(identity.approval.expiresAt).getTime() - new Date(identity.approval.requestedAt).getTime()).toBe(10 * 60 * 1_000);
+    expect(identity.approval.preview).toBe(JSON.stringify(identity.scope, null, 2));
+    const operationId = randomUUID();
+    expect(await approvals.consumePrivateGitApproval(identity.authorization, identity.scope, identity.approval.id, operationId, "frontend")).toBe(true);
+    expect(await approvals.validateConsumedPrivateGitApproval(identity.authorization, identity.scope, identity.approval.id, operationId, "frontend")).toBe(true);
+    expect(await approvals.consumePrivateGitApproval(identity.authorization, identity.scope, identity.approval.id, randomUUID(), "frontend")).toBe(false);
+  });
+  it.each([
+    ["approved head", { expectedRemoteHead: "a".repeat(40) }], ["category", { category: "Test improvements" }],
+    ["base branch", { baseBranch: "different-review" }], ["base head", { expectedBase: "b".repeat(40) }],
+    ["project code", { pullRequestNaming: { version: 1, projectCode: "OTHER", strategy: "approved-head-successor" } }],
+    ["strategy", { pullRequestNaming: { version: 1, projectCode: "CR8OR", strategy: "next-available" } }],
+    ["missing naming", { pullRequestNaming: undefined }], ["repository", { repositoryKey: REPOSITORY_B }],
+  ])("cannot consume a pull-request approval with changed %s", async (_name, changed) => {
+    const identity = await approvedPullRequest();
+    const consumed = await approvals.consumePrivateGitApproval(identity.authorization,
+      { ...identity.scope, ...(changed as object) }, identity.approval.id, randomUUID(), "frontend").catch(() => false);
+    expect(consumed).toBe(false);
+    expect((await approvalRow(identity.approval.id)).consumedAt).toBeNull();
+  });
+  it("does not silently upgrade a persisted legacy pull-request approval lacking naming inputs", async () => {
+    const identity = await approvedPullRequest();
+    const stageApproval = await approvals.createPrivateGitApproval(identity.authorization,
+      catalogue.buildGitOperationScope(identity.authorization, stage()));
+    await database.$executeRaw`UPDATE "GitApproval" SET "scope" = "scope" - 'pullRequestNaming'
+      WHERE "id" = ${identity.approval.id}::uuid`;
+    const listed = await approvals.listPrivateGitApprovals(identity.authSession);
+    expect(listed.map(item => item.id)).toEqual([stageApproval.id]);
+    expect(listed[0].scope.operationKey).toBe("stage");
+    expect(await approvals.consumePrivateGitApproval(identity.authorization, identity.scope, identity.approval.id, randomUUID(), "frontend")).toBe(false);
+    const retained = await approvalRow(identity.approval.id);
+    expect(retained.consumedAt).toBeNull();
+    expect(retained.scope).not.toHaveProperty("pullRequestNaming");
+  });
+  it.each(["revoked", "expired", "rotated"] as const)("keeps pull-request approval invalid when its initiating session is %s", async state => {
+    const identity = await approvedPullRequest();
+    if (state === "revoked") await sessions.revokeSession(identity.session.id);
+    if (state === "expired") await database.authSession.update({ where: { id: identity.session.id }, data: {
+      authenticatedAt: new Date(Date.now() - 120_000), createdAt: new Date(Date.now() - 120_000), expiresAt: new Date(Date.now() - 60_000) } });
+    if (state === "rotated") await owners.rotateOwnerAccessCode("synthetic pull-request replacement 1234");
+    await expect(approvals.consumePrivateGitApproval(identity.authorization, identity.scope, identity.approval.id, randomUUID(), "frontend"))
+      .rejects.toMatchObject({ status: 401 });
+    const fresh = await capability();
+    expect(await approvals.consumePrivateGitApproval(fresh.authorization, identity.scope, identity.approval.id, randomUUID(), "frontend")).toBe(false);
   });
   it.each([null, "https://github.com/unrelated/repository", "https://token@github.com/synthetic-owner/repository-a"])(
     "requires matching registered Project and Workspace repositories: %s", async (repository) => {
