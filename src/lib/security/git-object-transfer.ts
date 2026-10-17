@@ -101,7 +101,7 @@ export function serializeGitTree(entries: readonly GitTransferTreeEntry[]): Buff
   }
   return Buffer.concat(chunks);
 }
-function parseTree(objectId: string, content: Buffer): ValidatedGitTree {
+export function parseGitTransferTree(objectId: string, content: Buffer): ValidatedGitTree {
   const entries: GitTransferTreeEntry[] = [];
   let offset = 0;
   while (offset < content.length) {
@@ -140,7 +140,7 @@ export function validateGitObjectTransfer(value: unknown, inputScope: GitOperati
     if (content.toString("base64") !== wire.contentBase64 || content.length > GIT_OBJECT_TRANSFER_LIMITS.objectBytes ||
         totalBytes > GIT_OBJECT_TRANSFER_LIMITS.totalBytes || gitObjectId(wire.type as GitTransferObjectType, content) !== wire.oid) return reject();
     const object: ValidatedGitObject = wire.type === "commit" ? parseCommit(wire.oid, content) :
-      wire.type === "tree" ? parseTree(wire.oid, content) : Object.freeze({ oid: wire.oid, type: "blob", content });
+      wire.type === "tree" ? parseGitTransferTree(wire.oid, content) : Object.freeze({ oid: wire.oid, type: "blob", content });
     if (object.type === "tree") treeEntries += object.entries.length;
     if (treeEntries > GIT_OBJECT_TRANSFER_LIMITS.treeEntries) return reject();
     objects.set(object.oid, object);

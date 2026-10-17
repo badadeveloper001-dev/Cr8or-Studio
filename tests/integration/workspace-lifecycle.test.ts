@@ -7,6 +7,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import type { AuthSession } from "@/lib/security/auth";
 import type { WorkspaceLifecycleRequest, WorkspaceLifecycleScope } from "@/lib/security/workspace-lifecycle-catalogue";
 import type { LifecycleProvider, LifecycleResource } from "@/lib/workspace/private-lifecycle-provider";
+import type { RepositoryInitializationTransport } from "@/lib/workspace/private-workspace-lifecycle";
 
 vi.mock("server-only", () => ({}));
 // Real PostgreSQL and synthetic registrations, with no live provider available.
@@ -113,6 +114,23 @@ describe.skipIf(!testUrl)("workspace lifecycle on isolated PostgreSQL", () => {
     const approval = await service.prepareWorkspaceLifecycle(identity.authSession, request);
     await service.decideWorkspaceLifecycle(identity.authSession, approval.approvalId, "approve");
     return { ...identity, approval, request };
+  }
+  function repositoryTransport(): RepositoryInitializationTransport {
+    const verified = async (scope: WorkspaceLifecycleScope, _id: string, _sandbox: string, revalidate: () => Promise<void>) => {
+      await revalidate();
+      return { status: "complete" as const, repositoryKey: scope.repositoryKey!, branch: scope.branch!,
+        head: scope.initialization!.expectedHead, historyVerified: true };
+    };
+    return { resolveHead: vi.fn(async (_repository, revalidate) => { await revalidate(); return "a".repeat(40); }),
+      prepare: vi.fn(async (_scope, revalidate) => { await revalidate(); }), initialize: vi.fn(verified), inspect: vi.fn(verified) };
+  }
+  async function approvedClone(transport = repositoryTransport()) {
+    const identity = await owner();
+    const request = { action: "clone" as const, repositoryUrl: "https://github.com/synthetic-owner/new-repository",
+      branch: "main", idempotencyKey: randomUUID() };
+    const approval = await service.prepareWorkspaceLifecycleWithRepository(identity.authSession, request, transport);
+    await service.decideWorkspaceLifecycle(identity.authSession, approval.approvalId, "approve");
+    return { ...identity, approval, request, transport };
   }
   async function migrate(directory: string) {
     const sql = await readFile(path.join(process.cwd(), "prisma/migrations", directory, "migration.sql"), "utf8");
@@ -527,8 +545,7 @@ describe.skipIf(!testUrl)("workspace lifecycle on isolated PostgreSQL", () => {
     expect(rows).toEqual([{ status: "FAILED" }]);
   });
   it("keeps approved cloning blocked without exposing credentials or creating a resource", async () => {
-    const identity = await approvedServiceRequest({ action: "clone", repositoryUrl: "https://github.com/synthetic-owner/new-repository",
-      branch: "main", idempotencyKey: randomUUID() }), provider = controlledProvider();
+    const identity = await approvedClone(), provider = controlledProvider();
     await expect(service.executeWorkspaceLifecycleWithProvider(identity.authSession, identity.request, provider,
       identity.approval.approvalId)).rejects.toMatchObject({ status: 503 });
     expect(provider.create).not.toHaveBeenCalled();
@@ -536,9 +553,164 @@ describe.skipIf(!testUrl)("workspace lifecycle on isolated PostgreSQL", () => {
   });
   it("does not clone an already registered repository using a different project name", async () => {
     const identity = await owner();
-    await expect(service.prepareWorkspaceLifecycle(identity.authSession, { action: "clone", projectName: "Replacement attempt",
-      repositoryUrl: `https://github.com/${REPOSITORY_A}.git`, branch: "main", idempotencyKey: randomUUID() })).rejects.toMatchObject({ status: 409 });
+    await expect(service.prepareWorkspaceLifecycleWithRepository(identity.authSession, { action: "clone", projectName: "Replacement attempt",
+      repositoryUrl: `https://github.com/${REPOSITORY_A}.git`, branch: "main", idempotencyKey: randomUUID() }, repositoryTransport())).rejects.toMatchObject({ status: 409 });
     expect(await database.workspace.count()).toBe(2);
+  });
+  it("keeps public clone approval and execution blocked before credential transport", async () => {
+    const identity = await owner(), request = { action: "clone", repositoryUrl: "https://github.com/synthetic-owner/new-repository",
+      branch: "main", idempotencyKey: randomUUID() };
+    await expect(service.prepareWorkspaceLifecycle(identity.authSession, request)).rejects.toMatchObject({ status: 503 });
+    await expect(service.executeWorkspaceLifecycle(identity.authSession, request)).rejects.toMatchObject({ status: 503 });
+    expect(await database.$queryRaw`SELECT "id" FROM "WorkspaceLifecycleApproval"`).toHaveLength(0);
+    expect(await database.$queryRaw`SELECT "id" FROM "WorkspaceLifecycleOperation"`).toHaveLength(0);
+  });
+  it("records the exact new sandbox before transfer and registers only independently verified history", async () => {
+    const identity = await approvedClone(), provider = controlledProvider();
+    const historical = await database.project.findMany({ include: { workspaces: true }, orderBy: { id: "asc" } });
+    const original = vi.mocked(identity.transport.initialize).getMockImplementation()!;
+    vi.mocked(identity.transport.initialize).mockImplementation(async (...args) => {
+      const [scope, operationId, sandbox] = args;
+      expect(await store.readLifecycleOperation(identity.binding, operationId)).toMatchObject({ status: "DISPATCHED", providerResourceId: sandbox });
+      expect(await database.project.findUnique({ where: { id: scope.projectId } })).toBeNull();
+      return original(...args);
+    });
+    const result = await service.executeWorkspaceLifecycleWithProvider(identity.authSession, identity.request, provider,
+      identity.approval.approvalId, undefined, identity.transport);
+    expect(result).toMatchObject({ ok: true, status: "SUCCEEDED", action: "clone" });
+    expect(identity.approval.preview.expectedHead).toBe("a".repeat(40));
+    expect(identity.transport.prepare).toHaveBeenCalledOnce();
+    expect(identity.transport.initialize).toHaveBeenCalledOnce();
+    expect(identity.transport.inspect).toHaveBeenCalledOnce();
+    const workspace = await database.workspace.findUniqueOrThrow({ where: { projectId: result.projectId } });
+    expect(workspace).toMatchObject({ state: "ready", providerWorkspaceId: `synthetic-${result.operationId}`,
+      repositoryUrl: "https://github.com/synthetic-owner/new-repository.git", branch: "main" });
+    expect(await database.project.findMany({ where: { id: { in: [PROJECT_A, PROJECT_B] } }, include: { workspaces: true }, orderBy: { id: "asc" } })).toEqual(historical);
+  });
+  it("validates the complete source graph before creating a sandbox", async () => {
+    const identity = await approvedClone(), provider = controlledProvider();
+    vi.mocked(identity.transport.prepare).mockRejectedValue(new Error("synthetic-token should not escape"));
+    const error = await service.executeWorkspaceLifecycleWithProvider(identity.authSession, identity.request, provider,
+      identity.approval.approvalId, undefined, identity.transport).catch(error => error);
+    expect(error).toMatchObject({ status: 503 }); expect(String(error)).not.toContain("synthetic-token");
+    expect(provider.create).not.toHaveBeenCalled(); expect(identity.transport.initialize).not.toHaveBeenCalled();
+    expect(await database.$queryRaw`SELECT "status", "attempts" FROM "WorkspaceLifecycleOperation"`).toEqual([{ status: "FAILED", attempts: 0 }]);
+  });
+  it("rejects stale approved remote HEAD instead of silently substituting a new clone", async () => {
+    const identity = await approvedClone(), provider = controlledProvider();
+    vi.mocked(identity.transport.resolveHead).mockResolvedValue("b".repeat(40));
+    await expect(service.executeWorkspaceLifecycleWithProvider(identity.authSession, identity.request, provider,
+      identity.approval.approvalId, undefined, identity.transport)).rejects.toMatchObject({ status: 409 });
+    expect(provider.create).not.toHaveBeenCalled(); expect(identity.transport.prepare).not.toHaveBeenCalled();
+    expect(await database.$queryRaw`SELECT "id" FROM "WorkspaceLifecycleOperation"`).toHaveLength(0);
+  });
+  it("does not reinterpret a legacy clone approval without verified HEAD as initialization authority", async () => {
+    const identity = await approvedClone();
+    await database.$executeRaw`UPDATE "WorkspaceLifecycleApproval" SET "scope" = "scope" - 'initialization'
+      WHERE "id" = ${identity.approval.approvalId}::uuid`;
+    const other = await store.createLifecycleApproval(identity.binding, await registeredScope());
+    expect((await store.listLifecycleApprovals(identity.binding)).map(row => row.id)).toEqual([other.id]);
+    await expect(secondStore.reserveLifecycleOperation(identity.binding, identity.approval.scope, {
+      idempotencyKey: identity.request.idempotencyKey, approvalId: identity.approval.approvalId, requiresApproval: true,
+    })).rejects.toMatchObject({ status: 409 });
+    expect(await database.$queryRaw`SELECT "id" FROM "WorkspaceLifecycleOperation"`).toHaveLength(0);
+  });
+  it("coordinates clone approval consumption and one dispatch across independent PostgreSQL pools", async () => {
+    const identity = await approvedClone();
+    const options = { idempotencyKey: identity.request.idempotencyKey, approvalId: identity.approval.approvalId, requiresApproval: true };
+    const reservations = await Promise.all([store, secondStore].map(instance => instance.reserveLifecycleOperation(identity.binding, identity.approval.scope, options)));
+    expect(new Set(reservations.map(result => result.operation.id)).size).toBe(1);
+    expect(reservations.filter(result => result.reused)).toHaveLength(1);
+    const operationId = reservations[0].operation.id;
+    const dispatches = await Promise.allSettled([store, secondStore].map(instance => instance.markLifecycleDispatched(identity.binding, operationId)));
+    expect(dispatches.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    expect(dispatches.filter(result => result.status === "rejected")).toHaveLength(1);
+  });
+  it.each(["expectedHead", "initialization", "providerWorkspaceId", "projectId"])("rejects client-supplied clone authority: %s", field => {
+    expect(() => catalogue.parseWorkspaceLifecycleRequest({ action: "clone", repositoryUrl: "https://github.com/synthetic-owner/new-repository",
+      branch: "main", idempotencyKey: randomUUID(), [field]: "forged" })).toThrow();
+  });
+  it.each([
+    { status: "incomplete" }, { head: "b".repeat(40) }, { historyVerified: false },
+    { branch: "another-branch" }, { repositoryKey: REPOSITORY_B },
+  ])("retains the sandbox without registration on unverified clone result: %j", changed => {
+    return (async () => {
+      const identity = await approvedClone(), provider = controlledProvider();
+      vi.mocked(identity.transport.inspect).mockResolvedValue({ status: "complete", repositoryKey: identity.approval.scope.repositoryKey!,
+        branch: "main", head: "a".repeat(40), historyVerified: true, ...changed } as Awaited<ReturnType<RepositoryInitializationTransport["inspect"]>>);
+      await expect(service.executeWorkspaceLifecycleWithProvider(identity.authSession, identity.request, provider,
+        identity.approval.approvalId, undefined, identity.transport)).rejects.toMatchObject({ status: 409 });
+      const [operation] = await database.$queryRaw<Array<{ id: string; status: string; providerResourceId: string }>>`
+        SELECT "id", "status", "providerResourceId" FROM "WorkspaceLifecycleOperation"`;
+      expect(operation).toMatchObject({ status: "UNKNOWN", providerResourceId: `synthetic-${operation.id}` });
+      expect(await database.project.findUnique({ where: { id: identity.approval.scope.projectId } })).toBeNull();
+      expect(provider.create).toHaveBeenCalledOnce();
+    })();
+  });
+  it.each(["revoke", "expire", "rotate"])("prevents clone registration when authorization changes during transfer: %s", async mode => {
+    const identity = await approvedClone(), provider = controlledProvider();
+    vi.mocked(identity.transport.initialize).mockImplementation(async (scope, _id, _sandbox, revalidate) => {
+      if (mode === "rotate") await owners.rotateOwnerAccessCode("synthetic rotated fixture");
+      else await database.authSession.update({ where: { id: identity.session.id }, data: mode === "revoke" ? { revokedAt: new Date() } : {
+        authenticatedAt: new Date(Date.now() - 120_000), createdAt: new Date(Date.now() - 120_000), expiresAt: new Date(Date.now() - 60_000),
+      } });
+      await revalidate();
+      return { status: "complete", repositoryKey: scope.repositoryKey!, branch: scope.branch!, head: scope.initialization!.expectedHead, historyVerified: true };
+    });
+    await expect(service.executeWorkspaceLifecycleWithProvider(identity.authSession, identity.request, provider,
+      identity.approval.approvalId, undefined, identity.transport)).rejects.toMatchObject({ status: 401 });
+    expect(identity.transport.inspect).not.toHaveBeenCalled();
+    expect(await database.project.findUnique({ where: { id: identity.approval.scope.projectId } })).toBeNull();
+    expect(await database.$queryRaw`SELECT "status" FROM "WorkspaceLifecycleOperation"`).toEqual([{ status: "UNKNOWN" }]);
+  });
+  it("does not dispatch a duplicate clone when concurrent requests share the approved reservation", async () => {
+    const identity = await approvedClone(), provider = controlledProvider();
+    const results = await Promise.all([1, 2].map(() => service.executeWorkspaceLifecycleWithProvider(identity.authSession, identity.request, provider,
+      identity.approval.approvalId, undefined, identity.transport)));
+    expect(new Set(results.map(result => result.operationId)).size).toBe(1);
+    expect(provider.create).toHaveBeenCalledOnce(); expect(identity.transport.initialize).toHaveBeenCalledOnce();
+    expect(await database.workspace.count({ where: { projectId: identity.approval.scope.projectId } })).toBe(1);
+  });
+  it.each(["absent", "incomplete", "mismatched", "complete"] as const)("reconciles an uncertain clone only from independent evidence: %s", async status => {
+    const identity = await approvedClone(), provider = controlledProvider();
+    vi.mocked(identity.transport.initialize).mockRejectedValue(new Error("transfer disconnected"));
+    await expect(service.executeWorkspaceLifecycleWithProvider(identity.authSession, identity.request, provider,
+      identity.approval.approvalId, undefined, identity.transport)).rejects.toMatchObject({ status: 503 });
+    const [operation] = await database.$queryRaw<Array<{ id: string; providerResourceId: string }>>`SELECT "id", "providerResourceId" FROM "WorkspaceLifecycleOperation"`;
+    vi.mocked(identity.transport.inspect).mockResolvedValue({ status, repositoryKey: identity.approval.scope.repositoryKey!, branch: "main",
+      head: status === "complete" ? "a".repeat(40) : null, historyVerified: status === "complete" });
+    const result = await service.reconcileWorkspaceLifecycleWithProvider(identity.authSession, operation.id, provider, undefined, identity.transport);
+    expect(result).toMatchObject(status === "complete" ? { status: "SUCCEEDED", ok: true } : { status: "UNKNOWN", ok: false, repositoryState: status });
+    expect(await database.workspace.count({ where: { projectId: identity.approval.scope.projectId } })).toBe(status === "complete" ? 1 : 0);
+    expect(provider.create).toHaveBeenCalledOnce(); expect(identity.transport.initialize).toHaveBeenCalledOnce();
+    expect(identity.transport.inspect).toHaveBeenCalledOnce(); expect(provider.findCreated).not.toHaveBeenCalled();
+    expect(provider.start).not.toHaveBeenCalled(); expect(provider.stop).not.toHaveBeenCalled();
+  });
+  it("does not inspect a substituted sandbox during uncertain clone reconciliation", async () => {
+    const identity = await approvedClone(), provider = controlledProvider();
+    vi.mocked(identity.transport.initialize).mockRejectedValue(new Error("interrupted"));
+    await expect(service.executeWorkspaceLifecycleWithProvider(identity.authSession, identity.request, provider,
+      identity.approval.approvalId, undefined, identity.transport)).rejects.toBeDefined();
+    const [operation] = await database.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "WorkspaceLifecycleOperation"`;
+    vi.mocked(provider.inspect).mockResolvedValue(resource("unrelated-resource"));
+    await expect(service.reconcileWorkspaceLifecycleWithProvider(identity.authSession, operation.id, provider, undefined, identity.transport)).rejects.toBeDefined();
+    expect(identity.transport.inspect).not.toHaveBeenCalled();
+    expect(await database.workspace.count()).toBe(2);
+  });
+  it("storage independently requires exact clone history evidence before registration", async () => {
+    const identity = await approvedClone();
+    const { operation } = await store.reserveLifecycleOperation(identity.binding, identity.approval.scope,
+      { idempotencyKey: identity.request.idempotencyKey, approvalId: identity.approval.approvalId, requiresApproval: true });
+    await store.markLifecycleDispatched(identity.binding, operation.id);
+    const providerId = `synthetic-${operation.id}`;
+    await store.recordLifecycleResource(identity.binding, operation.id, providerId);
+    const evidence = { id: providerId, state: "started" as const, isolationVerified: true, repositoryKey: identity.approval.scope.repositoryKey,
+      branch: "main", reservationId: operation.id, projectId: operation.projectId };
+    await expect(store.completeLifecycleOperation(identity.binding, operation.id, evidence)).rejects.toMatchObject({ status: 409 });
+    await expect(store.completeLifecycleOperation(identity.binding, operation.id, { ...evidence, repositoryInitialization: {
+      status: "complete", repositoryKey: identity.approval.scope.repositoryKey!, branch: "main", head: "b".repeat(40), historyVerified: true,
+    } })).rejects.toMatchObject({ status: 409 });
+    expect(await database.project.findUnique({ where: { id: operation.projectId } })).toBeNull();
   });
   it("sanitizes provider failure after create dispatch and retains UNKNOWN without retry", async () => {
     const identity = await approvedServiceRequest(), provider = controlledProvider();
