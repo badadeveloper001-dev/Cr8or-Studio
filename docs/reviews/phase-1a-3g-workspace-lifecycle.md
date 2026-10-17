@@ -10,6 +10,10 @@ documents the additional existing-workspace startup and reconciliation checks
 and their validation. The implementation results below describe the original
 foundation at `1906b3c9a7adc78d64a743b0ede1edc64149fd3c`.
 
+The later [repository initialization implementation](phase-1a-3i-repository-initialization.md)
+adds bounded, server-mediated object transfer and clone reconciliation below the
+unchanged private cloning and lifecycle release restrictions.
+
 ## Architecture and trusted registration
 
 The private lifecycle service accepts only an authentic owner proof from the

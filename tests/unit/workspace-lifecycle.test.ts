@@ -30,6 +30,8 @@ describe("workspace lifecycle trusted request and scope catalogue", () => {
     { ownerId: "owner" }, { sessionId: "forged" }, { credentialVersion: 1 }, { approvalStatus: "APPROVED" },
     { labels: { owner: "owner" } }, { shell: "npm test" }, { environment: { GITHUB_TOKEN: "secret" } },
     { snapshot: "arbitrary-snapshot" }, { operationId: randomUUID() },
+    { expectedHead: "a".repeat(40) },
+    { initialization: { version: 1, strategy: "complete-sha1-git-database", expectedHead: "a".repeat(40) } },
   ])("rejects client authority and arbitrary provider configuration: %j", extra => {
     expect(() => parseWorkspaceLifecycleRequest({ ...creation(), ...extra })).toThrow();
   });
@@ -86,6 +88,17 @@ describe("workspace lifecycle trusted request and scope catalogue", () => {
   });
   it("allows only a canonical repository, branch, and registered sandbox association", () => {
     expect(validateWorkspaceLifecycleScope(registered())).toEqual(registered());
+  });
+  it("binds cloning to an immutable verified source head and initialization protocol", () => {
+    const clone = validateWorkspaceLifecycleScope({ ...registered(), action: "clone", providerWorkspaceId: null,
+      initialization: { version: 1, strategy: "complete-sha1-git-database", expectedHead: "a".repeat(40) } });
+    expect(Object.isFrozen(clone.initialization)).toBe(true);
+    expect(workspaceLifecycleScopeDigest(clone)).not.toBe(workspaceLifecycleScopeDigest({ ...clone,
+      initialization: { ...clone.initialization!, expectedHead: "b".repeat(40) } }));
+    expect(() => validateWorkspaceLifecycleScope({ ...clone, initialization: undefined })).toThrow();
+    expect(() => validateWorkspaceLifecycleScope({ ...clone, initialization: { ...clone.initialization, expectedHead: "invalid" } })).toThrow();
+    expect(() => validateWorkspaceLifecycleScope({ ...clone, initialization: { ...clone.initialization, version: 2 } })).toThrow();
+    expect(() => validateWorkspaceLifecycleScope({ ...registered(), initialization: clone.initialization })).toThrow();
   });
 });
 

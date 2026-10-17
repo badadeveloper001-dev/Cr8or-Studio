@@ -30,6 +30,8 @@ const scopeSchema = z.object({
   projectId: identifier, workspaceRecordId: identifier, providerWorkspaceId: identifier.nullable(),
   projectName: name, repositoryKey: z.string().min(3).max(140).nullable(),
   repositoryUrl: repository.nullable(), branch: branch.nullable(),
+  initialization: z.object({ version: z.literal(1), strategy: z.literal("complete-sha1-git-database"),
+    expectedHead: z.string().regex(/^[a-f0-9]{40}$/) }).strict().optional(),
 }).strict();
 export type WorkspaceLifecycleScope = Readonly<z.infer<typeof scopeSchema>>;
 export function validateWorkspaceLifecycleScope(input: unknown): WorkspaceLifecycleScope {
@@ -45,10 +47,12 @@ export function validateWorkspaceLifecycleScope(input: unknown): WorkspaceLifecy
     throw new ExecutionAuthorizationError(403, "Workspace lifecycle scope is invalid.");
   }
   if ((scope.action === "create" && (scope.repositoryUrl !== null || scope.providerWorkspaceId !== null)) ||
-      (scope.action === "clone" && (!scope.repositoryUrl || scope.providerWorkspaceId !== null)) ||
+      (scope.action === "clone" && (!scope.repositoryUrl || scope.providerWorkspaceId !== null || !scope.initialization)) ||
+      (scope.action !== "clone" && scope.initialization !== undefined) ||
       (["start", "stop"].includes(scope.action) && !scope.providerWorkspaceId)) {
     throw new ExecutionAuthorizationError(403, "Workspace lifecycle scope is invalid.");
   }
+  if (scope.initialization) Object.freeze(scope.initialization);
   return Object.freeze(scope);
 }
 

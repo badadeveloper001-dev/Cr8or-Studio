@@ -51,6 +51,9 @@ export type VerifiedLifecycleResource = {
   isolationVerified: boolean;
   id: string; state: "started" | "stopped"; repositoryKey: string | null; branch: string | null;
   reservationId: string; projectId: string;
+  repositoryInitialization?: {
+    status: "complete"; repositoryKey: string; branch: string; head: string; historyVerified: true;
+  };
 };
 function conflict(): never { throw new ExecutionAuthorizationError(409, "Workspace lifecycle operation cannot proceed."); }
 function validIdentity(value: unknown, max = 256): value is string {
@@ -359,6 +362,15 @@ async function complete(binding: LifecycleBinding, id: string, evidence: Verifie
         evidence.repositoryKey !== row.scope.repositoryKey || evidence.branch !== row.scope.branch ||
         evidence.state !== (row.action === "stop" ? "stopped" : "started") ||
         typeof evidence.isolationVerified !== "boolean" || (row.action !== "stop" && evidence.isolationVerified !== true)) conflict();
+    // Isolation and started state do not establish that a clone completed. The
+    // exact approved Git HEAD and full history must have separate evidence.
+    if (row.action === "clone") {
+      const initialized = evidence.repositoryInitialization;
+      if (!row.providerResourceId || row.providerResourceId !== evidence.id || !initialized ||
+          initialized.status !== "complete" || initialized.historyVerified !== true ||
+          initialized.repositoryKey !== row.scope.repositoryKey || initialized.branch !== row.scope.branch ||
+          initialized.head !== row.scope.initialization?.expectedHead) conflict();
+    } else if (evidence.repositoryInitialization !== undefined) conflict();
     if (row.status === "SUCCEEDED") {
       if (row.providerResourceId !== evidence.id) conflict();
       await registry(tx, row.scope, provisioning(row.scope) ? evidence.id : undefined);
