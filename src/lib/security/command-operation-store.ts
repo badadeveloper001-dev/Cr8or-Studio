@@ -76,6 +76,11 @@ export async function reserveCommandOperation(input: ReserveCommandOperationInpu
     // Hash collisions only serialize unrelated workspaces; they cannot bypass
     // exact workspace-ID predicates or the unique unresolved-workspace index.
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`cr8or-command:${input.workspaceId}`}, 0))::text`;
+    const [git] = await tx.$queryRaw<Array<{ active: number }>>`
+      SELECT count(*)::integer AS "active" FROM "GitOperation"
+      WHERE "workspaceId" = ${input.workspaceId} AND "status" IN ('RESERVED', 'RUNNING', 'UNKNOWN')
+    `;
+    if (git.active > 0) conflict();
     const [clock] = await tx.$queryRaw<Array<{ now: Date }>>`
       SELECT (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3) AS "now"
     `;

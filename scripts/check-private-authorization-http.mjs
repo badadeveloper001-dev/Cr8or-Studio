@@ -129,7 +129,7 @@ async function startServer(databaseUrl, mode) {
 
 async function applyMigrations(database) {
   for (const directory of ["0_init", "20250101000000_add_workspace_table", "20261015000000_authentication_foundation",
-    "20261016000000_command_operations", "20261016010000_command_approvals"]) {
+    "20261016000000_command_operations", "20261016010000_command_approvals", "20261016020000_git_operations"]) {
     const sql = await readFile(join(repositoryRoot, "prisma/migrations", directory, "migration.sql"), "utf8");
     // These existing migrations are ordinary DDL with no semicolons in SQL literals.
     const statements = sql.replace(/^\s*--.*$/gm, "").split(";")
@@ -188,10 +188,12 @@ async function checkActiveServer(server, database) {
   // is database-only and must never contact a provider or execute a command.
   const commandProject = `${projectId}-command-approval`;
   const commandWorkspace = "synthetic-daytona-command-approval";
+  const gitRepository = "https://github.com/synthetic-owner/disposable-git";
   await database.project.create({ data: {
     id: commandProject, name: "Synthetic command approval", description: "Disposable HTTP scope fixture",
-    framework: "Next.js", language: "TypeScript", workspaces: { create: {
+    framework: "Next.js", language: "TypeScript", repository: gitRepository, workspaces: { create: {
       runtimeType: "cloud", provider: "daytona", providerWorkspaceId: commandWorkspace, state: "running",
+      repositoryUrl: gitRepository, branch: "main",
     } },
   } });
   const approvalRequest = { intent: "request", payload: {
@@ -222,6 +224,24 @@ async function checkActiveServer(server, database) {
   expectResponse(listedApprovals, 200, "scoped command approval list");
   assert((await listedApprovals.json()).approvals.some((item) => item.id === approval.id && item.status === "approved"),
     "Approved command scope was missing from owner review.");
+  const gitIntent = { operation: "stage", branch: "main", paths: ["src/example.ts"], expectedHead: "a".repeat(40), expectedIndex: "b".repeat(64) };
+  const gitApprovalResponse = await request("/api/security/approvals", { method: "POST", headers: approvalHeaders,
+    body: JSON.stringify({ intent: "request", payload: { action: "git.operation", projectId: commandProject, operation: gitIntent } }) });
+  expectResponse(gitApprovalResponse, 201, "scoped Git approval creation");
+  const gitApproval = (await gitApprovalResponse.json()).approval;
+  assert(gitApproval.scope.repositoryKey === "synthetic-owner/disposable-git" && gitApproval.scope.operationKey === "stage" &&
+    gitApproval.scope.branch === "main" && gitApproval.scope.paths[0] === "src/example.ts", "Git approval scope was not resolved from the registry.");
+  expectResponse(await request("/api/security/approvals", { method: "POST", headers: approvalHeaders,
+    body: JSON.stringify({ intent: "decide", payload: { id: gitApproval.id, decision: "approved" } }) }), 200, "Git approval decision");
+  expectResponse(await request("/api/github/ops", { method: "POST", headers: approvalHeaders,
+    body: JSON.stringify({ projectId: commandProject, operation: gitIntent, approvalId: gitApproval.id }) }), 503, "Git release restriction");
+  expectResponse(await request("/api/github/api", { method: "POST", headers: approvalHeaders,
+    body: JSON.stringify({ projectId: commandProject, operation: { operation: "list-branches" } }) }), 503, "GitHub release restriction");
+  expectResponse(await request("/api/github/api", { method: "POST", headers: approvalHeaders,
+    body: JSON.stringify({ projectId: commandProject, owner: "forged-owner", operation: { operation: "list-branches" } }) }), 400, "forged GitHub repository scope");
+  assert((await database.gitApproval.findUniqueOrThrow({ where: { id: gitApproval.id } })).consumedAt === null,
+    "The Git release restriction consumed an approval.");
+  console.log("PASS: Compiled Git handlers enforce registered scopes, durable approvals and immutable provider release restrictions.");
   await database.workspace.update({ where: { projectId: commandProject }, data: { providerWorkspaceId: "synthetic-remapped-sandbox" } });
   expectResponse(await request("/api/security/approvals", { method: "POST", headers: approvalHeaders,
     body: JSON.stringify(decisionRequest) }), 409, "remapped command approval scope");

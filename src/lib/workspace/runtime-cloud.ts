@@ -5,6 +5,10 @@ import { validateCommandRequest } from "@/lib/security/command-catalogue";
 import { validateCommandAuthorization } from "@/lib/security/command-authorization";
 import { assertPrivateCloudCommandAvailable } from "@/lib/workspace/private-cloud-command-availability";
 import { privateCloudCommandSession } from "@/lib/workspace/private-cloud-command-session";
+import { authorizeRuntimeGitRead, validateGitRepositoryContext } from "@/lib/security/git-authorization";
+import { parseGitOperation } from "@/lib/security/git-operation-catalogue";
+import { assertPrivateGitAvailable } from "@/lib/workspace/private-git-availability";
+import { createDaytonaGitAdapter, executeAuthorizedGitOperation } from "@/lib/workspace/private-git-operations";
 import { cloudPath, CLOUD_REPOSITORY_ROOT, shellQuote } from "@/lib/workspace/cloud-path";
 import { Sandbox } from "@daytona/sdk";
 import { DaytonaProvider } from "@/lib/workspace/providers/daytona";
@@ -253,6 +257,20 @@ export class CloudWorkspaceRuntime {
 
   async gitStatus(): Promise<GitStatusResult> {
     await this.authorize("read");
+    if (this.isPrivate()) {
+      const context = this.config.authorization;
+      if (!context) throw new ExecutionAuthorizationError(401);
+      const request = parseGitOperation({ operation: "status" });
+      await validateGitRepositoryContext(context, request);
+      assertPrivateGitAvailable();
+      const grant = await authorizeRuntimeGitRead(context, request);
+      const result = await executeAuthorizedGitOperation(grant, context, request, createDaytonaGitAdapter(this.provider));
+      if (result.status !== "SUCCEEDED") throw new ExecutionAuthorizationError(503);
+      // Transport has validated the helper DTO. Adapt it to the existing UI/tool contract.
+      const data = result.data as { branch: string; changes: Array<{ path: string; status: string }> };
+      return { branch: data.branch, changes: data.changes.map((item) => `${item.status} ${item.path}`).join("\n"),
+        changedFiles: data.changes, changedCount: data.changes.length };
+    }
     this.rejectUnsafeCommand();
     if (!this.sandbox) {
       throw new Error("Sandbox not initialized");
@@ -274,6 +292,18 @@ export class CloudWorkspaceRuntime {
 
   async gitDiff(relPath?: string, staged?: boolean): Promise<GitDiffResult> {
     await this.authorize("read");
+    if (this.isPrivate()) {
+      const context = this.config.authorization;
+      if (!context) throw new ExecutionAuthorizationError(401);
+      const request = parseGitOperation({ operation: "diff", paths: relPath ? [relPath] : [], staged });
+      await validateGitRepositoryContext(context, request);
+      assertPrivateGitAvailable();
+      const grant = await authorizeRuntimeGitRead(context, request);
+      const result = await executeAuthorizedGitOperation(grant, context, request, createDaytonaGitAdapter(this.provider));
+      if (result.status !== "SUCCEEDED") throw new ExecutionAuthorizationError(503);
+      const data = result.data as { unstaged: string; staged: string };
+      return { diff: staged ? data.staged : data.unstaged, stagedDiff: data.staged };
+    }
     this.rejectUnsafeCommand();
     const stagedFlag = staged ? "--staged " : "";
     const fileArg = relPath ? ` -- ${shellQuote(cloudPath(relPath))}` : "";

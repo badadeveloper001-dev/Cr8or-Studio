@@ -201,6 +201,12 @@ export class DaytonaProvider {
     return sandbox.git;
   }
 
+  /** Git may invoke project-controlled configuration even for reads. Reuse the
+   * conservative command admission boundary; the independent Git gate stays shut. */
+  async getPrivateGitSessionProcess(providerWorkspaceId: string): Promise<Process> {
+    return this.getPrivateCommandSessionProcess(providerWorkspaceId);
+  }
+
   async getSandboxMetadata(sandbox: Sandbox): Promise<WorkspaceMetadata> {
     return {
       id: sandbox.id,

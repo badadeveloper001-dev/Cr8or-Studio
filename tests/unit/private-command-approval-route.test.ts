@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   authorize: vi.fn(), context: vi.fn(), create: vi.fn(), decide: vi.fn(), list: vi.fn(),
+  gitCreate: vi.fn(), gitDecide: vi.fn(), gitList: vi.fn(), gitScope: vi.fn(),
   legacyRequest: vi.fn(), legacyDecide: vi.fn(), legacyList: vi.fn(), mode: vi.fn(),
 }));
 vi.mock("@/lib/security/authorization", () => ({ authorizeRoute: mocks.authorize }));
@@ -12,6 +13,10 @@ vi.mock("@/lib/security/command-approvals", () => ({
   decidePrivateCommandApproval: mocks.decide,
   listPrivateCommandApprovals: mocks.list,
 }));
+vi.mock("@/lib/security/git-approvals", () => ({
+  createPrivateGitApproval: mocks.gitCreate, decidePrivateGitApproval: mocks.gitDecide, listPrivateGitApprovals: mocks.gitList,
+}));
+vi.mock("@/lib/security/git-authorization", () => ({ validateGitRepositoryContext: mocks.gitScope }));
 vi.mock("@/lib/security/approvals", () => ({
   requestApproval: mocks.legacyRequest, decideApproval: mocks.legacyDecide, listApprovals: mocks.legacyList,
 }));
@@ -50,6 +55,8 @@ beforeEach(() => {
   mocks.create.mockResolvedValue(approval);
   mocks.decide.mockResolvedValue({ ...approval, status: "approved" });
   mocks.list.mockResolvedValue([approval]);
+  mocks.gitDecide.mockResolvedValue(null);
+  mocks.gitList.mockResolvedValue([]);
   mocks.legacyList.mockReturnValue([]);
   mocks.legacyRequest.mockReturnValue(legacy);
   mocks.legacyDecide.mockReturnValue({ ...legacy, status: "approved" });
@@ -201,7 +208,7 @@ describe("private scoped command approval route", () => {
   });
 
   it("rejects oversized declared and actual request bodies", async () => {
-    expect((await POST(request(createBody, { "Content-Length": "16385" }))).status).toBe(413);
+    expect((await POST(request(createBody, { "Content-Length": "2097153" }))).status).toBe(413);
     expect((await POST(request({ ...createBody, padding: "x".repeat(16385) }))).status).toBe(413);
     expect(mocks.create).not.toHaveBeenCalled();
   });
@@ -213,5 +220,120 @@ describe("private scoped command approval route", () => {
     expect(response.status).toBe(400);
     expect(await response.text()).not.toContain("private request contents");
     expect(mocks.create).not.toHaveBeenCalled();
+  });
+});
+
+
+const gitOperation = { operation: "stage", branch: "main", paths: ["src/app.ts"], expectedHead: "a".repeat(40), expectedIndex: "b".repeat(64) };
+const gitScope = { ownerId: "owner", projectId: "project-a", providerWorkspaceId: "sandbox-a", repositoryKey: "fixture/project-a", operationKey: "stage", branch: "main", paths: ["src/app.ts"] };
+const gitApproval = { ...approval, action: "git.operation", scope: gitScope, preview: JSON.stringify(gitScope) };
+const gitBody = { intent: "request", payload: { action: "git.operation", projectId: "project-a", operation: gitOperation } };
+
+describe("private scoped Git approval route", () => {
+  beforeEach(() => {
+    mocks.gitScope.mockResolvedValue(gitScope);
+    mocks.gitCreate.mockResolvedValue(gitApproval);
+  });
+
+  it("constructs the Git scope only from the authenticated context and canonical operation", async () => {
+    const response = await POST(request(gitBody));
+    expect(response.status).toBe(201);
+    expect(mocks.context).toHaveBeenCalledExactlyOnceWith(session, "project-a", expect.objectContaining({ permissions: ["write"] }));
+    expect(mocks.gitScope).toHaveBeenCalledExactlyOnceWith(context, gitOperation);
+    expect(mocks.gitCreate).toHaveBeenCalledExactlyOnceWith(context, gitScope);
+    expect(await response.json()).toEqual({ ok: true, approval: gitApproval });
+    expect(mocks.create).not.toHaveBeenCalled();
+    expect(mocks.legacyRequest).not.toHaveBeenCalled();
+  });
+
+  it.each(["ownerId", "sessionId", "credentialVersion", "providerWorkspaceId", "repositoryKey", "scope", "title", "preview"])(
+    "rejects the client-supplied Git scope field %s", async field => {
+      expect((await POST(request({ ...gitBody, payload: { ...gitBody.payload, [field]: "forged" } }))).status).toBe(400);
+      expect(mocks.gitScope).not.toHaveBeenCalled();
+      expect(mocks.gitCreate).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { operation: "status" }, { operation: "stage", paths: ["../../outside"] },
+    { ...gitOperation, branch: "main;cat .env" }, { ...gitOperation, repositoryKey: "other/project" },
+  ])("rejects unsuitable Git approval operation %j", async operation => {
+    expect((await POST(request({ ...gitBody, payload: { ...gitBody.payload, operation } }))).status).toBe(400);
+    expect(mocks.gitCreate).not.toHaveBeenCalled();
+  });
+
+  it.each(["git.commit-push", "github.write"])("rejects legacy action-only %s approvals in private mode", async action => {
+    expect((await POST(request({ intent: "request", payload: { action, title: "Free-form scope", preview: "Arbitrary authority" } }))).status).toBe(400);
+    expect(mocks.legacyRequest).not.toHaveBeenCalled();
+  });
+
+  it.each([401, 403, 404, 409, 503] as const)("preserves canonical Git scope failure %s", async status => {
+    mocks.gitScope.mockRejectedValue(new ExecutionAuthorizationError(status));
+    expect((await POST(request(gitBody))).status).toBe(status);
+    expect(mocks.gitCreate).not.toHaveBeenCalled();
+  });
+
+  it("rejects a missing Git execution context", async () => {
+    mocks.context.mockResolvedValue(undefined);
+    expect((await POST(request(gitBody))).status).toBe(401);
+    expect(mocks.gitScope).not.toHaveBeenCalled();
+  });
+
+  it.each(["approved", "denied", "revoked"])("decides durable Git approval %s with the actual authenticated session", async decision => {
+    mocks.decide.mockResolvedValue(null);
+    mocks.gitDecide.mockResolvedValue({ ...gitApproval, status: decision });
+    expect((await POST(request({ intent: "decide", payload: { id: approval.id, decision } }))).status).toBe(200);
+    expect(mocks.gitDecide).toHaveBeenCalledExactlyOnceWith(session, approval.id, decision);
+    expect(mocks.legacyDecide).not.toHaveBeenCalled();
+  });
+
+  it.each(["git.commit-push", "github.write"])("never silently converts legacy %s approval decisions", async action => {
+    mocks.decide.mockResolvedValue(null);
+    mocks.legacyList.mockReturnValue([{ ...legacy, action }]);
+    expect((await POST(request({ intent: "decide", payload: { id: legacy.id, decision: "approved" } }))).status).toBe(404);
+    expect(mocks.legacyDecide).not.toHaveBeenCalled();
+  });
+
+  it("lists durable Git approvals alongside command and unrelated approvals", async () => {
+    mocks.gitList.mockResolvedValue([gitApproval]);
+    mocks.legacyList.mockReturnValue([legacy, { ...legacy, action: "git.commit-push" }, { ...legacy, action: "github.write" }]);
+    const response = await GET(new NextRequest("https://studio.example.test/api/security/approvals"));
+    expect(response.status).toBe(200);
+    expect((await response.json()).approvals).toEqual([approval, gitApproval, legacy]);
+  });
+
+  it("fails closed when Git approvals cannot be listed", async () => {
+    mocks.gitList.mockRejectedValue(new Error("private database credentials"));
+    const response = await GET(new NextRequest("https://studio.example.test/api/security/approvals"));
+    expect(response.status).toBe(503);
+    expect(await response.text()).not.toContain("private database credentials");
+    expect(mocks.legacyList).not.toHaveBeenCalled();
+  });
+
+  it("does not use legacy fallback when a durable Git decision fails", async () => {
+    mocks.decide.mockResolvedValue(null);
+    mocks.gitDecide.mockRejectedValue(new ExecutionAuthorizationError(503));
+    expect((await POST(request({ intent: "decide", payload: { id: legacy.id, decision: "approved" } }))).status).toBe(503);
+    expect(mocks.legacyList).not.toHaveBeenCalled();
+  });
+
+  it("accepts bounded file content for server-derived approval digests without returning it", async () => {
+    const content = "private fixture source".repeat(1000);
+    const response = await POST(request({ ...gitBody, payload: { ...gitBody.payload, operation: {
+      operation: "upsert-file", branch: "main", expectedRemoteHead: "a".repeat(40),
+      expectedBlob: null, filePath: "src/app.ts", content, category: "Code improvements",
+    } } }));
+    expect(response.status).toBe(201);
+    expect(mocks.gitScope).toHaveBeenCalled();
+    expect(await response.text()).not.toContain(content);
+  });
+
+  it("rejects excessive file approval payloads before persistence", async () => {
+    const response = await POST(request({ ...gitBody, payload: { ...gitBody.payload, operation: {
+      operation: "upsert-file", branch: "main", expectedRemoteHead: "a".repeat(40),
+      expectedBlob: null, filePath: "src/app.ts", content: "x".repeat(256 * 1024 + 1), category: "Code improvements",
+    } } }));
+    expect(response.status).toBe(400);
+    expect(mocks.gitCreate).not.toHaveBeenCalled();
   });
 });

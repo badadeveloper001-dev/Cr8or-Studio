@@ -52,7 +52,6 @@ afterEach(() => vi.unstubAllEnvs());
 describe("unsupported direct workspace execution in private mode", () => {
   const endpoints = [
     { path: "/api/deploy", invoke: (req: NextRequest) => deploy(req) },
-    { path: "/api/github/ops", invoke: (req: NextRequest) => git(req) },
     { path: "/api/workspaces/test/preview", invoke: (req: NextRequest) => preview(req, { params: Promise.resolve({ projectId: "test" }) }) },
   ];
   it.each(endpoints)("blocks $path before parsing or executing work even for the authenticated owner", async ({ path, invoke }) => {
@@ -62,6 +61,14 @@ describe("unsupported direct workspace execution in private mode", () => {
     expect(response.status).toBe(503);
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(parse).not.toHaveBeenCalled();
+    expect(mocks.command).not.toHaveBeenCalled();
+    expect(mocks.provider).not.toHaveBeenCalled();
+  });
+
+  it("rejects a legacy Git path selector without reaching host execution", async () => {
+    const response = await git(request("/api/github/ops", { action: "status", projectPath: "../../unregistered" }));
+    expect(response.status).toBe(400);
+    expect(response.headers.get("cache-control")).toBe("no-store");
     expect(mocks.command).not.toHaveBeenCalled();
     expect(mocks.provider).not.toHaveBeenCalled();
   });

@@ -1,4 +1,5 @@
 import "server-only";
+import { assertPrivateGitAvailable } from "@/lib/workspace/private-git-availability";
 
 import { constants, promises as fs } from "node:fs";
 import path from "node:path";
@@ -203,6 +204,7 @@ export class LocalWorkspaceRuntime implements WorkspaceRuntime {
   }
 
   async gitStatus(): Promise<GitStatusResult> {
+    if (this.isPrivate()) { await this.authorize("read"); assertPrivateGitAvailable(); }
     await this.rejectUnsafeHostCommand();
     const result = await runSandboxedCommand({
       command: "git status --short",
@@ -238,6 +240,7 @@ export class LocalWorkspaceRuntime implements WorkspaceRuntime {
   }
 
   async gitDiff(relPath?: string, staged?: boolean): Promise<GitDiffResult> {
+    if (this.isPrivate()) { await this.authorize("read"); assertPrivateGitAvailable(); }
     await this.rejectUnsafeHostCommand();
     const fileArg = relPath ? ` -- ${relPath}` : "";
     const stagedFlag = staged ? "--staged " : "";

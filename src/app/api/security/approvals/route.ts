@@ -13,6 +13,9 @@ import {
   listPrivateCommandApprovals,
 } from "@/lib/security/command-approvals";
 import { createExecutionAuthorization, ExecutionAuthorizationError } from "@/lib/security/execution-context";
+import { isGitMutation, parseGitOperation } from "@/lib/security/git-operation-catalogue";
+import { validateGitRepositoryContext } from "@/lib/security/git-authorization";
+import { createPrivateGitApproval, decidePrivateGitApproval, listPrivateGitApprovals } from "@/lib/security/git-approvals";
 import { getPrivateAuthMode } from "@/lib/security/private-auth-mode";
 import { RiskAction } from "@/lib/security/policy";
 
@@ -43,14 +46,20 @@ const privateBodySchema = z.discriminatedUnion("intent", [
       projectId: z.string().min(1).max(256).refine(value => !value.includes("\0")),
       commandKey: z.string().min(1).max(100),
     }).strict(),
-    requestSchema.extend({ action: requestSchema.shape.action.exclude(["commands.execute"]) }).strict(),
+    z.object({
+      action: z.literal("git.operation"),
+      projectId: z.string().min(1).max(256).refine(value => !value.includes("\0")),
+      operation: z.unknown(),
+    }).strict(),
+    requestSchema.extend({ action: requestSchema.shape.action.exclude(["commands.execute", "git.commit-push", "github.write"]) }).strict(),
   ]) }).strict(),
   z.object({ intent: z.literal("decide"), payload: decideSchema.extend({
     decision: z.enum(["approved", "denied", "revoked"]),
   }).strict() }).strict(),
 ]);
 
-const PRIVATE_APPROVAL_BODY_BYTES = 16 * 1024;
+const PRIVATE_APPROVAL_BODY_BYTES = 2 * 1024 * 1024;
+const LEGACY_APPROVAL_BODY_BYTES = 16 * 1024;
 const PRIVATE_APPROVAL_BODY_TIMEOUT_MS = 10_000;
 
 class ApprovalBodyError extends Error {
@@ -100,7 +109,15 @@ async function readPrivateApprovalBody(request: NextRequest): Promise<unknown> {
     };
     const text = await Promise.race([consume(), interrupted]);
     check();
-    return JSON.parse(text) as unknown;
+    const body: unknown = JSON.parse(text);
+    // File-update approval scopes derive their digest from bounded source data;
+    // all other approval contracts retain their previous 16 KiB payload limit.
+    const gitRequest = typeof body === "object" && body !== null &&
+      "intent" in body && body.intent === "request" && "payload" in body &&
+      typeof body.payload === "object" && body.payload !== null &&
+      "action" in body.payload && body.payload.action === "git.operation";
+    if (!gitRequest && Buffer.byteLength(text, "utf8") > LEGACY_APPROVAL_BODY_BYTES) throw new ApprovalBodyError(413);
+    return body;
   } catch (error) {
     stopped = true;
     void reader.cancel().catch(() => undefined);
@@ -111,6 +128,10 @@ async function readPrivateApprovalBody(request: NextRequest): Promise<unknown> {
     if (interrupt) request.signal.removeEventListener("abort", interrupt);
     try { reader.releaseLock(); } catch { /* A cancelled pending read may still hold the stream. */ }
   }
+}
+
+function isScopedPrivateAction(action: string): boolean {
+  return ["commands.execute", "git.operation", "git.commit-push", "github.write"].includes(action);
 }
 
 function approvalFailure(error: unknown, requestId: string): Response {
@@ -142,15 +163,28 @@ async function privatePOST(request: NextRequest, requestId: string): Promise<Res
         const approval = await createPrivateCommandApproval(context, body.payload.commandKey);
         return NextResponse.json({ ok: true, approval }, { status: 201 });
       }
+      if (body.payload.action === "git.operation") {
+        let operation;
+        try { operation = parseGitOperation(body.payload.operation); } catch { throw new ApprovalBodyError(); }
+        if (!isGitMutation(operation.operation)) throw new ApprovalBodyError();
+        const context = await createExecutionAuthorization(auth.session, body.payload.projectId,
+          { permissions: ["write"], signal: request.signal });
+        if (!context) throw new ExecutionAuthorizationError(401);
+        const scope = await validateGitRepositoryContext(context, operation);
+        const approval = await createPrivateGitApproval(context, scope);
+        return NextResponse.json({ ok: true, approval }, { status: 201 });
+      }
       const approval = requestApproval({ ...body.payload, requestedBy: auth.session.userId, requestedRole: auth.session.role });
       return NextResponse.json({ ok: true, approval }, { status: 201 });
     }
 
     const approval = await decidePrivateCommandApproval(auth.session, body.payload.id, body.payload.decision);
     if (approval) return NextResponse.json({ ok: true, approval }, { status: 200 });
-    // Only an explicit missing durable record permits legacy fallback. Generic
+    const gitApproval = await decidePrivateGitApproval(auth.session, body.payload.id, body.payload.decision);
+    if (gitApproval) return NextResponse.json({ ok: true, approval: gitApproval }, { status: 200 });
+    // Only explicit missing durable records permit unrelated legacy fallback. Generic
     // action-only command approvals are never upgraded or decided here.
-    const legacy = listApprovals(1000).find(record => record.id === body.payload.id && record.action !== "commands.execute");
+    const legacy = listApprovals(1000).find(record => record.id === body.payload.id && !isScopedPrivateAction(record.action));
     if (!legacy) throw new ExecutionAuthorizationError(404, "Approval request not found.");
     if (body.payload.decision === "revoked") throw new ApprovalBodyError();
     const record = decideApproval({ ...body.payload, decision: body.payload.decision,
@@ -176,7 +210,8 @@ async function GETHandler(request: NextRequest) {
     try {
       records = getPrivateAuthMode() === "inactive" ? listApprovals(limit) : [
         ...await listPrivateCommandApprovals(auth.session, limit),
-        ...listApprovals(1000).filter(record => record.action !== "commands.execute"),
+        ...await listPrivateGitApprovals(auth.session, limit),
+        ...listApprovals(1000).filter(record => !isScopedPrivateAction(record.action)),
       ].sort((left, right) => Date.parse(right.requestedAt) - Date.parse(left.requestedAt)).slice(0, limit);
     } catch (error) {
       return approvalFailure(error, requestId);
