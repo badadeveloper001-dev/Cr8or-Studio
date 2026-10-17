@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "mode": "offline",
+  "suite": "critical-pilot-v1",
+  "repository": "cr8or-verification/pilot-fixture",
+  "branch": "pilot",
+  "sandboxes": ["offline-pilot-clone", "offline-pilot-execution", "offline-pilot-cancellation", "offline-pilot-uncertain-command", "offline-pilot-timeout"],
+  "database": "localhost:55432/cr8or_auth_test",
+  "maximumDurationSeconds": 300,
+  "maximumProviderOperations": 10000,
+  "cleanup": "retain-fixtures-and-database"
+}
