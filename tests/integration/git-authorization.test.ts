@@ -360,6 +360,58 @@ describe.skipIf(!testUrl)("Git approvals and coordination on isolated PostgreSQL
     const identity = await approved(push());
     expect(await approvals.consumePrivateGitApproval(identity.authorization, { ...identity.scope, [field]: "a".repeat(40) }, identity.approval.id, randomUUID(), "frontend")).toBe(false);
   });
+  it("persists the exact object-transfer policy with its session-bound push approval", async () => {
+    const identity = await approved(push());
+    expect(identity.scope).toMatchObject({ ownerId: "owner", projectId: PROJECT_A, providerWorkspaceId: SANDBOX_A,
+      repositoryKey: REPOSITORY_A, branch: "main", operationKey: "push", expectedRemoteHead: HEAD, targetCommit: TARGET,
+      objectTransfer: { version: 1, strategy: "linear-sha1-git-database" } });
+    const row = await approvalRow(identity.approval.id);
+    expect(row).toMatchObject({ sessionId: identity.session.id, credentialVersion: ownerFixture.credentialVersion,
+      scope: identity.scope, scopeDigest: catalogue.gitScopeDigest(identity.scope), consumedAt: null });
+    expect(identity.approval.preview).toBe(JSON.stringify(identity.scope, null, 2));
+    expect(new Date(identity.approval.expiresAt).getTime() - new Date(identity.approval.requestedAt).getTime()).toBe(10 * 60 * 1_000);
+    for (const secret of [identity.token, identity.session.id, ownerFixture.accessCodeHash]) {
+      expect(JSON.stringify(identity.approval)).not.toContain(secret);
+    }
+  });
+  it.each([
+    ["strategy", { objectTransfer: { version: 1, strategy: "arbitrary-git-push" } }],
+    ["version", { objectTransfer: { version: 2, strategy: "linear-sha1-git-database" } }],
+    ["missing policy", { objectTransfer: undefined }],
+    ["branch", { branch: "other" }], ["project", { projectId: PROJECT_B }],
+    ["sandbox", { providerWorkspaceId: SANDBOX_B }], ["repository", { repositoryKey: REPOSITORY_B }],
+  ])("rejects object-transfer approval scope substitution: %s", async (_name, changed) => {
+    const identity = await approved(push());
+    const consumed = await approvals.consumePrivateGitApproval(identity.authorization,
+      { ...identity.scope, ...(changed as object) }, identity.approval.id, randomUUID(), "frontend").catch(() => false);
+    expect(consumed).toBe(false);
+    expect((await approvalRow(identity.approval.id)).consumedAt).toBeNull();
+  });
+  it("does not upgrade a legacy branch-only push approval into permission to upload objects", async () => {
+    const identity = await approved(push());
+    await database.$executeRaw`UPDATE "GitApproval" SET "scope" = "scope" - 'objectTransfer'
+      WHERE "id" = ${identity.approval.id}::uuid`;
+    expect(await approvals.listPrivateGitApprovals(identity.authSession)).toEqual([]);
+    await expect(grants.authorizeOwnerGitOperation(identity.authorization, identity.input, identity.authSession, identity.approval.id))
+      .rejects.toMatchObject({ status: 409 });
+    const row = await approvalRow(identity.approval.id);
+    expect(row.scope).not.toHaveProperty("objectTransfer");
+    expect(row.consumedAt).toBeNull();
+    expect(await database.$queryRaw`SELECT "id" FROM "GitOperation"`).toEqual([]);
+  });
+  it("invalidates an already consumed push approval when its transfer policy is removed", async () => {
+    const identity = await approved(push());
+    const grant = await grants.authorizeOwnerGitOperation(identity.authorization, identity.input, identity.authSession, identity.approval.id);
+    const metadata = await grants.validateGitAuthorization(grant, identity.authorization, identity.input);
+    await database.$executeRaw`UPDATE "GitApproval" SET "scope" = "scope" - 'objectTransfer'
+      WHERE "id" = ${identity.approval.id}::uuid`;
+    const execute = vi.fn();
+    await expect(coordinator.executeAuthorizedGitOperation(grant, identity.authorization, identity.input, { kind: "github", execute }))
+      .rejects.toMatchObject({ status: 403 });
+    expect(execute).not.toHaveBeenCalled();
+    expect(await operations.readGitOperation(metadata.operationId)).toBeNull();
+    expect((await approvalRow(identity.approval.id)).consumedOperationId).toBe(metadata.operationId);
+  });
   it("binds update-file approval to exact content without persisting raw contents", async () => {
     const content = "synthetic private source Ω\n";
     const identity = await approved({ operation: "upsert-file", branch: "main", expectedRemoteHead: HEAD, expectedBlob: TARGET,
@@ -377,8 +429,8 @@ describe.skipIf(!testUrl)("Git approvals and coordination on isolated PostgreSQL
     expect(await approvals.validateConsumedPrivateGitApproval(identity.authorization, identity.scope, identity.approval.id, operationId, "backend")).toBe(false);
     expect(await approvals.validateConsumedPrivateGitApproval(identity.authorization, identity.scope, identity.approval.id, randomUUID(), "frontend")).toBe(false);
   });
-  it("allows one consumption across independent application instances", async () => {
-    const identity = await approved();
+  it.each(["stage", "push"] as const)("allows one %s approval consumption across independent application instances", async (operation) => {
+    const identity = await approved(operation === "push" ? push() : stage());
     const otherSession = await secondAuth.resolveAuthSession(request(identity.cookie), false);
     const other = await secondExecution.createExecutionAuthorization(otherSession!, PROJECT_A);
     const results = await Promise.all(Array.from({ length: 10 }, (_, index) => index % 2
@@ -543,6 +595,80 @@ describe.skipIf(!testUrl)("Git approvals and coordination on isolated PostgreSQL
     const [row] = await database.$queryRaw<Array<{ count: number }>>`SELECT count(*)::integer AS "count" FROM "GitOperation"`;
     expect(row.count).toBe(0);
   });
+  it.each(["revoked", "expired", "rotated", "sandbox", "repository", "branch", "deleted-project"] as const)(
+    "denies approved object transfer before transport when authorization becomes %s", async (state) => {
+      const identity = await approved(push());
+      const grant = await grants.authorizeOwnerGitOperation(identity.authorization, identity.input, identity.authSession, identity.approval.id);
+      if (state === "revoked") await sessions.revokeSession(identity.session.id);
+      if (state === "expired") await database.authSession.update({ where: { id: identity.session.id }, data: {
+        authenticatedAt: new Date(Date.now() - 120_000), createdAt: new Date(Date.now() - 120_000), expiresAt: new Date(Date.now() - 60_000) } });
+      if (state === "rotated") await owners.rotateOwnerAccessCode("synthetic object-transfer replacement 1234");
+      if (state === "sandbox") await database.workspace.updateMany({ where: { projectId: PROJECT_A }, data: { providerWorkspaceId: SANDBOX_B } });
+      if (state === "repository") await database.project.update({ where: { id: PROJECT_A }, data: { repository: `https://github.com/${REPOSITORY_B}` } });
+      if (state === "branch") await database.workspace.updateMany({ where: { projectId: PROJECT_A }, data: { branch: "different" } });
+      if (state === "deleted-project") await database.project.delete({ where: { id: PROJECT_A } });
+      const execute = vi.fn();
+      await expect(coordinator.executeAuthorizedGitOperation(grant, identity.authorization, identity.input, { kind: "github", execute }))
+        .rejects.toMatchObject({ name: "ExecutionAuthorizationError" });
+      expect(execute).not.toHaveBeenCalled();
+      expect(await database.$queryRaw`SELECT "id" FROM "GitOperation"`).toEqual([]);
+    });
+  it.each(["targetCommit", "expectedRemoteHead", "branch"] as const)(
+    "does not substitute the approved push %s before object-transfer dispatch", async field => {
+      const identity = await approved(push());
+      const grant = await grants.authorizeOwnerGitOperation(identity.authorization, identity.input, identity.authSession, identity.approval.id);
+      const execute = vi.fn();
+      const input = { ...identity.input, [field]: field === "branch" ? "different" : "a".repeat(40) } as GitOperationRequest;
+      await expect(coordinator.executeAuthorizedGitOperation(grant, identity.authorization, input, { kind: "github", execute }))
+        .rejects.toMatchObject({ name: "ExecutionAuthorizationError" });
+      expect(execute).not.toHaveBeenCalled();
+      expect(await database.$queryRaw`SELECT "id" FROM "GitOperation"`).toEqual([]);
+    });
+  it("fails closed before object transfer if PostgreSQL mutation coordination is unavailable", async () => {
+    const identity = await approved(push());
+    const grant = await grants.authorizeOwnerGitOperation(identity.authorization, identity.input, identity.authSession, identity.approval.id);
+    const execute = vi.fn();
+    await database.$executeRawUnsafe('ALTER TABLE "GitOperation" RENAME TO "GitOperationUnavailable"');
+    try {
+      const error = await coordinator.executeAuthorizedGitOperation(grant, identity.authorization, identity.input, { kind: "github", execute })
+        .catch((value: unknown) => value);
+      expect(error).toMatchObject({ status: 503, message: "Git coordination is unavailable." });
+      expect(String(error)).not.toContain(identity.token);
+      expect(String(error)).not.toContain(process.env.DATABASE_URL);
+      expect(execute).not.toHaveBeenCalled();
+    } finally { await database.$executeRawUnsafe('ALTER TABLE "GitOperationUnavailable" RENAME TO "GitOperation"'); }
+    expect(await database.$queryRaw`SELECT "id" FROM "GitOperation"`).toEqual([]);
+  });
+  it.each(["revoked", "expired", "rotated"] as const)(
+    "retains object-transfer uncertainty and suppresses subsequent steps when the initiating session is %s", async state => {
+      // This adapter models the boundary between an accepted object upload and
+      // the next remote mutation. It verifies durable authorization/coordination,
+      // not live Daytona transport or GitHub object reproduction.
+      const identity = await approved(push());
+      const grant = await grants.authorizeOwnerGitOperation(identity.authorization, identity.input, identity.authSession, identity.approval.id);
+      const metadata = await grants.validateGitAuthorization(grant, identity.authorization, identity.input);
+      const nextMutation = vi.fn();
+      const execute = vi.fn<import("@/lib/workspace/private-git-operations").GitExecutionAdapter["execute"]>(async (_request, scope, revalidate) => {
+        expect(scope).toEqual(identity.scope);
+        await revalidate();
+        if (state === "revoked") await sessions.revokeSession(identity.session.id);
+        if (state === "expired") await database.authSession.update({ where: { id: identity.session.id }, data: {
+          authenticatedAt: new Date(Date.now() - 120_000), createdAt: new Date(Date.now() - 120_000), expiresAt: new Date(Date.now() - 60_000) } });
+        if (state === "rotated") await owners.rotateOwnerAccessCode("synthetic transfer-time replacement 1234");
+        await revalidate();
+        nextMutation();
+        return { status: "SUCCEEDED", data: { source: "synthetic-private-transfer-output" }, cancellationConfirmed: true, cleanupConfirmed: true };
+      });
+      const error = await coordinator.executeAuthorizedGitOperation(grant, identity.authorization, identity.input, { kind: "github", execute })
+        .catch((value: unknown) => value);
+      expect(error).toMatchObject({ name: "ExecutionAuthorizationError" });
+      expect(error).not.toHaveProperty("data");
+      expect(String(error)).not.toContain("synthetic-private-transfer-output");
+      expect(nextMutation).not.toHaveBeenCalled();
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(await operations.readGitOperation(metadata.operationId)).toMatchObject({ status: "UNKNOWN", cancellationConfirmed: false, cleanupConfirmed: false });
+      await expect(secondOperations.reserveGitOperation(reservation())).rejects.toMatchObject({ status: 409 });
+    });
   it("withholds provider output and retains UNKNOWN when owner revocation is detected after dispatch", async () => {
     const identity = await approved();
     const grant = await grants.authorizeOwnerGitOperation(identity.authorization, identity.input, identity.authSession, identity.approval.id);
@@ -583,8 +709,8 @@ describe.skipIf(!testUrl)("Git approvals and coordination on isolated PostgreSQL
     expect(error).toMatchObject({ status: 503 }); expect(String(error)).not.toContain("synthetic-token");
     expect(await operations.readGitOperation(metadata.operationId)).toMatchObject({ status: "UNKNOWN" });
   });
-  it("respects cancellation during adapter execution without reporting success or releasing the mutation slot", async () => {
-    const identity = await approved();
+  it.each(["stage", "push"] as const)("respects cancellation during %s execution without reporting success or releasing the mutation slot", async operation => {
+    const identity = await approved(operation === "push" ? push() : stage());
     const grant = await grants.authorizeOwnerGitOperation(identity.authorization, identity.input, identity.authSession, identity.approval.id);
     const metadata = await grants.validateGitAuthorization(grant, identity.authorization, identity.input);
     const execute = vi.fn<import("@/lib/workspace/private-git-operations").GitExecutionAdapter["execute"]>(async (_request, _scope, _revalidate, signal) => {
@@ -592,16 +718,18 @@ describe.skipIf(!testUrl)("Git approvals and coordination on isolated PostgreSQL
       expect(signal.aborted).toBe(true);
       return { status: "SUCCEEDED", data: { completionUnverified: true }, cancellationConfirmed: false, cleanupConfirmed: false };
     });
-    await expect(coordinator.executeAuthorizedGitOperation(grant, identity.authorization, identity.input, { kind: "daytona", execute })).rejects.toMatchObject({ name: "ExecutionAuthorizationError" });
+    await expect(coordinator.executeAuthorizedGitOperation(grant, identity.authorization, identity.input,
+      { kind: operation === "push" ? "github" : "daytona", execute })).rejects.toMatchObject({ name: "ExecutionAuthorizationError" });
     expect(await operations.readGitOperation(metadata.operationId)).toMatchObject({ status: "UNKNOWN" });
   });
-  it("rejects a reviewer before any coordinator adapter dispatch", async () => {
-    const identity = await approved();
+  it.each(["stage", "push"] as const)("rejects a reviewer before any %s adapter dispatch", async operation => {
+    const identity = await approved(operation === "push" ? push() : stage());
     const execute = vi.fn();
     const run = async () => {
       const grant = await grants.authorizeAgentGitOperation(identity.authorization, identity.input, { actorId: "security", actorRole: "owner",
         projectId: PROJECT_A, authorization: identity.authorization, workspaceRoot: "/unused", requestId: "synthetic-reviewer", approvalId: identity.approval.id });
-      return coordinator.executeAuthorizedGitOperation(grant, identity.authorization, identity.input, { kind: "daytona", execute });
+      return coordinator.executeAuthorizedGitOperation(grant, identity.authorization, identity.input,
+        { kind: operation === "push" ? "github" : "daytona", execute });
     };
     await expect(run()).rejects.toMatchObject({ status: 403 }); expect(execute).not.toHaveBeenCalled();
     expect((await approvalRow(identity.approval.id)).consumedAt).toBeNull();
@@ -703,8 +831,10 @@ describe.skipIf(!testUrl)("Git approvals and coordination on isolated PostgreSQL
     const gitGate = await import("@/lib/workspace/private-git-availability");
     const commandGate = await import("@/lib/workspace/private-cloud-command-availability");
     const writeGate = await import("@/lib/workspace/private-cloud-write-availability");
+    const lifecycleGate = await import("@/lib/workspace/private-workspace-lifecycle-availability");
     expect(() => gitGate.assertPrivateGitAvailable()).toThrow();
     expect(() => commandGate.assertPrivateCloudCommandAvailable()).toThrow();
     expect(() => writeGate.assertPrivateCloudWriteTransportAvailable()).toThrow();
+    expect(() => lifecycleGate.assertWorkspaceLifecycleAvailable()).toThrow();
   });
 });

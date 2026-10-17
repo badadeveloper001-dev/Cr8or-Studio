@@ -78,6 +78,7 @@ const scopeSchema = z.object({
     strategy: z.literal("approved-head-commit") }).strict().optional(),
   commitNaming: z.object({ version: z.literal(1), projectCode: z.string().regex(/^[A-Z][A-Z0-9]{1,15}$/),
     strategy: z.literal("registered-history-next") }).strict().optional(),
+  objectTransfer: z.object({ version: z.literal(1), strategy: z.literal("linear-sha1-git-database") }).strict().optional(),
 }).strict();
 export type GitOperationScope = Readonly<z.infer<typeof scopeSchema>>;
 export function validateGitOperationScope(value: unknown): GitOperationScope {
@@ -108,6 +109,15 @@ export function validateGitOperationScope(value: unknown): GitOperationScope {
     }
     Object.freeze(result.data.commitNaming);
   } else if (result.data.commitNaming !== undefined) {
+    throw new ExecutionAuthorizationError(403, "Git approval scope is invalid.");
+  }
+  if (result.data.operationKey === "push") {
+    if (!result.data.objectTransfer || !result.data.expectedRemoteHead || !result.data.targetCommit ||
+        result.data.targetCommit === result.data.expectedRemoteHead) {
+      throw new ExecutionAuthorizationError(403, "Git approval scope is invalid.");
+    }
+    Object.freeze(result.data.objectTransfer);
+  } else if (result.data.objectTransfer !== undefined) {
     throw new ExecutionAuthorizationError(403, "Git approval scope is invalid.");
   }
   Object.freeze(result.data.paths);
@@ -149,6 +159,7 @@ export function buildGitOperationScope(context: Pick<ExecutionAuthorizationConte
     expectedBase: get("expectedBase"), category: get("category"),
     ...(pullRequestNaming ? { pullRequestNaming } : {}),
     ...(commitNaming ? { commitNaming } : {}),
+    ...(request.operation === "push" ? { objectTransfer: { version: 1, strategy: "linear-sha1-git-database" } } : {}),
     contentDigest: "content" in request ? createHash("sha256").update(request.content, "utf8").digest("hex") : null,
     payloadDigest: createHash("sha256").update(stable(canonicalRequest)).digest("hex") });
 }

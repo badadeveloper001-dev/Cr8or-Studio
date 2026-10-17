@@ -9,7 +9,7 @@ import { authorizeOwnerGitOperation, validateGitRepositoryContext } from "@/lib/
 import { isGitMutation, isGithubOperation, parseGitOperation } from "@/lib/security/git-operation-catalogue";
 import { PrivateFileWriteBodyError, readPrivateFileWriteBody } from "@/lib/security/private-file-write-body";
 import { assertPrivateGitAvailable } from "@/lib/workspace/private-git-availability";
-import { createDaytonaGitAdapter, createGithubGitAdapter, executeAuthorizedGitOperation } from "@/lib/workspace/private-git-operations";
+import { createDaytonaGitAdapter, createGithubGitAdapter, createGithubObjectTransferAdapter, executeAuthorizedGitOperation } from "@/lib/workspace/private-git-operations";
 import type { NextRequest } from "next/server";
 
 const privateGitEnvelope = z.object({
@@ -42,12 +42,17 @@ export async function handlePrivateGitOperation(request: NextRequest, requestId:
     assertPrivateGitAvailable();
     const grant = await authorizeOwnerGitOperation(context, operation, auth.session, body.approvalId);
     let adapter;
-    if (transport === "github") adapter = createGithubGitAdapter(() => process.env.GITHUB_TOKEN || process.env.GH_TOKEN);
+    if (transport === "github" && operation.operation !== "push") adapter = createGithubGitAdapter(() => process.env.GITHUB_TOKEN || process.env.GH_TOKEN);
     else {
       const apiKey = process.env.DAYTONA_API_KEY;
       if (!apiKey) throw new ExecutionAuthorizationError(503);
       const { DaytonaProvider } = await import("@/lib/workspace/providers/daytona");
-      adapter = createDaytonaGitAdapter(new DaytonaProvider({ apiKey, apiUrl: process.env.DAYTONA_API_URL }));
+      const provider = new DaytonaProvider({ apiKey, apiUrl: process.env.DAYTONA_API_URL });
+      adapter = operation.operation === "push"
+        // A future reviewed release needs a dedicated repository-scoped token;
+        // never reuse the legacy broad-token fallback for object transfer.
+        ? createGithubObjectTransferAdapter(provider, () => process.env.CR8OR_PRIVATE_GITHUB_TOKEN)
+        : createDaytonaGitAdapter(provider);
     }
     const result = await executeAuthorizedGitOperation(grant, context, operation, adapter);
     return Response.json({ ok: result.status === "SUCCEEDED", ...result }, { status: result.status === "SUCCEEDED" ? 200 : 503 });

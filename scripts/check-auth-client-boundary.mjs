@@ -13,6 +13,7 @@ const sourceFiles = [
   "src/lib/security/git-approvals.ts",
   "src/lib/security/git-authorization.ts",
   "src/lib/security/git-operation-catalogue.ts",
+  "src/lib/security/git-object-transfer.ts",
   "src/lib/security/git-project-naming.ts",
   "src/lib/security/git-operation-store.ts",
   "src/lib/security/workspace-lifecycle-catalogue.ts",
@@ -20,6 +21,8 @@ const sourceFiles = [
   "src/lib/workspace/private-workspace-lifecycle.ts",
   "src/lib/workspace/private-workspace-lifecycle-availability.ts",
   "src/lib/workspace/private-lifecycle-provider.ts",
+  "src/lib/workspace/private-github-api.ts",
+  "src/lib/workspace/private-github-object-transfer.ts",
   "src/lib/security/command-catalogue.ts",
   "src/lib/security/command-operation-store.ts",
   "src/lib/security/policy.ts",
@@ -42,6 +45,8 @@ const sourceFiles = [
   "src/lib/db/prisma.ts",
 ];
 const probes = [
+  { module: "git-object-transfer", exportedFunction: "validateGitObjectTransfer" },
+  { directory: "workspace", module: "private-github-object-transfer", exportedFunction: "executePrivateGithubObjectTransfer" },
   { directory: "workspace", module: "private-workspace-lifecycle", exportedFunction: "prepareWorkspaceLifecycle" },
   { directory: "workspace", module: "private-lifecycle-provider", exportedFunction: "createPrivateLifecycleProvider" },
   { module: "workspace-lifecycle-catalogue", exportedFunction: "parseWorkspaceLifecycleRequest" },

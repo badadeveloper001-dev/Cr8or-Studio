@@ -9,7 +9,7 @@ import {
 } from "@/lib/security/git-operation-catalogue";
 import { shellQuote } from "@/lib/workspace/cloud-path";
 import { formatGitPullTitle, resolveGitProjectCode } from "@/lib/security/git-project-naming";
-import { PRIVATE_GIT_LIMITS, PRIVATE_GIT_PROGRAM } from "@/lib/workspace/private-git-program";
+import { PRIVATE_GIT_LIMITS, PRIVATE_GIT_OBJECT_LIMITS, PRIVATE_GIT_PROGRAM } from "@/lib/workspace/private-git-program";
 import type { PrivateCloudSessionProcess } from "@/lib/workspace/private-cloud-write-session";
 
 export const PRIVATE_GIT_SESSION_LIMITS = Object.freeze({
@@ -32,9 +32,9 @@ export type PrivateGitSessionResult = {
 function unavailable(): ExecutionAuthorizationError {
   return new ExecutionAuthorizationError(503, "The private Git operation could not be verified.");
 }
-function transcript(logs: { stdout?: string; stderr?: string; output?: string }): { ready: boolean; result?: Terminal } {
+function transcript(logs: { stdout?: string; stderr?: string; output?: string }, maximum = PRIVATE_GIT_SESSION_LIMITS.outputBytes): { ready: boolean; result?: Terminal } {
   for (const value of [logs.stdout, logs.stderr, logs.output]) {
-    if (value !== undefined && (typeof value !== "string" || Buffer.byteLength(value, "utf8") > PRIVATE_GIT_SESSION_LIMITS.outputBytes)) throw unavailable();
+    if (value !== undefined && (typeof value !== "string" || Buffer.byteLength(value, "utf8") > maximum)) throw unavailable();
   }
   const output = logs.stdout ?? "";
   if (logs.stderr || (logs.output && logs.output !== output)) throw unavailable();
@@ -80,6 +80,28 @@ function resultData(data: unknown, scope: GitOperationScope): unknown {
   return parsed.data;
 }
 
+function objectResultData(data: unknown, scope: GitOperationScope): unknown {
+  const limits = PRIVATE_GIT_OBJECT_LIMITS;
+  const sha = z.string().regex(/^[a-f0-9]{40}$/);
+  const parsed = z.object({
+    version: z.literal(1), repositoryKey: z.literal(scope.repositoryKey), branch: z.literal(scope.branch),
+    head: z.literal(scope.targetCommit), base: z.literal(scope.expectedRemoteHead),
+    objects: z.array(z.object({ oid: sha, type: z.enum(["commit", "tree", "blob"]),
+      contentBase64: z.string().max(4 * Math.ceil(limits.objectBytes / 3)).regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/),
+    }).strict()).min(1).max(limits.objects),
+  }).strict().safeParse(data);
+  if (!parsed.success) throw unavailable();
+  let total = 0;
+  const seen = new Set<string>();
+  for (const object of parsed.data.objects) {
+    const raw = Buffer.from(object.contentBase64, "base64");
+    total += raw.length;
+    if (seen.has(object.oid) || raw.length > limits.objectBytes || total > limits.totalBytes || raw.toString("base64") !== object.contentBase64) throw unavailable();
+    seen.add(object.oid);
+  }
+  return parsed.data;
+}
+
 async function settle<T>(work: () => Promise<T>, ms: number): Promise<{ value: T } | undefined> {
   if (ms <= 0) return;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -99,17 +121,38 @@ export async function privateGitSession(
   process: PrivateCloudSessionProcess, proposedRequest: GitOperationRequest, proposedScope: GitOperationScope,
   revalidate: () => Promise<void>, signal: AbortSignal,
 ): Promise<PrivateGitSessionResult> {
+  return runPrivateGitSession(process, proposedRequest, proposedScope, revalidate, signal, false);
+}
+
+/** Bounded read-only export for the already approved push. Raw graph data stays
+ * server-side and requires independent object/closure verification before any
+ * GitHub mutation. It is not an agent-facing Git operation or a new capability. */
+export async function privateGitObjectSession(
+  process: PrivateCloudSessionProcess, proposedRequest: GitOperationRequest, proposedScope: GitOperationScope,
+  revalidate: () => Promise<void>, signal: AbortSignal,
+): Promise<PrivateGitSessionResult> {
+  return runPrivateGitSession(process, proposedRequest, proposedScope, revalidate, signal, true);
+}
+
+async function runPrivateGitSession(
+  process: PrivateCloudSessionProcess, proposedRequest: GitOperationRequest, proposedScope: GitOperationScope,
+  revalidate: () => Promise<void>, signal: AbortSignal, objectExport: boolean,
+): Promise<PrivateGitSessionResult> {
   const request = parseGitOperation(proposedRequest);
   const scope = validateGitOperationScope(proposedScope);
   const derived = buildGitOperationScope({ projectId: scope.projectId, workspace: {
     id: scope.workspaceRecordId, runtimeType: "cloud", provider: "daytona", providerWorkspaceId: scope.providerWorkspaceId,
     repositoryUrl: canonicalGitRepository(`https://github.com/${scope.repositoryKey}`).url, branch: scope.branch,
   } }, request);
-  if (!LOCAL.has(request.operation) || gitScopeDigest(derived) !== gitScopeDigest(scope) || typeof revalidate !== "function") {
+  if ((objectExport ? request.operation !== "push" : !LOCAL.has(request.operation)) || gitScopeDigest(derived) !== gitScopeDigest(scope) || typeof revalidate !== "function") {
     throw new ExecutionAuthorizationError(403, "Git operation is outside the approved scope.");
   }
-  const metadata: Record<string, unknown> = { operation: request.operation, branch: scope.branch,
+  const metadata: Record<string, unknown> = { operation: objectExport ? "export-objects" : request.operation, branch: scope.branch,
     expectedRepository: canonicalGitRepository(`https://github.com/${scope.repositoryKey}`).url };
+  if (objectExport && request.operation === "push") {
+    metadata.targetCommit = request.targetCommit;
+    metadata.expectedRemoteHead = request.expectedRemoteHead;
+  }
   if ("paths" in request) metadata.paths = request.paths;
   if (request.operation === "stage" || request.operation === "unstage" || request.operation === "commit") {
     metadata.expectedHead = request.expectedHead;
@@ -122,6 +165,7 @@ export async function privateGitSession(
   }
   const frame = JSON.stringify(metadata) + "\n";
   const limits = PRIVATE_GIT_SESSION_LIMITS;
+  const maximumOutput = objectExport ? PRIVATE_GIT_OBJECT_LIMITS.outputBytes : limits.outputBytes;
   if (Buffer.byteLength(frame, "utf8") > limits.requestBytes) throw new ExecutionAuthorizationError(403, "Git request exceeds the supported limit.");
   const deadline = performance.now() + limits.durationMs;
   const sessionId = `cr8or-git-${randomUUID()}`;
@@ -163,7 +207,7 @@ export async function privateGitSession(
     const current = logs.stdout ?? "";
     if (!current.startsWith(previous)) throw unavailable();
     previous = current;
-    return transcript(logs);
+    return transcript(logs, maximumOutput);
   };
   const wait = () => bounded(() => new Promise<void>((resolve) => setTimeout(resolve, limits.pollMs)));
   try {
@@ -179,7 +223,7 @@ export async function privateGitSession(
     const command = await bounded(() => process.executeSessionCommand(sessionId, {
       command: `exec python3 -I -S -u -c ${shellQuote(PRIVATE_GIT_PROGRAM)}`, runAsync: true, suppressInputEcho: true,
     }, limits.callMs / 1000));
-    transcript(command);
+    transcript(command, maximumOutput);
     if (typeof command.cmdId !== "string" || !/^[^\x00-\x20\x7f]{1,256}$/.test(command.cmdId)) throw unavailable();
     commandId = command.cmdId;
     await validate();
@@ -224,7 +268,7 @@ export async function privateGitSession(
       const confirmationDeadline = Math.min(cleanupDeadline, performance.now() + 2000);
       while (performance.now() < confirmationDeadline) {
         const confirmation = await settle(async () => {
-          const output = transcript(await process.getSessionCommandLogs(sessionId, commandId!));
+          const output = transcript(await process.getSessionCommandLogs(sessionId, commandId!), maximumOutput);
           const state = await process.getSessionCommand(sessionId, commandId!);
           return output.result && (!output.result.ok || startSent) && state.exitCode === (output.result.ok ? 0 : 1) ? output.result : undefined;
         }, confirmationDeadline - performance.now());
@@ -248,6 +292,6 @@ export async function privateGitSession(
   // receive the operation's private output, even if external work completed.
   const release = await settle(async () => { await revalidate(); if (signal.aborted) throw new ExecutionAuthorizationError(401); return true; }, limits.callMs);
   if (!release) return { status: "UNKNOWN", ...base };
-  try { return { status: "SUCCEEDED", data: resultData(terminal.data, scope), ...base }; }
+  try { return { status: "SUCCEEDED", data: objectExport ? objectResultData(terminal.data, scope) : resultData(terminal.data, scope), ...base }; }
   catch { return { status: "UNKNOWN", ...base }; }
 }

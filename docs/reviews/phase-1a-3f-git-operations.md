@@ -5,6 +5,10 @@ The subsequent [pull-request correction](phase-1a-3f-pr-correction.md) and
 the current naming, approval and draft-verification safeguards. The
 implementation and validation below describe CR8OR-011.
 
+[Phase 1A-3H](phase-1a-3h-git-object-transfer.md) adds bounded local-object
+export and exact-SHA GitHub transfer. All private Git release restrictions remain
+active pending separately authorized provider verification.
+
 Implementation starts from PR #7 commit
 `4d6ab65982c61a9fe05c3aa8695664e5bbb8b586` and is stacked on
 `cr8or-009-command-execution-safeguards`.

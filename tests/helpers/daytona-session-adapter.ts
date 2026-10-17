@@ -15,6 +15,7 @@ export type ControlledSessionCommand = {
 };
 
 type AdapterOptions = {
+  maximumOutputBytes?: number;
   beforeInput?: (input: string, command: ControlledSessionCommand) => void | Promise<void>;
   onLogs?: (logs: ControlledSessionLogs, command: ControlledSessionCommand) => void | Promise<void>;
   transformLogs?: (logs: ControlledSessionLogs, command: ControlledSessionCommand) => ControlledSessionLogs;
@@ -26,6 +27,8 @@ type AdapterOptions = {
  * session's shell, terminal, proxy, or input-delivery semantics.
  */
 export function createControlledDaytonaSessionAdapter(root: string, options: AdapterOptions = {}) {
+  const maximumOutputBytes = options.maximumOutputBytes ?? 64 * 1024;
+  if (!Number.isSafeInteger(maximumOutputBytes) || maximumOutputBytes < 1 || maximumOutputBytes > 2 * 1024 * 1024) throw new Error("Invalid test output bound.");
   const sessions = new Set<string>();
   const activeCommands = new Map<string, ControlledSessionCommand>();
   const exits = new Map<string, Promise<void>>();
@@ -98,7 +101,7 @@ export function createControlledDaytonaSessionAdapter(root: string, options: Ada
       activeCommands.set(commandId, current);
       const collect = (channel: "stdout" | "stderr", chunk: Buffer) => {
         // This is a test-infrastructure guard, independent of the application guard.
-        if (Buffer.byteLength(current[channel], "utf8") + chunk.length > 64 * 1024) {
+        if (Buffer.byteLength(current[channel], "utf8") + chunk.length > maximumOutputBytes) {
           signal(current, "SIGTERM");
           return;
         }
