@@ -7,6 +7,7 @@ import { authorizeRoute } from "@/lib/security/authorization";
 import { revalidatePrivateOwnerSession } from "@/lib/security/auth";
 import { getPrivateAuthMode } from "@/lib/security/private-auth-mode";
 import { authError } from "@/lib/security/private-auth-http";
+import { rejectPrivateLegacyWorkspaceCreation } from "@/lib/security/private-lifecycle-http";
 import { evaluatePolicyGuard } from "@/lib/security/policy";
 import { errorResponse, internalErrorResponse } from "@/lib/http/api-response";
 import { createDaytonaProvider } from "@/lib/workspace/providers/daytona";
@@ -128,6 +129,9 @@ export async function openCloudProject(request: NextRequest, value: string) {
 }
 
 export async function createCloudProject(request: NextRequest, raw: unknown) {
+  // Private mutations require the durable, scoped lifecycle workflow. Divert
+  // before legacy environment checks, generic approvals or provider operations.
+  if (getPrivateAuthMode() !== "inactive") return rejectPrivateLegacyWorkspaceCreation(request);
   const auth = await authorizeRoute(request, { route: "api/workspaces:create", minRole: "maintainer" });
   if (!auth.ok) return auth.response;
   const requestId = randomUUID();
@@ -175,11 +179,6 @@ export async function createCloudProject(request: NextRequest, raw: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error";
     return internalErrorResponse(`Cloud workspace error: ${message}`, requestId);
   }
-
-  // Provisioning an unregistered provider workspace needs a separate, atomic
-  // lifecycle. Do not resume the legacy provider-before-registration path in
-  // private mode; opening registered workspaces above preserves their IDs.
-  if (getPrivateAuthMode() === "required") return authError(503, "Workspace provisioning is unavailable.");
 
   const name = body.projectName || repo!.repo;
   const provider = createDaytonaProvider({ apiKey: process.env.DAYTONA_API_KEY, apiUrl: process.env.DAYTONA_API_URL });

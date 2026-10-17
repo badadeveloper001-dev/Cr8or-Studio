@@ -111,6 +111,19 @@ describe.skipIf(!testUrl)("Git approvals and coordination on isolated PostgreSQL
     return { id: randomUUID(), executionId: randomUUID(), actorId: "frontend", projectId: PROJECT_A,
       workspaceId: SANDBOX_A, repositoryKey: REPOSITORY_A, operationKey: "push", scopeDigest: "a".repeat(64), ...overrides };
   }
+  async function unresolvedLifecycle(status: "RESERVED" | "DISPATCHED" | "UNKNOWN", observedResource = false) {
+    await database.$executeRaw`
+      INSERT INTO "WorkspaceLifecycleOperation"
+        ("id", "sessionId", "credentialVersion", "projectId", "workspaceRecordId", "providerWorkspaceId",
+         "providerResourceId", "action", "scope", "scopeDigest", "idempotencyKey", "status", "attempts",
+         "dispatchedAt", "completedAt", "updatedAt")
+      VALUES (${randomUUID()}::uuid, 'synthetic-session', 1, ${PROJECT_A}, 'synthetic-lifecycle-workspace',
+        ${observedResource ? null : SANDBOX_A}, ${observedResource ? SANDBOX_A : null},
+        ${observedResource ? "create" : "start"}, '{}'::jsonb, ${"a".repeat(64)}, ${randomUUID()}::uuid,
+        ${status}::"WorkspaceLifecycleStatus", ${status === "RESERVED" ? 0 : 1},
+        ${status === "RESERVED" ? null : new Date()}, ${status === "UNKNOWN" ? new Date() : null}, NOW())
+    `;
+  }
   async function migrate(directory: string) {
     const sql = await readFile(path.join(process.cwd(), "prisma/migrations", directory, "migration.sql"), "utf8");
     const statements = sql.replace(/^\s*--.*$/gm, "").split(";").map((value) => value.trim()).filter((value) => value && !/^(BEGIN|COMMIT)$/i.test(value));
@@ -132,7 +145,8 @@ describe.skipIf(!testUrl)("Git approvals and coordination on isolated PostgreSQL
     delete globalThis.prismaGlobal; vi.resetModules();
     database = (await import("@/lib/db/prisma")).prisma;
     for (const name of ["0_init", "20250101000000_add_workspace_table", "20261015000000_authentication_foundation",
-      "20261016000000_command_operations", "20261016010000_command_approvals", "20261016020000_git_operations"]) await migrate(name);
+      "20261016000000_command_operations", "20261016010000_command_approvals", "20261016020000_git_operations",
+      "20261017000000_workspace_lifecycle"]) await migrate(name);
     auth = await import("@/lib/security/auth"); sessions = await import("@/lib/security/session-store");
     owners = await import("@/lib/security/owner-management"); execution = await import("@/lib/security/execution-context");
     catalogue = await import("@/lib/security/git-operation-catalogue"); approvals = await import("@/lib/security/git-approvals");
@@ -150,6 +164,7 @@ describe.skipIf(!testUrl)("Git approvals and coordination on isolated PostgreSQL
     secondCommands = await import("@/lib/security/command-operation-store"); globalThis.prismaGlobal = database;
   }, 30_000);
   beforeEach(async () => {
+    await database.$executeRaw`DELETE FROM "WorkspaceLifecycleOperation"`;
     await database.$executeRaw`DELETE FROM "GitApproval"`;
     await database.$executeRaw`DELETE FROM "GitOperation"`;
     await database.commandOperation.deleteMany(); await database.commandApproval.deleteMany();
@@ -619,6 +634,30 @@ describe.skipIf(!testUrl)("Git approvals and coordination on isolated PostgreSQL
     const results = await Promise.allSettled([operations.reserveGitOperation(reservation()), secondCommands.reserveCommandOperation({
       id: randomUUID(), executionId: randomUUID(), projectId: PROJECT_A, workspaceId: SANDBOX_A, actorId: "frontend", commandKey: "npm test" })]);
     expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+  });
+  it.each(["RESERVED", "DISPATCHED", "UNKNOWN"] as const)("blocks Git during %s lifecycle work on the registered sandbox", async (status) => {
+    await unresolvedLifecycle(status);
+    await expect(secondOperations.reserveGitOperation(reservation())).rejects.toMatchObject({ status: 409 });
+    expect(await database.$queryRaw`SELECT "id" FROM "GitOperation"`).toEqual([]);
+  });
+  it.each(["RESERVED", "DISPATCHED", "UNKNOWN"] as const)("blocks Git during %s lifecycle work on a newly observed resource", async (status) => {
+    await unresolvedLifecycle(status, true);
+    await expect(secondOperations.reserveGitOperation(reservation())).rejects.toMatchObject({ status: 409 });
+    expect(await database.$queryRaw`SELECT "id" FROM "GitOperation"`).toEqual([]);
+  });
+  it("allows an unrelated repository and workspace while a lifecycle outcome is unresolved", async () => {
+    await unresolvedLifecycle("UNKNOWN");
+    await expect(secondOperations.reserveGitOperation(reservation({ projectId: PROJECT_B, workspaceId: SANDBOX_B,
+      repositoryKey: REPOSITORY_B }))).resolves.toBeUndefined();
+  });
+  it("fails closed when the lifecycle coordination migration is unavailable", async () => {
+    await database.$executeRawUnsafe('ALTER TABLE "WorkspaceLifecycleOperation" RENAME TO "WorkspaceLifecycleUnavailable"');
+    try {
+      await expect(operations.reserveGitOperation(reservation())).rejects.toMatchObject({ status: 503, message: "Git coordination is unavailable." });
+      expect(await database.$queryRaw`SELECT "id" FROM "GitOperation"`).toEqual([]);
+    } finally {
+      await database.$executeRawUnsafe('ALTER TABLE "WorkspaceLifecycleUnavailable" RENAME TO "WorkspaceLifecycleOperation"');
+    }
   });
   it("dispatches once and rejects duplicate commit or push dispatch", async () => {
     const input = reservation(); await operations.reserveGitOperation(input);

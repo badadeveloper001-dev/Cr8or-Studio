@@ -15,6 +15,11 @@ const sourceFiles = [
   "src/lib/security/git-operation-catalogue.ts",
   "src/lib/security/git-project-naming.ts",
   "src/lib/security/git-operation-store.ts",
+  "src/lib/security/workspace-lifecycle-catalogue.ts",
+  "src/lib/security/workspace-lifecycle-store.ts",
+  "src/lib/workspace/private-workspace-lifecycle.ts",
+  "src/lib/workspace/private-workspace-lifecycle-availability.ts",
+  "src/lib/workspace/private-lifecycle-provider.ts",
   "src/lib/security/command-catalogue.ts",
   "src/lib/security/command-operation-store.ts",
   "src/lib/security/policy.ts",
@@ -37,6 +42,10 @@ const sourceFiles = [
   "src/lib/db/prisma.ts",
 ];
 const probes = [
+  { directory: "workspace", module: "private-workspace-lifecycle", exportedFunction: "prepareWorkspaceLifecycle" },
+  { directory: "workspace", module: "private-lifecycle-provider", exportedFunction: "createPrivateLifecycleProvider" },
+  { module: "workspace-lifecycle-catalogue", exportedFunction: "parseWorkspaceLifecycleRequest" },
+  { module: "workspace-lifecycle-store", exportedFunction: "readLifecycleOperation" },
   { module: "git-approvals", exportedFunction: "createPrivateGitApproval" },
   { module: "git-authorization", exportedFunction: "authorizeOwnerGitOperation" },
   { module: "git-operation-store", exportedFunction: "readGitOperation" },
@@ -76,7 +85,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   await writeFile(join(appRoot, "src/app/page.tsx"), `
 "use client";
 
-import { ${probe.exportedFunction} } from "@/lib/security/${probe.module}";
+import { ${probe.exportedFunction} } from "@/lib/${probe.directory ?? "security"}/${probe.module}";
 
 export default function BoundaryProbe() {
   // Keep the import live without invoking credential or database operations during a build.
@@ -116,7 +125,7 @@ export default function BoundaryProbe() {
   const boundaryDiagnostic = /needs ["']server-only["']\. That only works in a Server Component|["']server-only["'] cannot be imported from a Client Component module/;
   const importTrace = output.slice(output.indexOf("Import trace for requested module:"));
   if (!output.includes("Failed to compile.") || !boundaryDiagnostic.test(output) ||
-      !importTrace.includes(`src/lib/security/${probe.module}.ts`) ||
+      !importTrace.includes(`src/lib/${probe.directory ?? "security"}/${probe.module}.ts`) ||
       !importTrace.includes("src/app/page.tsx")) {
     throw new Error("Next.js did not reject the credential import at its server-only Client Component boundary.");
   }

@@ -90,6 +90,14 @@ export async function reserveGitOperation(input: ReserveGitOperationInput): Prom
       WHERE "workspaceId" = ${input.workspaceId} AND "status" IN ('RESERVED', 'RUNNING', 'UNKNOWN')
     `;
     if (commands.active > 0) conflict();
+    // Lifecycle transitions acquire the same workspace lock. Both an approved
+    // historical binding and a newly observed provider resource reserve it.
+    const [lifecycle] = await tx.$queryRaw<Array<{ active: number }>>`
+      SELECT count(*)::integer AS "active" FROM "WorkspaceLifecycleOperation"
+      WHERE ("providerWorkspaceId" = ${input.workspaceId} OR "providerResourceId" = ${input.workspaceId})
+        AND "status" IN ('RESERVED', 'DISPATCHED', 'UNKNOWN')
+    `;
+    if (lifecycle.active > 0) conflict();
     const [counts] = await tx.$queryRaw<Array<{ active: number; recent: number }>>`
       SELECT COUNT(*) FILTER (WHERE "status" IN ('RESERVED', 'RUNNING', 'UNKNOWN'))::integer AS "active",
         COUNT(*) FILTER (WHERE "createdAt" > ${new Date(clock.now.getTime() - GIT_WINDOW_MS)})::integer AS "recent"

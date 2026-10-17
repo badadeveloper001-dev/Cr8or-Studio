@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { access, readFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
@@ -129,7 +129,8 @@ async function startServer(databaseUrl, mode) {
 
 async function applyMigrations(database) {
   for (const directory of ["0_init", "20250101000000_add_workspace_table", "20261015000000_authentication_foundation",
-    "20261016000000_command_operations", "20261016010000_command_approvals", "20261016020000_git_operations"]) {
+    "20261016000000_command_operations", "20261016010000_command_approvals", "20261016020000_git_operations",
+    "20261017000000_workspace_lifecycle"]) {
     const sql = await readFile(join(repositoryRoot, "prisma/migrations", directory, "migration.sql"), "utf8");
     // These existing migrations are ordinary DDL with no semicolons in SQL literals.
     const statements = sql.replace(/^\s*--.*$/gm, "").split(";")
@@ -152,6 +153,8 @@ async function checkActiveServer(server, database) {
     }],
   ]) {
     expectResponse(await request("/api/projects", { headers }), 401, label);
+    expectResponse(await request("/api/workspaces/lifecycle", { method: "POST", headers,
+      body: "{}" }), 401, `lifecycle ${label}`);
   }
   expectResponse(await request("/api/auth/session/extra"), 401, "nested auth route");
   expectResponse(await request("/api/auth/unlock"), 405, "unsupported auth method");
@@ -242,6 +245,29 @@ async function checkActiveServer(server, database) {
   assert((await database.gitApproval.findUniqueOrThrow({ where: { id: gitApproval.id } })).consumedAt === null,
     "The Git release restriction consumed an approval.");
   console.log("PASS: Compiled Git handlers enforce registered scopes, durable approvals and immutable provider release restrictions.");
+  const lifecycleRequest = { action: "start", projectId: commandProject, idempotencyKey: randomUUID() };
+  expectResponse(await request("/api/workspaces/lifecycle", { method: "POST", headers: approvalHeaders,
+    body: JSON.stringify({ action: "prepare", request: { ...lifecycleRequest, providerWorkspaceId: "forged-provider" } }) }),
+  400, "forged lifecycle scope");
+  expectResponse(await request("/api/workspaces/lifecycle", { method: "POST",
+    headers: { ...approvalHeaders, origin: "https://untrusted.example.test" },
+    body: JSON.stringify({ action: "prepare", request: lifecycleRequest }) }), 400, "cross-origin lifecycle request");
+  const lifecyclePrepared = await request("/api/workspaces/lifecycle", { method: "POST", headers: approvalHeaders,
+    body: JSON.stringify({ action: "prepare", request: lifecycleRequest }) });
+  expectResponse(lifecyclePrepared, 201, "trusted lifecycle approval preparation");
+  const lifecycleApproval = (await lifecyclePrepared.json()).approval;
+  assert(lifecycleApproval.scope.projectId === commandProject && lifecycleApproval.scope.providerWorkspaceId === commandWorkspace &&
+    lifecycleApproval.scope.action === "start" && !JSON.stringify(lifecycleApproval).includes("sessionId"), "Lifecycle scope was not resolved safely.");
+  expectResponse(await request("/api/workspaces/lifecycle", { method: "POST", headers: approvalHeaders,
+    body: JSON.stringify({ action: "decide", approvalId: lifecycleApproval.approvalId, decision: "approve" }) }), 200, "lifecycle approval decision");
+  expectResponse(await request("/api/workspaces/lifecycle", { method: "POST", headers: approvalHeaders,
+    body: JSON.stringify({ action: "execute", request: lifecycleRequest, approvalId: lifecycleApproval.approvalId }) }), 503, "lifecycle release restriction");
+  expectResponse(await request("/api/workspaces", { method: "POST", headers: approvalHeaders,
+    body: JSON.stringify({ projectName: "Synthetic blocked creation" }) }), 503, "legacy private creation restriction");
+  assert(await database.workspaceLifecycleOperation.count() === 0 &&
+    (await database.workspaceLifecycleApproval.findUniqueOrThrow({ where: { id: lifecycleApproval.approvalId } })).consumedAt === null,
+  "Lifecycle release gate consumed approval or reserved provider work.");
+  console.log("PASS: Compiled lifecycle handlers bind structured approvals and block all provider dispatch before reservation.");
   await database.workspace.update({ where: { projectId: commandProject }, data: { providerWorkspaceId: "synthetic-remapped-sandbox" } });
   expectResponse(await request("/api/security/approvals", { method: "POST", headers: approvalHeaders,
     body: JSON.stringify(decisionRequest) }), 409, "remapped command approval scope");

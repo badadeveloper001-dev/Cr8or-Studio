@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 import { z } from "zod";
 import { createCloudProject, listCloudProjects } from "@/lib/workspace/cloud-service";
 import { errorResponse, internalErrorResponse } from "@/lib/http/api-response";
+import { getPrivateAuthMode } from "@/lib/security/private-auth-mode";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,6 +13,9 @@ async function GETHandler(request: NextRequest) {
   catch { return internalErrorResponse("Unable to load cloud projects. Check database configuration and migrations."); }
 }
 async function POSTHandler(request: NextRequest) {
+  // The existing create contract has no lifecycle idempotency key. Keep it
+  // fail-closed before reading a body or reaching legacy provider code.
+  if (getPrivateAuthMode() !== "inactive") return createCloudProject(request, undefined);
   try { return await createCloudProject(request, await request.json()); }
   catch (error) {
     if (error instanceof z.ZodError || error instanceof TypeError) return errorResponse({ status: 400, code: "INVALID_REQUEST", message: "Invalid workspace request or repository URL." });

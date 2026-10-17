@@ -81,6 +81,14 @@ export async function reserveCommandOperation(input: ReserveCommandOperationInpu
       WHERE "workspaceId" = ${input.workspaceId} AND "status" IN ('RESERVED', 'RUNNING', 'UNKNOWN')
     `;
     if (git.active > 0) conflict();
+    // Lifecycle transitions share this workspace lock. A lost create/start/stop
+    // acknowledgement must not permit commands on the unresolved resource.
+    const [lifecycle] = await tx.$queryRaw<Array<{ active: number }>>`
+      SELECT count(*)::integer AS "active" FROM "WorkspaceLifecycleOperation"
+      WHERE ("providerWorkspaceId" = ${input.workspaceId} OR "providerResourceId" = ${input.workspaceId})
+        AND "status" IN ('RESERVED', 'DISPATCHED', 'UNKNOWN')
+    `;
+    if (lifecycle.active > 0) conflict();
     const [clock] = await tx.$queryRaw<Array<{ now: Date }>>`
       SELECT (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3) AS "now"
     `;

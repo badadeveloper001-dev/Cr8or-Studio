@@ -252,3 +252,71 @@ model GitOperation {
   @@index([workspaceId, createdAt])
   @@index([completedAt])
 }
+
+
+enum WorkspaceLifecycleStatus {
+  RESERVED
+  DISPATCHED
+  SUCCEEDED
+  FAILED
+  CANCELLED
+  UNKNOWN
+}
+
+// Durable owner/session/generation-bound approval snapshots; no cascading
+// relations can erase the audit trail. SQL enforces one-use and ten-minute TTL.
+model WorkspaceLifecycleApproval {
+  id                  String                @id @db.Uuid
+  ownerId             String                @default("owner")
+  sessionId           String                @db.VarChar(128)
+  credentialVersion   Int
+  projectId           String                @db.VarChar(256)
+  workspaceRecordId   String                @db.VarChar(256)
+  providerWorkspaceId String?               @db.VarChar(256)
+  action              String                @db.VarChar(16)
+  scope               Json
+  scopeDigest         String                @db.Char(64)
+  status              CommandApprovalStatus @default(PENDING)
+  createdAt           DateTime              @default(now())
+  expiresAt           DateTime
+  decidedAt           DateTime?
+  revokedAt           DateTime?
+  consumedAt          DateTime?
+  consumedOperationId String?               @unique @db.Uuid
+
+  @@index([sessionId, createdAt])
+  @@index([expiresAt])
+}
+
+// No provider resource is registered merely because a reservation exists.
+// UNKNOWN retains its partial unique slots until exact-resource reconciliation.
+// Dispatch attempts are one-shot; timeout never authorizes an automatic retry.
+model WorkspaceLifecycleOperation {
+  id                  String                   @id @db.Uuid
+  ownerId             String                   @default("owner")
+  sessionId           String                   @db.VarChar(128)
+  credentialVersion   Int
+  projectId           String                   @db.VarChar(256)
+  workspaceRecordId   String                   @db.VarChar(256)
+  providerWorkspaceId String?                  @db.VarChar(256)
+  providerResourceId  String?                  @db.VarChar(256)
+  action              String                   @db.VarChar(16)
+  scope               Json
+  scopeDigest         String                   @db.Char(64)
+  idempotencyKey      String                   @db.Uuid
+  approvalId          String?                  @unique @db.Uuid
+  status              WorkspaceLifecycleStatus @default(RESERVED)
+  attempts            Int                      @default(0)
+  createdAt           DateTime                 @default(now())
+  dispatchedAt        DateTime?
+  completedAt         DateTime?
+  updatedAt           DateTime                 @updatedAt
+  reconciledAt        DateTime?
+  reconciliationAttempts Int                   @default(0)
+  lastReconciliationAt DateTime?
+
+  @@unique([sessionId, idempotencyKey])
+  @@index([projectId, createdAt])
+  @@index([providerWorkspaceId, createdAt])
+  @@index([createdAt])
+}
