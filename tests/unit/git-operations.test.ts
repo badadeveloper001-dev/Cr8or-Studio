@@ -1,19 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  validate: vi.fn(), reserve: vi.fn(), mark: vi.fn(), finish: vi.fn(), audit: vi.fn(), github: vi.fn(), session: vi.fn(),
+  validate: vi.fn(), reserve: vi.fn(), mark: vi.fn(), finish: vi.fn(), audit: vi.fn(), github: vi.fn(), session: vi.fn(), objectSession: vi.fn(),
 }));
 vi.mock("@/lib/security/git-authorization", () => ({ validateGitAuthorization: mocks.validate }));
 vi.mock("@/lib/security/git-operation-store", () => ({ reserveGitOperation: mocks.reserve, markGitDispatched: mocks.mark, finishGitOperation: mocks.finish }));
 vi.mock("@/lib/security/audit", () => ({ appendAuditEvent: mocks.audit }));
 vi.mock("@/lib/workspace/private-github-api", () => ({ executePrivateGithubOperation: mocks.github }));
-vi.mock("@/lib/workspace/private-git-session", () => ({ privateGitSession: mocks.session }));
+vi.mock("@/lib/workspace/private-git-session", () => ({ privateGitSession: mocks.session, privateGitObjectSession: mocks.objectSession }));
 
 import { ExecutionAuthorizationError, type ExecutionAuthorizationContext, type ExecutionWorkspace } from "@/lib/security/execution-context";
 import type { GitAuthorization } from "@/lib/security/git-authorization";
 import { buildGitOperationScope, parseGitOperation, type GitOperationRequest } from "@/lib/security/git-operation-catalogue";
 import {
-  createDaytonaGitAdapter, createGithubGitAdapter, executeAuthorizedGitOperation,
+  createDaytonaGitAdapter, createGithubGitAdapter, createGithubObjectTransferAdapter, executeAuthorizedGitOperation,
   type GitExecutionAdapter, type GitTransportResult,
 } from "@/lib/workspace/private-git-operations";
 import type { DaytonaProvider } from "@/lib/workspace/providers/daytona";
@@ -243,17 +243,17 @@ describe("trusted Git adapter factories", () => {
     expect(mocks.github).not.toHaveBeenCalled();
   });
 
-  it("preserves exact push and branch creation targets", async () => {
+  it("requires workspace object verification for push and preserves exact branch creation targets", async () => {
     mocks.github.mockResolvedValue({ status: "SUCCEEDED" });
     const github = createGithubGitAdapter(() => "synthetic_token");
-    await github.execute(push, scope(push), async () => undefined, context.signal);
-    expect(mocks.github).toHaveBeenLastCalledWith(expect.objectContaining({ operation: { kind: "advance-branch", branch: "main", expectedHead: head, targetCommit: otherHead } }));
+    await expect(github.execute(push, scope(push), async () => undefined, context.signal)).rejects.toMatchObject({ status: 503 });
+    expect(mocks.github).not.toHaveBeenCalled();
     const branch = parseGitOperation({ operation: "create-branch", branch: "main", expectedRemoteHead: head, targetCommit: head, targetBranch: "feature/new" });
     await github.execute(branch, scope(branch), async () => undefined, context.signal);
     expect(mocks.github).toHaveBeenLastCalledWith(expect.objectContaining({ operation: { kind: "create-branch", branch: "feature/new", fromBranch: "main", expectedHead: head } }));
     const mismatched = parseGitOperation({ ...branch, targetCommit: otherHead });
     await expect(github.execute(mismatched, scope(mismatched), async () => undefined, context.signal)).rejects.toMatchObject({ status: 409 });
-    expect(mocks.github).toHaveBeenCalledTimes(2);
+    expect(mocks.github).toHaveBeenCalledTimes(1);
   });
 
   it("retains exact PR targets and delegates only the approved category to trusted title generation", async () => {
@@ -302,8 +302,38 @@ describe("trusted Git adapter factories", () => {
 
   it("does not claim cancellation or cleanup for an ambiguous GitHub outcome", async () => {
     mocks.github.mockResolvedValue({ status: "UNKNOWN" });
-    expect(await createGithubGitAdapter(() => "synthetic_token").execute(push, scope(push), async () => undefined, context.signal))
+    const request = parseGitOperation({ operation: "create-branch", branch: "main", expectedRemoteHead: head, targetCommit: head, targetBranch: "feature/new" });
+    expect(await createGithubGitAdapter(() => "synthetic_token").execute(request, scope(request), async () => undefined, context.signal))
       .toEqual({ status: "UNKNOWN", data: undefined, cancellationConfirmed: false, cleanupConfirmed: false });
+  });
+
+  it.each(["FAILED", "UNKNOWN"] as const)("withholds GitHub credentials after object export is %s", async status => {
+    const process = {};
+    const provider = { getPrivateGitSessionProcess: vi.fn().mockResolvedValue(process) };
+    const credential = vi.fn(() => "synthetic_token");
+    mocks.objectSession.mockResolvedValue({ status, data: { privateObjects: "must-not-return" },
+      cancellationConfirmed: status !== "UNKNOWN", cleanupConfirmed: status !== "UNKNOWN" });
+    const result = await createGithubObjectTransferAdapter(provider as unknown as DaytonaProvider, credential)
+      .execute(push, scope(push), async () => undefined, context.signal);
+    expect(result.status).toBe(status); expect(result).not.toHaveProperty("data");
+    expect(provider.getPrivateGitSessionProcess).toHaveBeenCalledExactlyOnceWith("sandbox-a");
+    expect(mocks.objectSession).toHaveBeenCalledWith(process, push, scope(push), expect.any(Function), context.signal);
+    expect(credential).not.toHaveBeenCalled(); expect(mocks.github).not.toHaveBeenCalled();
+  });
+
+  it("rejects changed transfer scope before provider access or credential resolution", async () => {
+    const provider = { getPrivateGitSessionProcess: vi.fn() }, credential = vi.fn();
+    await expect(createGithubObjectTransferAdapter(provider as unknown as DaytonaProvider, credential)
+      .execute(push, { ...scope(push), targetCommit: "f".repeat(40) }, async () => undefined, context.signal))
+      .rejects.toMatchObject({ status: 403 });
+    expect(provider.getPrivateGitSessionProcess).not.toHaveBeenCalled(); expect(credential).not.toHaveBeenCalled();
+  });
+
+  it("rejects an aborted transfer before even an already validated provider lookup", async () => {
+    const provider = { getPrivateGitSessionProcess: vi.fn() }, credential = vi.fn(); controller.abort();
+    await expect(createGithubObjectTransferAdapter(provider as unknown as DaytonaProvider, credential)
+      .execute(push, scope(push), async () => undefined, context.signal)).rejects.toMatchObject({ status: 401 });
+    expect(provider.getPrivateGitSessionProcess).not.toHaveBeenCalled(); expect(credential).not.toHaveBeenCalled();
   });
 
   it("resolves only the exact authorized Daytona sandbox and revalidates before the fixed session protocol", async () => {

@@ -4,11 +4,13 @@ import { randomUUID } from "node:crypto";
 import { appendAuditEvent } from "@/lib/security/audit";
 import { ExecutionAuthorizationError, type ExecutionAuthorizationContext } from "@/lib/security/execution-context";
 import { validateGitAuthorization, type GitAuthorization } from "@/lib/security/git-authorization";
-import { buildGitOperationScope, canonicalGitRepository, gitScopeDigest, isGithubOperation, isGitMutation, parseGitOperation, type GitOperationRequest, type GitOperationScope } from "@/lib/security/git-operation-catalogue";
+import { buildGitOperationScope, canonicalGitRepository, gitScopeDigest, isGithubOperation, isGitMutation, parseGitOperation, validateGitOperationScope, type GitOperationRequest, type GitOperationScope } from "@/lib/security/git-operation-catalogue";
+import { validateGitObjectTransfer } from "@/lib/security/git-object-transfer";
 import { reserveGitOperation, markGitDispatched, finishGitOperation } from "@/lib/security/git-operation-store";
 import { formatGitPullTitle, resolveGitProjectCode } from "@/lib/security/git-project-naming";
 import { executePrivateGithubOperation, type PrivateGithubOperation } from "@/lib/workspace/private-github-api";
-import { privateGitSession } from "@/lib/workspace/private-git-session";
+import { privateGitObjectSession, privateGitSession } from "@/lib/workspace/private-git-session";
+import { executePrivateGithubObjectTransfer } from "@/lib/workspace/private-github-object-transfer";
 import type { DaytonaProvider } from "@/lib/workspace/providers/daytona";
 
 export type GitTransportResult = { status: "SUCCEEDED" | "FAILED" | "UNKNOWN"; data?: unknown; cancellationConfirmed: boolean; cleanupConfirmed: boolean };
@@ -114,6 +116,9 @@ export function createDaytonaGitAdapter(provider: DaytonaProvider): GitExecution
 export function createGithubGitAdapter(token: () => string | undefined, fetcher?: typeof fetch): GitExecutionAdapter {
   return { kind: "github", execute: async (request, scope, revalidate, signal) => {
     await revalidate();
+    // Push must prove the local objects in the registered sandbox; a remote-only
+    // adapter is never a fallback when that transfer cannot be verified.
+    if (request.operation === "push") throw unavailable();
     if (request.operation === "create-pr" || request.operation === "upsert-file") {
       // Reconstruct the approved inputs and naming policy before credentials.
       // The PR title is fixed by its approved head; file-update numbering is
@@ -136,7 +141,6 @@ export function createGithubGitAdapter(token: () => string | undefined, fetcher?
       case "list-contents": operation = { kind: "contents", branch: scope.branch, path: request.filePath }; break;
       case "read-file": operation = { kind: "read-file", branch: scope.branch, path: request.filePath }; break;
       case "pr-checks": operation = { kind: "pr-checks", branch: scope.branch, pullNumber: request.pullNumber }; break;
-      case "push": operation = { kind: "advance-branch", branch: scope.branch, expectedHead: request.expectedRemoteHead, targetCommit: request.targetCommit }; break;
       case "create-branch":
         if (request.targetCommit !== request.expectedRemoteHead) throw new ExecutionAuthorizationError(409);
         operation = { kind: "create-branch", branch: request.targetBranch, fromBranch: scope.branch, expectedHead: request.expectedRemoteHead }; break;
@@ -160,5 +164,42 @@ export function createGithubGitAdapter(token: () => string | undefined, fetcher?
     const result = await run(operation);
     return { status: result.status, data: result.data,
       cancellationConfirmed: result.status !== "UNKNOWN", cleanupConfirmed: result.status !== "UNKNOWN" };
+  } };
+}
+
+/** One approved push spans exact-sandbox export, independent object validation,
+ * GitHub object creation and the existing non-force branch advance. The caller
+ * keeps the same opaque grant and durable reservation throughout every step. */
+export function createGithubObjectTransferAdapter(provider: DaytonaProvider,
+  token: () => string | undefined, fetcher?: typeof fetch): GitExecutionAdapter {
+  return { kind: "github", execute: async (input, proposedScope, revalidate, signal) => {
+    await revalidate();
+    if (signal.aborted) throw new ExecutionAuthorizationError(401);
+    const request = parseGitOperation(input);
+    const scope = validateGitOperationScope(proposedScope);
+    if (request.operation !== "push") throw new ExecutionAuthorizationError(403);
+    const intended = buildGitOperationScope({ projectId: scope.projectId, workspace: {
+      id: scope.workspaceRecordId, runtimeType: "cloud", provider: "daytona",
+      providerWorkspaceId: scope.providerWorkspaceId, repositoryUrl: `https://github.com/${scope.repositoryKey}`,
+      branch: scope.branch,
+    } }, request);
+    if (gitScopeDigest(intended) !== gitScopeDigest(scope)) throw new ExecutionAuthorizationError(403);
+    const process = await provider.getPrivateGitSessionProcess(scope.providerWorkspaceId);
+    await revalidate();
+    if (signal.aborted) throw new ExecutionAuthorizationError(401);
+    const exported = await privateGitObjectSession(process, request, scope, revalidate, signal);
+    await revalidate();
+    if (exported.status !== "SUCCEEDED" || !exported.cancellationConfirmed || !exported.cleanupConfirmed) {
+      return { status: exported.status === "FAILED" && exported.cancellationConfirmed && exported.cleanupConfirmed ? "FAILED" : "UNKNOWN",
+        cancellationConfirmed: exported.cancellationConfirmed, cleanupConfirmed: exported.cleanupConfirmed };
+    }
+    // Source bytes and object records are internal only, never a tool receipt.
+    validateGitObjectTransfer(exported.data, scope);
+    await revalidate();
+    if (signal.aborted) throw new ExecutionAuthorizationError(401);
+    const credential = token();
+    if (!credential) throw unavailable();
+    return executePrivateGithubObjectTransfer({ scope, graph: exported.data, token: credential,
+      revalidate, signal, fetch: fetcher });
   } };
 }

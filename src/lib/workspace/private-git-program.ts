@@ -2,6 +2,12 @@ import "server-only";
 
 import { GIT_PROJECT_CODES } from "@/lib/security/git-project-naming";
 
+export const PRIVATE_GIT_OBJECT_LIMITS = Object.freeze({
+  commits: 16, objects: 128, totalBytes: 1024 * 1024, objectBytes: 256 * 1024,
+  outputBytes: 2 * 1024 * 1024, treeEntries: 512, depth: 32, pathBytes: 4096,
+  processMemoryBytes: 256 * 1024 * 1024,
+});
+
 export const PRIVATE_GIT_LIMITS = Object.freeze({
   seconds: 30,
   outputBytes: 256 * 1024,
@@ -25,7 +31,7 @@ export const PRIVATE_GIT_LIMITS = Object.freeze({
  * can leave an ambiguous mutation outcome; never retry automatically.
  */
 export const PRIVATE_GIT_PROGRAM = String.raw`
-import fcntl,hashlib,json,os,re,resource,selectors,shutil,signal,stat,subprocess,sys,tempfile,time
+import base64,fcntl,hashlib,json,os,re,resource,selectors,shutil,signal,stat,subprocess,sys,tempfile,time
 MAX_SECONDS=30
 MAX_OUTPUT=262144
 MAX_REQUEST=32768
@@ -33,6 +39,14 @@ MAX_PATH=4096
 MAX_PATHS=64
 MAX_ENTRIES=50000
 MAX_HISTORY_COMMITS=1000
+MAX_EXPORT_COMMITS=16
+MAX_EXPORT_OBJECTS=128
+MAX_EXPORT_TOTAL=1048576
+MAX_EXPORT_OBJECT=262144
+MAX_EXPORT_OUTPUT=2097152
+MAX_EXPORT_ENTRIES=512
+MAX_EXPORT_DEPTH=32
+MAX_EXPORT_PROCESS_MEMORY=268435456
 PROJECT_CODES=${JSON.stringify(GIT_PROJECT_CODES)}
 ROOT="repo"
 PREFIX="CR8OR-GIT/1 "
@@ -200,6 +214,8 @@ def limits():
     resource.setrlimit(resource.RLIMIT_CPU,(MAX_SECONDS,MAX_SECONDS))
     resource.setrlimit(resource.RLIMIT_FSIZE,(67108864,67108864))
     resource.setrlimit(resource.RLIMIT_NOFILE,(128,128))
+    if operation=="export-objects":
+        resource.setrlimit(resource.RLIMIT_AS,(MAX_EXPORT_PROCESS_MEMORY,MAX_EXPORT_PROCESS_MEMORY))
 def kill_child():
     global termination_uncertain
     if child is None: return True
@@ -230,7 +246,9 @@ def git(arguments,allowed=(0,),input_bytes=None):
     check_repository_identity()
     config_repository(expected_repository)
     # Git itself reads only this environment. No provider/application variables.
-    environment={"PATH":"/usr/bin:/bin","HOME":temporary,"TMPDIR":temporary,"LANG":"C.UTF-8","LC_ALL":"C.UTF-8","GIT_CONFIG_NOSYSTEM":"1","GIT_CONFIG_GLOBAL":"/dev/null","GIT_CONFIG_SYSTEM":"/dev/null","GIT_ATTR_NOSYSTEM":"1","GIT_TERMINAL_PROMPT":"0","GIT_OPTIONAL_LOCKS":"0","GIT_NO_REPLACE_OBJECTS":"1","GIT_CEILING_DIRECTORIES":os.path.dirname(os.getcwd()),"GIT_ALLOW_PROTOCOL":"","GIT_PAGER":"cat","PAGER":"cat"}
+    # Future helper-created commits use a reproducible UTC identity even when
+    # the sandbox default timezone differs; historical objects are never rewritten.
+    environment={"PATH":"/usr/bin:/bin","HOME":temporary,"TMPDIR":temporary,"LANG":"C.UTF-8","LC_ALL":"C.UTF-8","TZ":"UTC","GIT_CONFIG_NOSYSTEM":"1","GIT_CONFIG_GLOBAL":"/dev/null","GIT_CONFIG_SYSTEM":"/dev/null","GIT_ATTR_NOSYSTEM":"1","GIT_TERMINAL_PROMPT":"0","GIT_OPTIONAL_LOCKS":"0","GIT_NO_REPLACE_OBJECTS":"1","GIT_CEILING_DIRECTORIES":os.path.dirname(os.getcwd()),"GIT_ALLOW_PROTOCOL":"","GIT_PAGER":"cat","PAGER":"cat"}
     args=[binary,"--no-pager","--literal-pathspecs","-c","core.hooksPath=/dev/null","-c","core.fsmonitor=false","-c","core.untrackedCache=false","-c","core.attributesFile=/dev/null","-c","core.excludesFile=/dev/null","-c","core.quotePath=true","-c","commit.gpgSign=false","-c","tag.gpgSign=false","-c","credential.helper=","-c","protocol.allow=never","-c","diff.external=","-c","maintenance.auto=false","-c","gc.auto=0","-c","user.name=Cr8or Studio","-c","user.email=owner@cr8or.invalid"]+arguments
     child=subprocess.Popen(args,stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=environment,close_fds=True,start_new_session=True,preexec_fn=limits)
     if input_bytes is not None:
@@ -319,6 +337,97 @@ def paths_exist_safely(paths):
 def validate_expected(request,actual_head,actual_branch,actual_index):
     if request.get("expectedHead")!=actual_head or request.get("branch")!=actual_branch or request.get("expectedIndex")!=actual_index: raise Conflict()
     if actual_branch is None: raise Conflict()
+def export_objects(request):
+    # Only exact SHA-1 objects are supported. The verified remote base is an
+    # ancestry boundary, not a new object to upload or an arbitrary revision.
+    strict_hash=re.compile(r"[0-9a-f]{40}\Z")
+    target=request["targetCommit"]
+    base=request["expectedRemoteHead"]
+    if strict_hash.fullmatch(target) is None or strict_hash.fullmatch(base) is None or target==base: raise Rejected()
+    if head()!=target or branch()!=request["branch"]: raise Conflict()
+    records={}
+    total=[0]
+    entries=[0]
+    def object_bytes(oid,kind,record=True):
+        if strict_hash.fullmatch(oid) is None or kind not in ("commit","tree","blob"): raise Rejected()
+        if oid in records:
+            existing=records[oid]
+            if existing["type"]!=kind: raise Rejected()
+            return base64.b64decode(existing["contentBase64"],validate=True)
+        actual,_=git(["cat-file","-t",oid])
+        size,_=git(["cat-file","-s",oid])
+        if actual!=kind.encode("ascii")+b"\n" or re.fullmatch(rb"(?:0|[1-9][0-9]*)\n",size) is None: raise Rejected()
+        length=int(size)
+        if length>MAX_EXPORT_OBJECT: raise Limited()
+        content,_=git(["cat-file",kind,oid])
+        if len(content)!=length or hashlib.sha1(kind.encode("ascii")+b" "+str(length).encode("ascii")+b"\0"+content).hexdigest()!=oid: raise Rejected()
+        if record:
+            if len(records)>=MAX_EXPORT_OBJECTS or total[0]+length>MAX_EXPORT_TOTAL: raise Limited()
+            total[0]+=length
+            records[oid]={"oid":oid,"type":kind,"contentBase64":base64.b64encode(content).decode("ascii")}
+        return content
+    # Verify that the expected boundary exists as a real immutable commit.
+    object_bytes(base,"commit",False)
+    def commit_fields(content):
+        text=content.decode("utf-8")
+        if "\0" in text or "\r" in text or not text.endswith("\n"): raise Rejected()
+        header,separator,message=text.partition("\n\n")
+        fields=header.split("\n")
+        if not separator or not message or len(fields)!=4: raise Rejected()
+        if not fields[0].startswith("tree ") or not fields[1].startswith("parent "): raise Rejected()
+        tree=fields[0][5:]
+        parent=fields[1][7:]
+        if strict_hash.fullmatch(tree) is None or strict_hash.fullmatch(parent) is None: raise Rejected()
+        for field,label in ((fields[2],"author"),(fields[3],"committer")):
+            # The GitHub API cannot faithfully reproduce arbitrary headers,
+            # non-UTC offsets, signatures or encodings. Reject those formats.
+            match=re.fullmatch(label+r" ([^<>\x00-\x1f\x7f]{1,128}) <([^<>\s\x00-\x1f\x7f]{1,254})> ([1-9][0-9]{0,9}) \+0000",field)
+            if match is None or not 1<=int(match.group(3))<=253402300799: raise Rejected()
+        return tree,parent
+    def export_tree(oid,prefix="",depth=0):
+        if depth>MAX_EXPORT_DEPTH: raise Limited()
+        raw=object_bytes(oid,"tree")
+        offset=0
+        seen=set()
+        prior=None
+        while offset<len(raw):
+            check_time()
+            space=raw.find(b" ",offset)
+            nul=raw.find(b"\0",space+1)
+            if space<0 or nul<0 or nul+21>len(raw): raise Rejected()
+            mode=raw[offset:space]
+            name=raw[space+1:nul].decode("utf-8")
+            child_oid=raw[nul+1:nul+21].hex()
+            offset=nul+21
+            if mode not in (b"40000",b"100644",b"100755") or "/" in name or not name or name in seen: raise Rejected()
+            seen.add(name)
+            relative=prefix+name
+            safe_path(relative)
+            if any(character in relative for character in ":*?[]"): raise Rejected()
+            if any(part.lower().startswith((".git",".env")) or part.lower()==".aws" for part in relative.split("/")): raise Rejected()
+            key=name.encode("utf-8")+(b"/" if mode==b"40000" else b"")
+            if prior is not None and key<=prior: raise Rejected()
+            prior=key
+            entries[0]+=1
+            if entries[0]>MAX_EXPORT_ENTRIES: raise Limited()
+            if mode==b"40000": export_tree(child_oid,relative+"/",depth+1)
+            else: object_bytes(child_oid,"blob")
+    current=target
+    seen_commits=set()
+    while current!=base:
+        check_time()
+        if current in seen_commits: raise Rejected()
+        if len(seen_commits)>=MAX_EXPORT_COMMITS: raise Limited()
+        seen_commits.add(current)
+        tree,current=commit_fields(object_bytes(current,"commit"))
+        export_tree(tree)
+    # No mutation is performed. Verify HEAD/configuration once more so an
+    # in-flight branch replacement cannot release a mismatched object graph.
+    check_repository_identity()
+    config_repository(expected_repository)
+    if head()!=target or branch()!=request["branch"]: raise Conflict()
+    return {"version":1,"repositoryKey":expected_repository[len("https://github.com/"):-4],
+        "branch":request["branch"],"head":target,"base":base,"objects":list(records.values())}
 def disable_echo():
     if not os.isatty(0): return
     import termios
@@ -339,14 +448,18 @@ try:
     request=json.loads(wire.decode("utf-8"))
     if not isinstance(request,dict): raise Rejected()
     operation=request.get("operation")
-    if operation not in READS|WRITES: raise Rejected()
+    if operation not in READS|WRITES|{"export-objects"}: raise Rejected()
+    if operation=="export-objects": MAX_OUTPUT=MAX_EXPORT_OUTPUT
     keys={"operation","expectedRepository","branch"}
     if operation in ("stage","unstage","commit"): keys|={"branch","expectedHead","expectedIndex"}
     if operation in ("stage","unstage","diff"): keys.add("paths")
     if operation=="commit": keys|={"commitPrefix","category"}
+    if operation=="export-objects": keys|={"targetCommit","expectedRemoteHead"}
     if set(request)!=keys: raise Rejected()
     expected_repository=canonical_repository(request["expectedRepository"])
     if not valid_ref(request["branch"]): raise Rejected()
+    if operation=="export-objects":
+        if any(not isinstance(request.get(key),str) or re.fullmatch(r"[0-9a-f]{40}",request[key]) is None for key in ("targetCommit","expectedRemoteHead")): raise Rejected()
     if operation in WRITES:
         if request["expectedHead"] is not None and (not isinstance(request["expectedHead"],str) or HASH_RE.fullmatch(request["expectedHead"]) is None): raise Rejected()
         if not isinstance(request["expectedIndex"],str) or INDEX_RE.fullmatch(request["expectedIndex"]) is None: raise Rejected()
@@ -378,7 +491,7 @@ try:
     initial_head=head()
     initial_branch=branch()
     if initial_branch!=request["branch"]: raise Conflict()
-    initial_index=index_digest()
+    initial_index=None if operation=="export-objects" else index_digest()
     if operation in WRITES: validate_expected(request,initial_head,initial_branch,initial_index)
     paths_exist_safely(paths)
     emit("READY")
@@ -416,6 +529,7 @@ try:
                     subject="Commit"
                 commits.append({"sha":oid,"timestamp":int(timestamp),"title":subject})
             data={"commits":commits}
+    elif operation=="export-objects": data=export_objects(request)
     elif operation=="diff":
         raw,_=git(["diff","--no-ext-diff","--no-textconv","--no-renames","--no-color","--",*paths])
         staged,_=git(["diff","--cached","--no-ext-diff","--no-textconv","--no-renames","--no-color","--",*paths])

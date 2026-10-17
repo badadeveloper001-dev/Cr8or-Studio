@@ -251,4 +251,23 @@ describe("registered Git repository and operation scopes", () => {
     expect(() => validateGitOperationScope({ ...base, sessionId: "forged" })).toThrow();
     expect(() => validateGitOperationScope({ ...base, paths: Array.from({ length: 8 }, (_, n) => `${n}${"x".repeat(4090)}`) })).toThrow();
   });
+
+  it("binds push approvals to the server-owned object transfer version and exact immutable endpoints", () => {
+    const request = parseGitOperation({ operation: "push", ...remoteMutation, targetCommit: otherHead });
+    const scope = buildGitOperationScope(context, request);
+    expect(scope.objectTransfer).toEqual({ version: 1, strategy: "linear-sha1-git-database" });
+    expect(Object.isFrozen(scope.objectTransfer)).toBe(true);
+    for (const objectTransfer of [undefined, null, { version: 2, strategy: "linear-sha1-git-database" },
+      { version: 1, strategy: "arbitrary-push" }]) {
+      expect(() => validateGitOperationScope({ ...scope, objectTransfer })).toThrow(ExecutionAuthorizationError);
+    }
+    for (const field of ["targetCommit", "expectedRemoteHead"] as const) {
+      expect(() => validateGitOperationScope({ ...scope, [field]: null })).toThrow(ExecutionAuthorizationError);
+      expect(gitScopeDigest({ ...scope, [field]: "c".repeat(40) })).not.toBe(gitScopeDigest(scope));
+    }
+    expect(() => buildGitOperationScope(context, parseGitOperation({ ...request, targetCommit: head }))).toThrow();
+    expect(() => parseGitOperation({ ...request, objectTransfer: scope.objectTransfer })).toThrow();
+    expect(() => validateGitOperationScope({ ...buildGitOperationScope(context, parseGitOperation({ operation: "status" })),
+      objectTransfer: scope.objectTransfer })).toThrow();
+  });
 });
