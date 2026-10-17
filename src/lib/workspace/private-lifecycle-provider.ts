@@ -48,10 +48,17 @@ export function assertLifecycleResourceIdentity(resource: LifecycleResource, id:
     throw new LifecycleProviderError("INVALID_RESOURCE");
   }
 }
+/** Starting a registered sandbox requires the same current isolation metadata
+ * as creating one. Identity alone is sufficient only for non-enabling reads
+ * and safe shutdown; it never establishes readiness for private execution. */
+export function assertLifecycleResourceIsolation(resource: LifecycleResource, id: string): void {
+  assertLifecycleResourceIdentity(resource, id);
+  if (resource.isolationVerified !== true) throw new LifecycleProviderError("INVALID_RESOURCE");
+}
 export function assertNewLifecycleResource(resource: LifecycleResource, input: LifecycleCreationIdentity, id?: string): void {
-  assertLifecycleResourceIdentity(resource, id ?? resource?.id);
+  assertLifecycleResourceIsolation(resource, id ?? resource?.id);
   const expected = lifecycleCreationLabels(input);
-  if (resource.isolationVerified !== true || !resource.labels ||
+  if (!resource.labels ||
       Object.entries(expected).some(([key, value]) => resource.labels[key] !== value)) {
     throw new LifecycleProviderError("INVALID_RESOURCE");
   }
@@ -154,8 +161,20 @@ export function createPrivateLifecycleProvider(config: ProviderConfig): Lifecycl
       const before = resource(sandbox);
       assertLifecycleResourceIdentity(before, id); // SDK get accepts names too; never authorize an alias.
       if (!action) return before; // Inspection never starts, recreates, recovers or changes labels.
+      if (action === "start") assertLifecycleResourceIsolation(before, id);
       const desired = action === "start" ? "started" : "stopped";
-      if (before.state === desired) return before;
+      if (before.state === desired) {
+        // An already-started sandbox still needs current isolation and owner
+        // authorization; its state is not evidence of either requirement.
+        if (action === "start") {
+          if (beforeDispatch) await step(false, beforeDispatch);
+          const current = resource(await step(false, () => client.get(id)));
+          assertLifecycleResourceIsolation(current, id);
+          if (current.state !== "started") throw new LifecycleProviderError("INVALID_RESOURCE");
+          return current;
+        }
+        return before;
+      }
       if (before.state !== (action === "start" ? "stopped" : "started")) throw new LifecycleProviderError("INVALID_RESOURCE");
       // A historical auto-delete policy could destroy data on stop. Do not
       // alter it here; require separate operator remediation before transition.
@@ -164,6 +183,7 @@ export function createPrivateLifecycleProvider(config: ProviderConfig): Lifecycl
       await step(true, (seconds) => action === "start" ? sandbox.start(seconds) : sandbox.stop(seconds, false));
       const after = resource(await step(false, () => client.get(id)));
       assertLifecycleResourceIdentity(after, id);
+      if (action === "start") assertLifecycleResourceIsolation(after, id);
       if (after.state !== desired) throw new LifecycleProviderError("INVALID_RESOURCE");
       return after;
     });

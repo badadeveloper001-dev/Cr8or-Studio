@@ -8,7 +8,7 @@ import { getPolicyProfile } from "@/lib/security/policy";
 import { parseWorkspaceLifecycleRequest, reservedLifecycleIdentity, validateWorkspaceLifecycleScope,
   workspaceLifecycleScopeDigest, type WorkspaceLifecycleRequest, type WorkspaceLifecycleScope } from "@/lib/security/workspace-lifecycle-catalogue";
 import * as store from "@/lib/security/workspace-lifecycle-store";
-import { assertLifecycleResourceIdentity, assertNewLifecycleResource, createPrivateLifecycleProvider,
+import { assertLifecycleResourceIdentity, assertLifecycleResourceIsolation, assertNewLifecycleResource, createPrivateLifecycleProvider,
   type LifecycleProvider, type LifecycleResource } from "@/lib/workspace/private-lifecycle-provider";
 import { assertPrivateRepositoryCloningAvailable, assertWorkspaceLifecycleAvailable } from "@/lib/workspace/private-workspace-lifecycle-availability";
 
@@ -117,10 +117,14 @@ async function authorizedWait<T>(session: AuthSession, signal: AbortSignal | und
   }
 }
 
-function evidence(scope: WorkspaceLifecycleScope, operationId: string, resource: LifecycleResource) {
+function evidence(scope: WorkspaceLifecycleScope, operationId: string, resource: LifecycleResource): store.VerifiedLifecycleResource {
   if (resource.state !== "started" && resource.state !== "stopped") throw new ExecutionAuthorizationError(409);
   if ((scope.action === "stop" ? "stopped" : "started") !== resource.state) throw new ExecutionAuthorizationError(409);
-  return { id: resource.id, state: resource.state, repositoryKey: scope.repositoryKey, branch: scope.branch,
+  // A stopped historical resource need not qualify for private execution.
+  // Every transition to ready requires positive, server-derived isolation evidence.
+  if (scope.action !== "stop") assertLifecycleResourceIsolation(resource, scope.providerWorkspaceId ?? resource.id);
+  return { id: resource.id, state: resource.state, isolationVerified: resource.isolationVerified,
+    repositoryKey: scope.repositoryKey, branch: scope.branch,
     reservationId: operationId, projectId: scope.projectId };
 }
 
@@ -154,6 +158,7 @@ export async function executeWorkspaceLifecycleWithProvider(session: AuthSession
       if (scope.providerWorkspaceId) {
         const existing = await provider.inspect(scope.providerWorkspaceId, currentSignal);
         assertLifecycleResourceIdentity(existing, scope.providerWorkspaceId);
+        if (scope.action === "start") assertLifecycleResourceIsolation(existing, scope.providerWorkspaceId);
       }
       await validate(currentSignal);
       await store.markLifecycleDispatched(await owner(session, currentSignal), operation.id);
@@ -168,8 +173,9 @@ export async function executeWorkspaceLifecycleWithProvider(session: AuthSession
     if (scope.action === "create") {
       assertNewLifecycleResource(resource, { operationId: operation.id, projectId: scope.projectId, workspaceRecordId: scope.workspaceRecordId });
     } else assertLifecycleResourceIdentity(resource, scope.providerWorkspaceId!);
+    const verifiedEvidence = evidence(scope, operation.id, resource);
     await store.recordLifecycleResource(await owner(session, signal), operation.id, resource.id);
-    await store.completeLifecycleOperation(await owner(session, signal), operation.id, evidence(scope, operation.id, resource));
+    await store.completeLifecycleOperation(await owner(session, signal), operation.id, verifiedEvidence);
     return operationView(await store.readLifecycleOperation(await owner(session, signal), operation.id));
   } catch (error) {
     // If this write fails, DISPATCHED itself retains the slot for reconciliation.
@@ -200,6 +206,7 @@ export async function reconcileWorkspaceLifecycleWithProvider(session: AuthSessi
       if (scope.providerWorkspaceId) {
         const result = await provider.inspect(scope.providerWorkspaceId, currentSignal);
         assertLifecycleResourceIdentity(result, scope.providerWorkspaceId);
+        if (scope.action === "start") assertLifecycleResourceIsolation(result, scope.providerWorkspaceId);
         return result;
       }
       const identity = { operationId: operation.id, projectId: scope.projectId, workspaceRecordId: scope.workspaceRecordId };

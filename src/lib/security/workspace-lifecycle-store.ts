@@ -47,6 +47,8 @@ export type LifecycleApprovalView = {
 };
 /** Provider evidence is produced by the trusted adapter, never parsed from an API body. */
 export type VerifiedLifecycleResource = {
+  /** Server-derived metadata evidence; required before persisting a ready state. */
+  isolationVerified: boolean;
   id: string; state: "started" | "stopped"; repositoryKey: string | null; branch: string | null;
   reservationId: string; projectId: string;
 };
@@ -355,7 +357,8 @@ async function complete(binding: LifecycleBinding, id: string, evidence: Verifie
     const row = await authorizedOperation(tx, binding, id);
     if (!evidence || evidence.reservationId !== row.id || evidence.projectId !== row.projectId ||
         evidence.repositoryKey !== row.scope.repositoryKey || evidence.branch !== row.scope.branch ||
-        evidence.state !== (row.action === "stop" ? "stopped" : "started")) conflict();
+        evidence.state !== (row.action === "stop" ? "stopped" : "started") ||
+        typeof evidence.isolationVerified !== "boolean" || (row.action !== "stop" && evidence.isolationVerified !== true)) conflict();
     if (row.status === "SUCCEEDED") {
       if (row.providerResourceId !== evidence.id) conflict();
       await registry(tx, row.scope, provisioning(row.scope) ? evidence.id : undefined);

@@ -5,6 +5,11 @@ Stacked on draft PR #8, starting at
 private authentication or any provider operation. The existing cloud-write,
 development-command and private Git release restrictions remain unchanged.
 
+The follow-up [workspace isolation correction](phase-1a-3g-workspace-isolation.md)
+documents the additional existing-workspace startup and reconciliation checks
+and their validation. The implementation results below describe the original
+foundation at `1906b3c9a7adc78d64a743b0ede1edc64149fd3c`.
+
 ## Architecture and trusted registration
 
 The private lifecycle service accepts only an authentic owner proof from the
@@ -123,8 +128,11 @@ network allowlists, destroy deadline or other unreviewed configuration. The
 snapshot interface does not let this implementation independently set its
 resources; returned limits are verified before registration.
 
-Historical start/stop also rejects unknown or unsafe automatic deletion
-configuration rather than changing it. Read-only inspection never starts,
+Existing startup now requires the same verified isolation metadata as creation,
+including an already-started resource and read-only start reconciliation.
+Historical shutdown does not require development isolation, but still rejects
+unknown or unsafe automatic deletion configuration rather than changing it.
+Read-only inspection never starts,
 recovers, recreates or changes resource configuration. Metadata returned to the
 service is minimized; credentials, environment values, arbitrary provider
 messages and output are never logged or returned.

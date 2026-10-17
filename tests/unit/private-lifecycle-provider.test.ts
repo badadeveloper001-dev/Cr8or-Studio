@@ -5,7 +5,7 @@ vi.mock("@daytona/sdk", () => ({ Daytona: class {
   create = mocks.create; get = mocks.get; list = mocks.list;
   constructor(config: unknown) { mocks.construct(config); }
 } }));
-import { assertLifecycleResourceIdentity, assertNewLifecycleResource, assertPrivateRepositoryCloneAvailable,
+import { assertLifecycleResourceIdentity, assertLifecycleResourceIsolation, assertNewLifecycleResource, assertPrivateRepositoryCloneAvailable,
   createPrivateLifecycleProvider, lifecycleCreationLabels, LIFECYCLE_PROVIDER_LIMITS,
   type LifecycleResource } from "@/lib/workspace/private-lifecycle-provider";
 
@@ -13,6 +13,17 @@ import { assertLifecycleResourceIdentity, assertNewLifecycleResource, assertPriv
 // They cannot establish provider-side snapshot/credential/isolation guarantees.
 const config = { apiKey: "synthetic-provider-key", apiUrl: "https://daytona.invalid/api", snapshot: "reviewed-snapshot" };
 const identity = { operationId: "operation-one", projectId: "project-one", workspaceRecordId: "registration-one" };
+const unsafeIsolationMetadata = [
+  { snapshot: "different" }, { snapshot: undefined }, { target: "another-target" }, { user: "root" }, { public: true },
+  { networkBlockAll: false }, { networkBlockAll: undefined }, { networkAllowList: "0.0.0.0/0" },
+  { domainAllowList: "github.com" }, { outboundProxyUrl: "https://proxy.invalid" },
+  { linkedSandboxId: "other-sandbox" }, { otelEndpointOverride: "https://log.invalid" }, { warmPoolId: "pool-one" },
+  { env: undefined }, { env: { GITHUB_TOKEN: "synthetic-secret" } }, { env: [] },
+  { volumes: undefined }, { volumes: [{ volumeId: "shared", mountPath: "/credentials" }] },
+  { cpu: 0 }, { cpu: 3 }, { cpu: NaN }, { memory: 5 }, { disk: 11 }, { gpu: 1 },
+  { autoStopInterval: 0 }, { autoPauseInterval: undefined }, { autoDeleteInterval: 0 },
+  { autoDeleteInterval: undefined }, { autoDestroyAt: "2030-01-01T00:00:00Z" },
+];
 const signal = () => new AbortController().signal;
 function sandbox(patch: Record<string, unknown> = {}) {
   return { id: "sandbox-one", state: "started", labels: { ...lifecycleCreationLabels(identity), "code-toolbox-language": "python" },
@@ -52,15 +63,7 @@ describe("bounded private Daytona lifecycle adapter", () => {
   });
 
   it.each([
-    { snapshot: "different" }, { target: "another-target" }, { user: "root" }, { public: true },
-    { networkBlockAll: false }, { networkBlockAll: undefined }, { networkAllowList: "0.0.0.0/0" },
-    { domainAllowList: "github.com" }, { outboundProxyUrl: "https://proxy.invalid" },
-    { linkedSandboxId: "other-sandbox" }, { otelEndpointOverride: "https://log.invalid" }, { warmPoolId: "pool-one" },
-    { env: undefined }, { env: { GITHUB_TOKEN: "synthetic-secret" } }, { env: [] },
-    { volumes: undefined }, { volumes: [{ volumeId: "shared", mountPath: "/credentials" }] },
-    { cpu: 0 }, { cpu: 3 }, { cpu: NaN }, { memory: 5 }, { disk: 11 }, { gpu: 1 },
-    { autoStopInterval: 0 }, { autoPauseInterval: undefined }, { autoDeleteInterval: 0 },
-    { autoDeleteInterval: undefined }, { autoDestroyAt: "2030-01-01T00:00:00Z" },
+    ...unsafeIsolationMetadata,
     { labels: {} }, { labels: { ...lifecycleCreationLabels(identity), "cr8or-project": "another-project" } },
     { labels: { ...lifecycleCreationLabels(identity), "cr8or-owner": "client-owner" } },
   ])("rejects unsafe new-resource metadata without deleting or retrying: %j", async (patch) => {
@@ -127,7 +130,78 @@ describe("bounded private Daytona lifecycle adapter", () => {
     mocks.get.mockResolvedValue(initial);
     await createPrivateLifecycleProvider(config)[action]("sandbox-one", signal());
     expect(initial[action]).not.toHaveBeenCalled();
-    expect(mocks.get).toHaveBeenCalledTimes(1);
+    expect(mocks.get).toHaveBeenCalledTimes(action === "start" ? 2 : 1);
+  });
+  it.each(unsafeIsolationMetadata.flatMap((patch) => ["stopped", "started"].map((state) => ({ state, ...patch }))))(
+    "rejects unsafe existing startup metadata before mutation or the already-started shortcut: %j", async (patch) => {
+      const initial = sandbox(patch);
+      mocks.get.mockResolvedValue(initial);
+      const revalidate = vi.fn(async () => undefined);
+      await expect(createPrivateLifecycleProvider(config).start("sandbox-one", signal(), revalidate))
+        .rejects.toMatchObject({ code: "INVALID_RESOURCE", uncertain: false });
+      expect(revalidate).not.toHaveBeenCalled();
+      expect(initial.start).not.toHaveBeenCalled();
+      expect(initial.stop).not.toHaveBeenCalled();
+      expect(initial.recover).not.toHaveBeenCalled();
+      expect(initial.delete).not.toHaveBeenCalled();
+      expect(mocks.create).not.toHaveBeenCalled();
+      expect(mocks.get).toHaveBeenCalledExactlyOnceWith("sandbox-one");
+    });
+  it("revalidates current authorization even when a secure resource is already started", async () => {
+    const initial = sandbox();
+    mocks.get.mockResolvedValue(initial);
+    const revalidate = vi.fn(async () => { throw new Error("Synthetic session was revoked."); });
+    await expect(createPrivateLifecycleProvider(config).start("sandbox-one", signal(), revalidate))
+      .rejects.toMatchObject({ uncertain: false });
+    expect(revalidate).toHaveBeenCalledTimes(1);
+    expect(initial.start).not.toHaveBeenCalled();
+    expect(mocks.create).not.toHaveBeenCalled();
+  });
+  it.each([{ networkBlockAll: false }, { env: { TOKEN: "synthetic-secret" } },
+    { id: "different-sandbox" }, { state: "stopped" }])(
+    "rejects drift during authorization of an already-started resource without issuing a start: %j", async (patch) => {
+      const initial = sandbox();
+      mocks.get.mockResolvedValue(initial);
+      const revalidate = vi.fn(async () => { mocks.get.mockResolvedValue(sandbox(patch)); });
+      await expect(createPrivateLifecycleProvider(config).start("sandbox-one", signal(), revalidate))
+        .rejects.toMatchObject({ code: "INVALID_RESOURCE", uncertain: false });
+      expect(revalidate).toHaveBeenCalledTimes(1);
+      expect(mocks.get.mock.calls).toEqual([["sandbox-one"], ["sandbox-one"]]);
+      expect(initial.start).not.toHaveBeenCalled();
+      expect(initial.stop).not.toHaveBeenCalled();
+      expect(initial.recover).not.toHaveBeenCalled();
+      expect(mocks.create).not.toHaveBeenCalled();
+    });
+  it.each([{ networkBlockAll: false }, { env: { TOKEN: "synthetic-secret" } },
+    { volumes: [{ volumeId: "shared", mountPath: "/credentials" }] }, { snapshot: "different" }, { memory: 5 },
+    { id: "different-sandbox" }, { state: "starting" }])(
+    "retains uncertainty when isolation, identity or state changes after start: %j", async (patch) => {
+      const initial = sandbox({ state: "stopped" });
+      mocks.get.mockResolvedValueOnce(initial).mockResolvedValueOnce(sandbox(patch));
+      await expect(createPrivateLifecycleProvider(config).start("sandbox-one", signal()))
+        .rejects.toMatchObject({ code: "INVALID_RESOURCE", uncertain: true });
+      expect(initial.start).toHaveBeenCalledTimes(1);
+      expect(mocks.get.mock.calls).toEqual([["sandbox-one"], ["sandbox-one"]]);
+      expect(initial.recover).not.toHaveBeenCalled();
+      expect(initial.delete).not.toHaveBeenCalled();
+      expect(mocks.create).not.toHaveBeenCalled();
+    });
+  it("safely stops an authorized historical resource without requiring start isolation or changing its metadata", async () => {
+    const legacy = { labels: {}, snapshot: "historical", networkBlockAll: false,
+      env: { GITHUB_TOKEN: "synthetic-historical-secret" }, volumes: [{ volumeId: "old", mountPath: "/old" }] };
+    const initial = sandbox(legacy);
+    mocks.get.mockResolvedValueOnce(initial).mockResolvedValueOnce(sandbox({ ...legacy, state: "stopped" }));
+    const revalidate = vi.fn(async () => undefined);
+    await expect(createPrivateLifecycleProvider(config).stop("sandbox-one", signal(), revalidate))
+      .resolves.toEqual({ id: "sandbox-one", state: "stopped", labels: {}, isolationVerified: false });
+    expect(revalidate).toHaveBeenCalledTimes(1);
+    expect(initial.stop).toHaveBeenCalledTimes(1);
+    expect(initial.stop.mock.calls[0]).toEqual([expect.any(Number), false]);
+    expect(initial.env).toEqual(legacy.env);
+    expect(initial.start).not.toHaveBeenCalled();
+    expect(initial.recover).not.toHaveBeenCalled();
+    expect(initial.delete).not.toHaveBeenCalled();
+    expect(mocks.create).not.toHaveBeenCalled();
   });
   it.each(["error", "archived", "starting", "destroyed"])("never recovers, starts or replaces unknown transitional state %s", async (state) => {
     const initial = sandbox({ state });
@@ -286,5 +360,10 @@ describe("bounded private Daytona lifecycle adapter", () => {
     expect(() => assertNewLifecycleResource(resource, { ...identity, projectId: "another" })).toThrow();
     expect(() => assertNewLifecycleResource({ ...resource, isolationVerified: false }, identity)).toThrow();
     expect(() => assertLifecycleResourceIdentity(resource, "another")).toThrow();
+  });
+  it.each([false, undefined, null, 1, "true"])("requires strict verified isolation rather than a truthy claim: %j", (value) => {
+    const resource = { id: "sandbox-one", state: "started", labels: {}, isolationVerified: value } as unknown as LifecycleResource;
+    expect(() => assertLifecycleResourceIdentity(resource, "sandbox-one")).not.toThrow();
+    expect(() => assertLifecycleResourceIsolation(resource, "sandbox-one")).toThrow();
   });
 });

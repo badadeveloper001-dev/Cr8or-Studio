@@ -273,7 +273,7 @@ describe.skipIf(!testUrl)("workspace lifecycle on isolated PostgreSQL", () => {
     await store.markLifecycleDispatched(identity.binding, identity.operation.id);
     const before = await database.workspace.findUniqueOrThrow({ where: { id: identity.scope.workspaceRecordId } });
     await expect(store.completeLifecycleOperation(identity.binding, identity.operation.id, { id: SANDBOX_B, state: "started",
-      repositoryKey: REPOSITORY_A, branch: "main", reservationId: identity.operation.id, projectId: PROJECT_A })).rejects.toBeDefined();
+      repositoryKey: REPOSITORY_A, branch: "main", reservationId: identity.operation.id, projectId: PROJECT_A, isolationVerified: true })).rejects.toBeDefined();
     expect(await database.workspace.findUnique({ where: { id: before.id } })).toEqual(before);
   });
   it("registers a verified new sandbox atomically while preserving historical projects and workspaces", async () => {
@@ -283,12 +283,53 @@ describe.skipIf(!testUrl)("workspace lifecycle on isolated PostgreSQL", () => {
     const providerId = `registered-${suffix}`;
     await store.recordLifecycleResource(identity.binding, identity.operation.id, providerId);
     const operation = await store.completeLifecycleOperation(identity.binding, identity.operation.id, { id: providerId, state: "started",
-      repositoryKey: null, branch: null, reservationId: identity.operation.id, projectId: identity.scope.projectId });
+      repositoryKey: null, branch: null, reservationId: identity.operation.id, projectId: identity.scope.projectId, isolationVerified: true });
     expect(operation.status).toBe("SUCCEEDED");
     const registered = await database.project.findUniqueOrThrow({ where: { id: identity.scope.projectId }, include: { workspaces: true } });
     expect(registered.workspaces).toHaveLength(1);
     expect(registered.workspaces[0]).toMatchObject({ id: identity.scope.workspaceRecordId, providerWorkspaceId: providerId, projectId: identity.scope.projectId });
     expect(await database.project.findMany({ where: { id: { in: [PROJECT_A, PROJECT_B] } }, include: { workspaces: true }, orderBy: { id: "asc" } })).toEqual(historical);
+  });
+  it.each([
+    ["create", false], ["create", undefined], ["start", false], ["start", undefined],
+  ] as const)("storage denies %s completion with isolation evidence %j", async (action, isolationVerified) => {
+    const identity = await reserved(action);
+    const historical = await database.workspace.findMany({ orderBy: { id: "asc" } });
+    await store.markLifecycleDispatched(identity.binding, identity.operation.id);
+    const providerId = action === "create" ? `unverified-${identity.operation.id}` : SANDBOX_A;
+    await expect(store.completeLifecycleOperation(identity.binding, identity.operation.id, {
+      id: providerId, state: "started", repositoryKey: identity.scope.repositoryKey, branch: identity.scope.branch,
+      reservationId: identity.operation.id, projectId: identity.scope.projectId, isolationVerified: isolationVerified as boolean,
+    })).rejects.toMatchObject({ status: 409 });
+    expect(await database.workspace.findMany({ orderBy: { id: "asc" } })).toEqual(historical);
+    expect(await store.readLifecycleOperation(identity.binding, identity.operation.id)).toMatchObject({ status: "DISPATCHED" });
+    if (action === "create") expect(await database.project.findUnique({ where: { id: identity.scope.projectId } })).toBeNull();
+  });
+  it("storage denies uncertain start reconciliation without verified isolation", async () => {
+    const identity = await reserved("start");
+    const before = await database.workspace.findUniqueOrThrow({ where: { projectId: PROJECT_A } });
+    await store.markLifecycleDispatched(identity.binding, identity.operation.id);
+    await store.failLifecycleOperation(identity.operation.id, true);
+    await store.claimLifecycleReconciliation(identity.binding, identity.operation.id);
+    await expect(store.reconcileLifecycleOperation(identity.binding, identity.operation.id, {
+      id: SANDBOX_A, state: "started", repositoryKey: REPOSITORY_A, branch: "main", reservationId: identity.operation.id,
+      projectId: PROJECT_A, isolationVerified: false,
+    })).rejects.toMatchObject({ status: 409 });
+    expect(await store.readLifecycleOperation(identity.binding, identity.operation.id)).toMatchObject({ status: "UNKNOWN" });
+    expect(await database.workspace.findUnique({ where: { id: before.id } })).toEqual(before);
+  });
+  it("storage can confirm shutdown of the exact historical sandbox with unverified startup isolation", async () => {
+    const identity = await reserved("stop");
+    await database.workspace.update({ where: { projectId: PROJECT_A }, data: { state: "ready" } });
+    const before = await database.workspace.findUniqueOrThrow({ where: { projectId: PROJECT_A } });
+    await store.markLifecycleDispatched(identity.binding, identity.operation.id);
+    expect(await store.completeLifecycleOperation(identity.binding, identity.operation.id, {
+      id: SANDBOX_A, state: "stopped", repositoryKey: REPOSITORY_A, branch: "main", reservationId: identity.operation.id,
+      projectId: PROJECT_A, isolationVerified: false,
+    })).toMatchObject({ status: "SUCCEEDED", action: "stop" });
+    const after = await database.workspace.findUniqueOrThrow({ where: { id: before.id } });
+    expect({ ...after, state: before.state, updatedAt: before.updatedAt }).toEqual(before);
+    expect(after.state).toBe("stopped");
   });
   it("rejects provider resource reuse belonging to another project", async () => {
     const identity = await reserved();
@@ -304,7 +345,7 @@ describe.skipIf(!testUrl)("workspace lifecycle on isolated PostgreSQL", () => {
     await store.failLifecycleOperation(identity.operation.id, true);
     await secondStore.claimLifecycleReconciliation(identity.binding, identity.operation.id);
     const outcome = await secondStore.reconcileLifecycleOperation(identity.binding, identity.operation.id,
-      { id: providerId, state: "started", repositoryKey: null, branch: null, reservationId: identity.operation.id, projectId: identity.scope.projectId });
+      { id: providerId, state: "started", repositoryKey: null, branch: null, reservationId: identity.operation.id, projectId: identity.scope.projectId, isolationVerified: true });
     expect(outcome).toMatchObject({ status: "SUCCEEDED", providerResourceId: providerId, attempts: 1 });
     expect(outcome.reconciledAt).toBeInstanceOf(Date);
     expect(await database.workspace.count({ where: { projectId: identity.scope.projectId } })).toBe(1);
@@ -316,7 +357,7 @@ describe.skipIf(!testUrl)("workspace lifecycle on isolated PostgreSQL", () => {
     await store.failLifecycleOperation(identity.operation.id, true);
     await expect(store.reconcileLifecycleOperation(identity.binding, identity.operation.id,
       { id: `different-${suffix}`, state: "started", repositoryKey: null, branch: null,
-        reservationId: identity.operation.id, projectId: identity.scope.projectId })).rejects.toBeDefined();
+        reservationId: identity.operation.id, projectId: identity.scope.projectId, isolationVerified: true })).rejects.toBeDefined();
     expect(await store.readLifecycleOperation(identity.binding, identity.operation.id)).toMatchObject({ status: "UNKNOWN" });
   });
   it("runs the authenticated approval, durable reservation, provider verification and registration path", async () => {
@@ -404,11 +445,77 @@ describe.skipIf(!testUrl)("workspace lifecycle on isolated PostgreSQL", () => {
   });
   it.each(["start", "stop"] as const)("dispatches explicit approved %s against only the registered sandbox", async action => {
     const identity = await approvedServiceRequest({ action, projectId: PROJECT_A, idempotencyKey: randomUUID() }), provider = controlledProvider();
+    const before = await database.workspace.findUniqueOrThrow({ where: { id: identity.approval.scope.workspaceRecordId } });
     expect(await service.executeWorkspaceLifecycleWithProvider(identity.authSession, identity.request, provider,
       identity.approval.approvalId)).toMatchObject({ status: "SUCCEEDED", action, projectId: PROJECT_A });
     expect(provider[action]).toHaveBeenCalledExactlyOnceWith(SANDBOX_A, expect.any(AbortSignal), expect.any(Function));
     expect(provider.create).not.toHaveBeenCalled();
-    expect(await database.workspace.findUnique({ where: { id: identity.approval.scope.workspaceRecordId } })).toMatchObject({ providerWorkspaceId: SANDBOX_A });
+    const after = await database.workspace.findUniqueOrThrow({ where: { id: before.id } });
+    expect({ ...after, state: before.state, updatedAt: before.updatedAt }).toEqual(before);
+    expect(after.state).toBe(action === "start" ? "ready" : "stopped");
+  });
+  it.each(["stopped", "started"] as const)("rejects an insecure %s sandbox before any start mutation", async state => {
+    const identity = await approvedServiceRequest(startRequest()), provider = controlledProvider();
+    const before = await database.workspace.findMany({ orderBy: { id: "asc" } });
+    vi.mocked(provider.inspect).mockResolvedValue({ ...resource(SANDBOX_A, state), isolationVerified: false });
+    await expect(service.executeWorkspaceLifecycleWithProvider(identity.authSession, identity.request, provider,
+      identity.approval.approvalId)).rejects.toMatchObject({ status: 503 });
+    expect(provider.start).not.toHaveBeenCalled(); expect(provider.create).not.toHaveBeenCalled(); expect(provider.stop).not.toHaveBeenCalled();
+    expect(await database.workspace.findMany({ orderBy: { id: "asc" } })).toEqual(before);
+    expect(await database.workspaceLifecycleOperation.findMany()).toMatchObject([{ status: "FAILED", attempts: 0 }]);
+  });
+  it.each([undefined, null, 1, "true"])("does not accept malformed adapter isolation evidence %j before starting", async isolationVerified => {
+    const identity = await approvedServiceRequest(startRequest()), provider = controlledProvider();
+    vi.mocked(provider.inspect).mockResolvedValue({ ...resource(SANDBOX_A, "stopped"), isolationVerified } as unknown as LifecycleResource);
+    await expect(service.executeWorkspaceLifecycleWithProvider(identity.authSession, identity.request, provider,
+      identity.approval.approvalId)).rejects.toMatchObject({ status: 503 });
+    expect(provider.start).not.toHaveBeenCalled();
+    expect(await database.workspace.findUnique({ where: { projectId: PROJECT_A } })).toMatchObject({ state: "stopped", providerWorkspaceId: SANDBOX_A });
+  });
+  it.each([false, undefined, "true"])("withholds readiness when start completion isolation is %j", async isolationVerified => {
+    const identity = await approvedServiceRequest(startRequest()), provider = controlledProvider();
+    const before = await database.workspace.findMany({ orderBy: { id: "asc" } });
+    vi.mocked(provider.start).mockImplementation(async (id, _signal, beforeDispatch) => {
+      await beforeDispatch!(); return { ...resource(id), isolationVerified } as unknown as LifecycleResource;
+    });
+    await expect(service.executeWorkspaceLifecycleWithProvider(identity.authSession, identity.request, provider,
+      identity.approval.approvalId)).rejects.toMatchObject({ status: 503 });
+    expect(provider.start).toHaveBeenCalledOnce(); expect(provider.create).not.toHaveBeenCalled(); expect(provider.stop).not.toHaveBeenCalled();
+    expect(await database.workspace.findMany({ orderBy: { id: "asc" } })).toEqual(before);
+    const [operation] = await database.workspaceLifecycleOperation.findMany();
+    expect(operation).toMatchObject({ status: "UNKNOWN", attempts: 1 });
+    expect(await service.executeWorkspaceLifecycleWithProvider(identity.authSession, identity.request, provider,
+      identity.approval.approvalId)).toMatchObject({ ok: false, status: "UNKNOWN", operationId: operation.id });
+    expect(provider.start).toHaveBeenCalledOnce();
+  });
+  it.each(["session", "registration"])("rechecks %s after secure startup preflight and before mutation", async changed => {
+    const identity = await approvedServiceRequest(startRequest()), provider = controlledProvider();
+    vi.mocked(provider.inspect).mockImplementation(async id => {
+      if (changed === "session") await sessions.revokeSession(identity.session.id);
+      else await database.workspace.update({ where: { projectId: PROJECT_A }, data: { providerWorkspaceId: "externally-remapped-fixture" } });
+      return resource(id, "stopped");
+    });
+    await expect(service.executeWorkspaceLifecycleWithProvider(identity.authSession, identity.request, provider,
+      identity.approval.approvalId)).rejects.toBeDefined();
+    expect(provider.start).not.toHaveBeenCalled(); expect(provider.create).not.toHaveBeenCalled();
+    expect(await database.workspace.findUnique({ where: { projectId: PROJECT_A } })).toMatchObject({ state: "stopped" });
+    expect(await database.workspaceLifecycleOperation.findMany()).toMatchObject([{ status: "FAILED", attempts: 0 }]);
+  });
+  it("stops an approved historical sandbox without requiring its isolation to qualify for startup", async () => {
+    const identity = await approvedServiceRequest({ action: "stop", projectId: PROJECT_A, idempotencyKey: randomUUID() });
+    const provider = controlledProvider();
+    await database.workspace.update({ where: { projectId: PROJECT_A }, data: { state: "ready" } });
+    const before = await database.workspace.findUniqueOrThrow({ where: { projectId: PROJECT_A } });
+    vi.mocked(provider.inspect).mockResolvedValue({ ...resource(SANDBOX_A), isolationVerified: false });
+    vi.mocked(provider.stop).mockImplementation(async (id, _signal, beforeDispatch) => {
+      await beforeDispatch!(); return { ...resource(id, "stopped"), isolationVerified: false };
+    });
+    expect(await service.executeWorkspaceLifecycleWithProvider(identity.authSession, identity.request, provider,
+      identity.approval.approvalId)).toMatchObject({ status: "SUCCEEDED", action: "stop", projectId: PROJECT_A });
+    const after = await database.workspace.findUniqueOrThrow({ where: { projectId: PROJECT_A } });
+    expect({ ...after, state: before.state, updatedAt: before.updatedAt }).toEqual(before);
+    expect(after.state).toBe("stopped"); expect(provider.stop).toHaveBeenCalledOnce();
+    expect(provider.start).not.toHaveBeenCalled(); expect(provider.create).not.toHaveBeenCalled();
   });
   it("refuses a provider lookup returning another sandbox before start mutation", async () => {
     const identity = await approvedServiceRequest(startRequest()), provider = controlledProvider();
@@ -466,6 +573,20 @@ describe.skipIf(!testUrl)("workspace lifecycle on isolated PostgreSQL", () => {
     expect(await database.project.findUnique({ where: { id: identity.approval.scope.projectId } })).toBeNull();
     expect(await database.$queryRaw`SELECT "id" FROM "WorkspaceLifecycleOperation" WHERE "status" = 'UNKNOWN'`).toHaveLength(1);
   });
+  it.each([false, undefined, "true"])("does not register a new resource with isolation evidence %j despite exact reservation labels", async isolationVerified => {
+    const identity = await approvedServiceRequest(), provider = controlledProvider();
+    const historical = await database.project.findMany({ include: { workspaces: true }, orderBy: { id: "asc" } });
+    const originalCreate = vi.mocked(provider.create).getMockImplementation()!;
+    vi.mocked(provider.create).mockImplementation(async (input, signal, beforeDispatch) => ({
+      ...await originalCreate(input, signal, beforeDispatch), isolationVerified,
+    } as unknown as LifecycleResource));
+    await expect(service.executeWorkspaceLifecycleWithProvider(identity.authSession, identity.request, provider,
+      identity.approval.approvalId)).rejects.toMatchObject({ status: 503 });
+    expect(await database.project.findUnique({ where: { id: identity.approval.scope.projectId } })).toBeNull();
+    expect(await database.project.findMany({ include: { workspaces: true }, orderBy: { id: "asc" } })).toEqual(historical);
+    expect(await database.workspaceLifecycleOperation.findMany()).toMatchObject([{ status: "UNKNOWN", attempts: 1 }]);
+    expect(provider.create).toHaveBeenCalledOnce(); expect(provider.start).not.toHaveBeenCalled(); expect(provider.stop).not.toHaveBeenCalled();
+  });
   it("records an uncertain outcome after an actual PostgreSQL registration failure", async () => {
     const identity = await approvedServiceRequest(), provider = controlledProvider();
     // Generated hexadecimal identity only, in this disposable schema. Force the
@@ -514,6 +635,47 @@ describe.skipIf(!testUrl)("workspace lifecycle on isolated PostgreSQL", () => {
     expect(await store.readLifecycleOperation(identity.binding, identity.operation.id)).toMatchObject({ status: "UNKNOWN" });
     expect(provider.create).not.toHaveBeenCalled(); expect(provider.start).not.toHaveBeenCalled(); expect(provider.stop).not.toHaveBeenCalled();
     expect(await database.project.findUnique({ where: { id: identity.scope.projectId } })).toBeNull();
+  });
+  it.each([false, undefined, "true"])("retains an uncertain start when reconciliation isolation is %j", async isolationVerified => {
+    const identity = await reserved("start"), provider = controlledProvider();
+    const before = await database.workspace.findMany({ orderBy: { id: "asc" } });
+    await store.markLifecycleDispatched(identity.binding, identity.operation.id);
+    await store.failLifecycleOperation(identity.operation.id, true);
+    vi.mocked(provider.inspect).mockResolvedValue({ ...resource(SANDBOX_A), isolationVerified } as unknown as LifecycleResource);
+    await expect(service.reconcileWorkspaceLifecycleWithProvider(identity.authSession, identity.operation.id, provider)).rejects.toBeDefined();
+    expect(await store.readLifecycleOperation(identity.binding, identity.operation.id)).toMatchObject({ status: "UNKNOWN", attempts: 1 });
+    expect(await database.workspace.findMany({ orderBy: { id: "asc" } })).toEqual(before);
+    expect(provider.create).not.toHaveBeenCalled(); expect(provider.start).not.toHaveBeenCalled(); expect(provider.stop).not.toHaveBeenCalled();
+    // A separately requested read-only reconciliation can confirm later verified
+    // evidence after the existing cooldown; no mutation is retried or repaired.
+    await database.$executeRaw`UPDATE "WorkspaceLifecycleOperation" SET "lastReconciliationAt" = NOW() - INTERVAL '61 seconds'
+      WHERE "id" = ${identity.operation.id}::uuid`;
+    vi.mocked(provider.inspect).mockResolvedValue(resource(SANDBOX_A));
+    expect(await service.reconcileWorkspaceLifecycleWithProvider(identity.authSession, identity.operation.id, provider))
+      .toMatchObject({ status: "SUCCEEDED", action: "start", projectId: PROJECT_A });
+    expect(await database.workspace.findUnique({ where: { id: identity.scope.workspaceRecordId } }))
+      .toMatchObject({ projectId: PROJECT_A, providerWorkspaceId: SANDBOX_A, state: "ready" });
+    expect(provider.inspect).toHaveBeenCalledTimes(2); expect(provider.start).not.toHaveBeenCalled();
+  });
+  it.each(["started", "stopped"] as const)("reconciles an unsafe historical stop only when the exact resource is stopped: %s", async state => {
+    const identity = await reserved("stop"), provider = controlledProvider();
+    await database.workspace.update({ where: { projectId: PROJECT_A }, data: { state: "ready" } });
+    const before = await database.workspace.findUniqueOrThrow({ where: { projectId: PROJECT_A } });
+    await store.markLifecycleDispatched(identity.binding, identity.operation.id);
+    await store.failLifecycleOperation(identity.operation.id, true);
+    vi.mocked(provider.inspect).mockResolvedValue({ ...resource(SANDBOX_A, state), isolationVerified: false });
+    const reconcile = service.reconcileWorkspaceLifecycleWithProvider(identity.authSession, identity.operation.id, provider);
+    if (state === "started") {
+      await expect(reconcile).rejects.toBeDefined();
+      expect(await store.readLifecycleOperation(identity.binding, identity.operation.id)).toMatchObject({ status: "UNKNOWN" });
+      expect(await database.workspace.findUnique({ where: { id: before.id } })).toEqual(before);
+    } else {
+      await expect(reconcile).resolves.toMatchObject({ status: "SUCCEEDED", action: "stop" });
+      const after = await database.workspace.findUniqueOrThrow({ where: { id: before.id } });
+      expect({ ...after, state: before.state, updatedAt: before.updatedAt }).toEqual(before);
+      expect(after.state).toBe("stopped");
+    }
+    expect(provider.create).not.toHaveBeenCalled(); expect(provider.start).not.toHaveBeenCalled(); expect(provider.stop).not.toHaveBeenCalled();
   });
   it("cancels abandoned pre-dispatch reservations without a provider call and never redispatches them", async () => {
     const identity = await reserved(), provider = controlledProvider();
