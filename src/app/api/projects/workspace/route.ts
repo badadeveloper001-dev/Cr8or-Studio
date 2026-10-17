@@ -19,6 +19,7 @@ import {
 import { authorizeRoute } from "@/lib/security/authorization";
 import { getPrivateAuthMode } from "@/lib/security/private-auth-mode";
 import { authError } from "@/lib/security/private-auth-http";
+import { privateLifecycleFailure, readPrivateLifecycleBody } from "@/lib/security/private-lifecycle-http";
 import { evaluatePolicyGuard } from "@/lib/security/policy";
 import { runSandboxedCommand, SandboxViolationError } from "@/lib/security/sandbox";
 import { PROJECTS_ROOT } from "@/lib/workspace/shell";
@@ -46,6 +47,10 @@ const bodySchema = z.discriminatedUnion("action", [
     repositoryUrl: z.string().trim().min(8).max(2048),
     approvalId: z.string().uuid().optional(),
   }),
+]);
+const privateBodySchema = z.discriminatedUnion("action", [
+  bodySchema.options[0].strict(), bodySchema.options[1].strict(),
+  bodySchema.options[2].strict(), bodySchema.options[3].strict(),
 ]);
 
 function isValidCloneUrl(url: string): boolean {
@@ -130,8 +135,16 @@ function policyDeniedResponse(
 async function POSTHandler(request: NextRequest) {
   return withRouteMetrics("api/projects/workspace", async (request: NextRequest, { requestId }) => {
   try {
-    const raw = await request.json();
-    const body = bodySchema.parse(raw);
+    // A private local request must not reach the legacy directory-management
+    // path. Cloud reads use a bounded body and retain registered-only lookup.
+    if (getPrivateAuthMode() !== "inactive" && !cloudModeEnabled()) return authError(503, "Local workspace management is unavailable.");
+    let body: z.infer<typeof bodySchema>;
+    if (getPrivateAuthMode() !== "inactive") {
+      try { body = privateBodySchema.parse(await readPrivateLifecycleBody(request)); }
+      catch (error) { return privateLifecycleFailure(error); }
+    } else {
+      body = bodySchema.parse(await request.json());
+    }
 
     if (cloudModeEnabled()) {
       if (body.action === "recent") return await listCloudProjects(request);
@@ -140,10 +153,6 @@ async function POSTHandler(request: NextRequest) {
         ? { repositoryUrl: body.repositoryUrl, approvalId: body.approvalId }
         : { projectName: body.name, approvalId: body.approvalId });
     }
-
-    // The legacy directory browser/clone flow can select unregistered paths.
-    // Registered local file operations use authorizedRuntime through /api/files.
-    if (getPrivateAuthMode() === "required") return authError(503, "Local workspace management is unavailable.");
 
     if (body.action === "recent") {
       const auth = await authorizeRoute(request, {

@@ -59,9 +59,20 @@ describe("registered cloud identities", () => {
     expect(mocks.authorizedRuntime).not.toHaveBeenCalled();
   });
 
-  it("routes an owner clone request to the registered historical project without provisioning", async () => {
+  it("blocks legacy clone requests before resolving or changing a historical registration", async () => {
     const req = request();
     const response = await createCloudProject(req, { repositoryUrl, branch: "main" });
+    expect(response.status).toBe(503);
+    expect(mocks.findMany).not.toHaveBeenCalled();
+    expect(mocks.findFirst).not.toHaveBeenCalled();
+    expect(mocks.authorizedRuntime).not.toHaveBeenCalled();
+    expect(mocks.provider).not.toHaveBeenCalled();
+    expect(mocks.runtime).not.toHaveBeenCalled();
+  });
+
+  it("opens an already running registered historical project by its preserved ID", async () => {
+    const req = request();
+    const response = await openCloudProject(req, historical.projectId);
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ project: { projectId: historical.projectId } });
     expect(mocks.authorizedRuntime).toHaveBeenCalledWith(req, historical.projectId);
@@ -99,7 +110,7 @@ describe("registered cloud identities", () => {
 
   it("fails closed when project persistence is unavailable", async () => {
     mocks.findMany.mockRejectedValue(new Error("synthetic internal database details"));
-    const response = await createCloudProject(request(), { repositoryUrl });
+    const response = await openCloudProject(request(), repositoryUrl);
     expect(response.status).toBe(503);
     expect(await response.text()).not.toContain("internal database details");
     expect(mocks.provider).not.toHaveBeenCalled();

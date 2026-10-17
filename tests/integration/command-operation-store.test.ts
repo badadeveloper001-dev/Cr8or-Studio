@@ -37,6 +37,21 @@ describe.skipIf(!testUrl)("command coordination on isolated PostgreSQL", () => {
     commandKey: "npm run test:unit", actorId: "frontend", executionId: randomUUID(),
   });
 
+  async function unresolvedLifecycle(status: "RESERVED" | "DISPATCHED" | "UNKNOWN", observedResource = false) {
+    const sandbox = "registered-daytona-workspace";
+    await database.$executeRaw`
+      INSERT INTO "WorkspaceLifecycleOperation"
+        ("id", "sessionId", "credentialVersion", "projectId", "workspaceRecordId", "providerWorkspaceId",
+         "providerResourceId", "action", "scope", "scopeDigest", "idempotencyKey", "status", "attempts",
+         "dispatchedAt", "completedAt", "updatedAt")
+      VALUES (${randomUUID()}::uuid, 'synthetic-session', 1, 'existing-project', 'existing-workspace',
+        ${observedResource ? null : sandbox}, ${observedResource ? sandbox : null},
+        ${observedResource ? "create" : "start"}, '{}'::jsonb, ${"a".repeat(64)}, ${randomUUID()}::uuid,
+        ${status}::"WorkspaceLifecycleStatus", ${status === "RESERVED" ? 0 : 1},
+        ${status === "RESERVED" ? null : new Date()}, ${status === "UNKNOWN" ? new Date() : null}, NOW())
+    `;
+  }
+
   async function applyMigration(directory: string) {
     const sql = await readFile(path.join(process.cwd(), "prisma/migrations", directory, "migration.sql"), "utf8");
     const statements = sql.replace(/^\s*--.*$/gm, "").split(";").map((statement) => statement.trim())
@@ -79,6 +94,7 @@ describe.skipIf(!testUrl)("command coordination on isolated PostgreSQL", () => {
     await applyMigration("20261016000000_command_operations");
     await applyMigration("20261016010000_command_approvals");
     await applyMigration("20261016020000_git_operations");
+    await applyMigration("20261017000000_workspace_lifecycle");
 
     // Two independent Prisma pools and independently imported stores simulate
     // separate application instances. The database provides coordination.
@@ -90,7 +106,10 @@ describe.skipIf(!testUrl)("command coordination on isolated PostgreSQL", () => {
     globalThis.prismaGlobal = database;
   }, 30_000);
 
-  beforeEach(async () => { await database.$executeRaw`DELETE FROM "CommandOperation"`; });
+  beforeEach(async () => {
+    await database.$executeRaw`DELETE FROM "CommandOperation"`;
+    await database.$executeRaw`DELETE FROM "WorkspaceLifecycleOperation"`;
+  });
   afterEach(() => { vi.restoreAllMocks(); });
   afterAll(async () => {
     try {
@@ -139,6 +158,33 @@ describe.skipIf(!testUrl)("command coordination on isolated PostgreSQL", () => {
     await expect(Promise.all([
       store.reserveCommandOperation(input("sandbox-a")), otherStore.reserveCommandOperation(input("sandbox-b")),
     ])).resolves.toEqual([undefined, undefined]);
+  });
+
+  it.each(["RESERVED", "DISPATCHED", "UNKNOWN"] as const)("blocks commands during %s lifecycle work on the registered sandbox", async (status) => {
+    await unresolvedLifecycle(status);
+    await expect(otherStore.reserveCommandOperation(input())).rejects.toMatchObject({ status: 409 });
+    expect(await database.$queryRaw`SELECT "id" FROM "CommandOperation"`).toEqual([]);
+  });
+
+  it.each(["RESERVED", "DISPATCHED", "UNKNOWN"] as const)("blocks commands during %s lifecycle work on a newly observed resource", async (status) => {
+    await unresolvedLifecycle(status, true);
+    await expect(otherStore.reserveCommandOperation(input())).rejects.toMatchObject({ status: 409 });
+    expect(await database.$queryRaw`SELECT "id" FROM "CommandOperation"`).toEqual([]);
+  });
+
+  it("keeps an unrelated workspace available while a lifecycle outcome is unresolved", async () => {
+    await unresolvedLifecycle("UNKNOWN");
+    await expect(otherStore.reserveCommandOperation(input("unrelated-sandbox"))).resolves.toBeUndefined();
+  });
+
+  it("fails closed when the lifecycle coordination migration is unavailable", async () => {
+    await database.$executeRawUnsafe('ALTER TABLE "WorkspaceLifecycleOperation" RENAME TO "WorkspaceLifecycleUnavailable"');
+    try {
+      await expect(store.reserveCommandOperation(input())).rejects.toMatchObject({ status: 503, message: "Command coordination is unavailable." });
+      expect(await database.$queryRaw`SELECT "id" FROM "CommandOperation"`).toEqual([]);
+    } finally {
+      await database.$executeRawUnsafe('ALTER TABLE "WorkspaceLifecycleUnavailable" RENAME TO "WorkspaceLifecycleOperation"');
+    }
   });
 
   it("claims each dispatch once and rejects retry after a lost acknowledgement", async () => {
